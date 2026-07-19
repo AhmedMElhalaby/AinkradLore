@@ -23,6 +23,9 @@ targets:
     type: library.static
     platform: macOS
     sources: [Sources/LoreFeature]
+    settings:
+      base:
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/GRDB.swift/Sources/CSQLite/module.modulemap"
     dependencies:
       - package: GRDB
         product: GRDB
