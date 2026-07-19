@@ -1,0 +1,61 @@
+name: AinkradLore
+options:
+  bundleIdPrefix: com.ainkrad
+  deploymentTarget: { macOS: "14.0" }
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    EAGER_LINKING: NO
+packages:
+  AinkradAppKit:
+    url: https://github.com/AhmedMElhalaby/AinkradAppKit
+    revision: 45aee502a0719c5535e31a225f20970ae5b3c1d2
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "6.29.3"
+targets:
+  LoreFeature:
+    type: library.static
+    platform: macOS
+    sources: [Sources/LoreFeature]
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: AinkradAppKit
+        embed: false
+  LorePlugin:
+    type: bundle
+    platform: macOS
+    sources: [Sources/LorePlugin]
+    dependencies:
+      - target: LoreFeature
+      - package: GRDB
+        product: GRDB
+      - package: AinkradAppKit
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ainkrad.plugin.lore
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/LorePlugin/Info.plist
+        MACH_O_TYPE: mh_bundle
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        OTHER_LDFLAGS: ["-lLoreFeature"]
+  LoreFeatureTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests/LoreFeatureTests]
+    dependencies:
+      - target: LoreFeature
+      - package: GRDB
+        product: GRDB
+      - package: AinkradAppKit
+schemes:
+  LorePlugin:
+    build: { targets: { LorePlugin: all, LoreFeatureTests: [test] } }
+    test:  { config: Debug, targets: [LoreFeatureTests] }
