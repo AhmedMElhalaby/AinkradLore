@@ -23,7 +23,7 @@ public struct LoreApp: AinkradApp {
         AnyView(LoreRootView(store: store(for: host), theme: host.theme))
     }
     public static func makeSettingsView(host: HostServices) -> AnyView {
-        AnyView(LoreSettingsView(store: store(for: host)))
+        AnyView(LoreSettingsView(store: store(for: host), theme: host.theme))
     }
     public static func chromeFill(host: HostServices) -> Color? { host.theme.tokens.background }
 }

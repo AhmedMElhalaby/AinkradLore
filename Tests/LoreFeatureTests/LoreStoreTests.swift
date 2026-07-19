@@ -54,6 +54,42 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertTrue(s.rows.contains { $0.id == "ext" })
     }
 
+    func test_allTags_areDedupedAndSorted() throws {
+        let root = tempDir(); let s = try makeStore(root)
+        var a = try s.create(title: "A"); a.tags = ["zeta", "alpha"]; try s.save(a)
+        var b = try s.create(title: "B"); b.tags = ["alpha", "mid"]; try s.save(b)
+        XCTAssertEqual(s.allTags, ["alpha", "mid", "zeta"])
+    }
+
+    func test_defaultNoteFolder_createsInSubfolderAndPersists() throws {
+        let root = tempDir()
+        let docs = FakeDocs()
+        let idx = root.appendingPathComponent(".index.sqlite")
+        let s = LoreStore(documents: docs, indexPath: idx)
+        try s.setVaultRootForTesting(root)
+        s.setDefaultNoteFolder("inbox")
+        let note = try s.create(title: "Captured")
+        XCTAssertEqual(note.path.deletingLastPathComponent().lastPathComponent, "inbox")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: note.path.path))
+        // A fresh store sharing the same documents restores the setting.
+        let s2 = LoreStore(documents: docs, indexPath: idx)
+        XCTAssertEqual(s2.defaultNoteFolder, "inbox")
+    }
+
+    func test_rebuild_isRecursiveAndPrunesDeleted() throws {
+        let root = tempDir(); let s = try makeStore(root)
+        let sub = root.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let deep = sub.appendingPathComponent("deep.md")
+        try "---\nid: deep\ntitle: Deep\ntags: []\ncreated: 2026-07-19\nupdated: 2026-07-19\n---\nhi"
+            .write(to: deep, atomically: true, encoding: .utf8)
+        try s.rebuild()
+        XCTAssertTrue(s.rows.contains { $0.id == "deep" }, "recursive scan should find nested notes")
+        try FileManager.default.removeItem(at: deep)
+        try s.rebuild()
+        XCTAssertFalse(s.rows.contains { $0.id == "deep" }, "rebuild should prune deleted files")
+    }
+
     func test_externalChange_flagsOpenNote() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Open")

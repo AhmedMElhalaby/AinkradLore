@@ -18,6 +18,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
+        tv.insertionPointColor = NSColor(tokens.accentPrimary)
         tv.textContainerInset = NSSize(width: 16, height: 16)
         context.coordinator.textView = tv
         tv.string = text
@@ -29,6 +30,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         guard let tv = context.coordinator.textView else { return }
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
+        tv.insertionPointColor = NSColor(tokens.accentPrimary)
         context.coordinator.tokens = tokens
         context.coordinator.applyStyles()
     }

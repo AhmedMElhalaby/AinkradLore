@@ -14,18 +14,25 @@ struct LoreRootView: View {
                          onSelect: openSelected, onNew: quickCapture)
                 .frame(width: 280)
             if let note = openNote {
-                NoteEditorPane(store: store, note: note, theme: theme)
+                NoteEditorPane(store: store, note: note, theme: theme, onDelete: closeNote)
                     .id(note.id)
             } else {
-                Text("Select or ⌘N to capture")
-                    .foregroundStyle(theme.tokens.foreground.opacity(0.5))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AinkradEmptyState(
+                    icon: "book.closed",
+                    title: "No note open",
+                    message: "Select a note from the list, or press ⌘N to capture a new one.",
+                    actionTitle: "New note",
+                    action: quickCapture)
             }
         }
         .background(theme.tokens.background)
+        .environment(\.ainkradTheme, theme.tokens)
     }
 
     private func openSelected(_ row: IndexRow) { openNote = try? store.load(row) }
+
+    private func closeNote() { openNote = nil; selected = nil }
+
     private func quickCapture() {
         guard let note = try? store.create(title: "") else { return }
         openNote = note

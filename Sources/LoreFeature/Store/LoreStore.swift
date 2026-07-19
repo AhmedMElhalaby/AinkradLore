@@ -7,6 +7,9 @@ import AinkradAppKit
 public final class LoreStore {
     public private(set) var rows: [IndexRow] = []
     public private(set) var vaultRoot: URL?
+    /// Relative subfolder (under the vault root) where ⌘N quick-capture writes
+    /// new notes. Empty string == the vault root itself.
+    public private(set) var defaultNoteFolder: String = ""
 
     private let documents: PluginDocumentStore
     private let indexPath: URL
@@ -14,12 +17,41 @@ public final class LoreStore {
     private var watcher: FolderWatcher?
     private var openMTimes: [URL: Date] = [:]
 
+    private static let defaultFolderKey = "defaultNoteFolder"
+
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
         self.indexPath = indexPath
+        if let data = documents.data(forKey: Self.defaultFolderKey),
+           let folder = String(data: data, encoding: .utf8) {
+            defaultNoteFolder = folder
+        }
         if let root = VaultBookmark.resolve(from: documents) {
             try? activate(root: root)
         }
+    }
+
+    /// Every distinct tag across all indexed notes, sorted — drives the sidebar
+    /// tag-filter chips.
+    public var allTags: [String] { Array(Set(rows.flatMap(\.tags))).sorted() }
+
+    /// Immediate subdirectories of the vault root (dotfiles excluded) — the
+    /// choices offered for `defaultNoteFolder` in Settings.
+    public var subfolders: [String] {
+        guard let root = vaultRoot else { return [] }
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        return urls
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map(\.lastPathComponent)
+            .filter { !$0.hasPrefix(".") }
+            .sorted()
+    }
+
+    /// Persist the default new-note subfolder (relative to the vault root).
+    public func setDefaultNoteFolder(_ relative: String) {
+        defaultNoteFolder = relative
+        documents.setData(relative.data(using: .utf8), forKey: Self.defaultFolderKey)
     }
 
     public func setVaultRoot(_ url: URL) throws {
@@ -39,11 +71,18 @@ public final class LoreStore {
 
     public func rebuild() throws {
         guard let root = vaultRoot, let index else { return }
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        for url in files where url.pathExtension == "md" {
+        var seen = Set<String>()
+        let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey])
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension == "md" else { continue }
             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             try index.upsert(Frontmatter.parse(text, path: url))
+            seen.insert(url.path)
+        }
+        // Prune index rows whose backing file no longer exists on disk.
+        for row in try index.all() where !seen.contains(row.path.path) {
+            try index.remove(path: row.path)
         }
         rows = try index.all()
     }
@@ -60,7 +99,10 @@ public final class LoreStore {
         guard let root = vaultRoot, let index else { throw LoreError.noVault }
         let slug = title.isEmpty ? "untitled" : title.lowercased()
             .replacingOccurrences(of: " ", with: "-")
-        let url = uniqueURL(in: root, slug: slug)
+        let dir = defaultNoteFolder.isEmpty
+            ? root : root.appendingPathComponent(defaultNoteFolder, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = uniqueURL(in: dir, slug: slug)
         let now = Date()
         let note = Note(path: url, id: UUID().uuidString, title: title, tags: [],
                         created: now, updated: now, body: "")
