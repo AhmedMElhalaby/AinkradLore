@@ -14,7 +14,7 @@ settings:
 packages:
   AinkradAppKit:
     url: https://github.com/AhmedMElhalaby/AinkradAppKit
-    revision: 45aee502a0719c5535e31a225f20970ae5b3c1d2
+    revision: bbad66a43c414d0e9c22e193ba3d326fb5d23532
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
