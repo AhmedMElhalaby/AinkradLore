@@ -10,7 +10,7 @@
     <key>AinkradAppID</key><string>lore</string>
     <key>AinkradDisplayName</key><string>Lore</string>
     <key>AinkradIconSymbol</key><string>book.closed</string>
-    <key>AinkradAPIVersion</key><integer>6</integer>
+    <key>AinkradAPIVersion</key><integer>7</integer>
     <key>AinkradPresentation</key><string>pane</string>
 </dict>
 </plist>
