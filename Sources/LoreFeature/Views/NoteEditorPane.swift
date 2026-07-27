@@ -9,6 +9,12 @@ struct NoteEditorPane: View {
     @State private var showReload = false
     @State private var showDelete = false
     @State private var saveTask: Task<Void, Never>?
+    /// Set when `loadFromDisk` runs, so dismissing the conflict prompt can tell
+    /// "the user took the disk version" from "the user dismissed it, meaning
+    /// keep mine". Without this a declined prompt would leave the editor
+    /// unable to save at all — every autosave would keep hitting the same
+    /// conflict and the user's typing would never reach disk.
+    @State private var resolvedByReloading = false
 
     init(store: LoreStore, note: Note, theme: HostTheme, onDelete: @escaping () -> Void) {
         self.store = store
@@ -36,15 +42,29 @@ struct NoteEditorPane: View {
         .ainkradConfirmDialog(
             isPresented: $showReload,
             title: "Note changed on disk",
-            message: "This note was edited outside Lore. Load the version from disk? Unsaved changes here will be lost.",
+            message: "This note was edited outside Lore. Load the version from disk and discard your edits here, "
+                + "or dismiss to keep your version and overwrite the file.",
             confirmTitle: "Load from disk",
-            isDestructive: true) { loadFromDisk() }
+            isDestructive: true) { resolvedByReloading = true; loadFromDisk() }
+        .onChange(of: showReload) { wasShowing, isShowing in
+            // Dismissed without loading == "keep mine". Resolve the conflict by
+            // saving over the file, so the editor isn't left permanently unable
+            // to persist anything.
+            guard wasShowing, !isShowing else { return }
+            if resolvedByReloading { resolvedByReloading = false } else { forceSave() }
+        }
         .ainkradConfirmDialog(
             isPresented: $showDelete,
             title: "Delete note",
             message: "Delete “\(note.title.isEmpty ? "Untitled" : note.title)”? This removes the file from disk.",
             confirmTitle: "Delete",
             isDestructive: true) { deleteNote() }
+    }
+
+    /// Deliberate overwrite after the user chose to keep their version.
+    private func forceSave() {
+        saveTask?.cancel()
+        try? store.save(note, overwritingExternalChanges: true)
     }
 
     private func loadFromDisk() {
@@ -65,7 +85,19 @@ struct NoteEditorPane: View {
         saveTask = Task {
             if !immediate { try? await Task.sleep(nanoseconds: 500_000_000) }
             guard !Task.isCancelled else { return }
-            try? store.save(note)
+            do {
+                try store.save(note)
+            } catch LoreError.externalChange {
+                // The file changed underneath us. Previously `try?` swallowed
+                // this and the autosave clobbered the external edit; now the
+                // user gets the same reload prompt they'd get on app
+                // re-activation, and their in-editor text is left intact until
+                // they choose.
+                showReload = true
+            } catch {
+                // Nothing else is recoverable here; keep the editor's text and
+                // let the next keystroke retry rather than dropping the note.
+            }
         }
     }
 }

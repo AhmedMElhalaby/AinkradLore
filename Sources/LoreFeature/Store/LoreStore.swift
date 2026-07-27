@@ -16,8 +16,20 @@ public final class LoreStore {
     private var index: LoreIndex?
     private var watcher: FolderWatcher?
     private var openMTimes: [URL: Date] = [:]
+    /// While `Date() < suppressWatcherUntil`, `FolderWatcher` callbacks are
+    /// ignored — see `save(_:overwritingExternalChanges:)`.
+    private var suppressWatcherUntil: Date = .distantPast
+    /// A background rescan is in flight.
+    private var isRebuilding = false
+    /// A vault change arrived while a rescan was running — run once more after.
+    private var rebuildRequestedAgain = false
 
     private static let defaultFolderKey = "defaultNoteFolder"
+    /// How long after our own write a watcher event is treated as the echo of
+    /// that write. Generous enough to cover FSEvents' coalescing latency,
+    /// short enough that a genuine external edit arriving right after a save
+    /// is still picked up on the next event.
+    private static let selfWriteSuppressionWindow: TimeInterval = 1.0
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -65,25 +77,95 @@ public final class LoreStore {
     private func activate(root: URL) throws {
         vaultRoot = root
         index = try LoreIndex(path: indexPath)
-        try rebuild()
-        watcher = FolderWatcher(url: root) { [weak self] in try? self?.rebuild() }
+        // Paint immediately from whatever the index already holds — a reopen
+        // then shows the vault instantly — and refresh from disk in the
+        // background. Crucially NOT a synchronous `rebuild()`: `activate` runs
+        // from `LoreStore.init`, which the host calls from `LoreApp.store(for:)`
+        // inside `makeRootView` — i.e. inside a SwiftUI `body` evaluation. A
+        // whole-vault scan there froze the UI on first open, for as long as the
+        // user's vault was large.
+        rows = (try? index?.all()) ?? []
+        startBackgroundRebuild()
+        watcher = FolderWatcher(url: root) { [weak self] in self?.handleVaultChange() }
     }
 
-    public func rebuild() throws {
+    /// Releases everything this store owns: the vault watcher, any in-flight
+    /// rescan, and the SQLite index (and with it its file descriptor).
+    ///
+    /// Called from `LoreApp.teardown` when the host closes this instance. Until
+    /// generation 8 there was no way for the host to say that, so all of this
+    /// leaked for the lifetime of the process every time Lore was removed.
+    public func shutdown() {
+        watcher = nil
+        rebuildRequestedAgain = false
+        index = nil
+        rows = []
+        vaultRoot = nil
+    }
+
+    /// Watcher entry point. Drops the echo of our own writes so a save doesn't
+    /// trigger a full-vault rescan of a vault we just updated in place.
+    func handleVaultChange() {
+        guard Date() >= suppressWatcherUntil else { return }
+        startBackgroundRebuild()
+    }
+
+    /// Kicks off an off-actor rescan, coalescing with one already in flight.
+    ///
+    /// FSEvents delivers bursts (a `git checkout` in the vault is hundreds of
+    /// events), and each used to start its own full synchronous rescan on the
+    /// main actor. Now at most one runs at a time, off the main actor, and a
+    /// burst arriving during one schedules exactly one follow-up.
+    func startBackgroundRebuild() {
+        guard !isRebuilding else { rebuildRequestedAgain = true; return }
+        isRebuilding = true
+        Task { [weak self] in
+            await self?.performBackgroundRebuild()
+        }
+    }
+
+    private func performBackgroundRebuild() async {
+        defer {
+            isRebuilding = false
+            if rebuildRequestedAgain {
+                rebuildRequestedAgain = false
+                startBackgroundRebuild()
+            }
+        }
         guard let root = vaultRoot, let index else { return }
-        var seen = Set<String>()
+        // Walk, read and parse every note off the main actor, then apply the
+        // whole result in one transaction. `LoreIndex` is Sendable (it holds
+        // only a GRDB `DatabaseQueue`, which serializes its own access).
+        let refreshed: [IndexRow]? = await Task.detached(priority: .utility) { () -> [IndexRow]? in
+            let notes = Self.scanVault(at: root)
+            do {
+                try index.replaceAll(with: notes)
+                return try index.all()
+            } catch {
+                return nil
+            }
+        }.value
+        if let refreshed { rows = refreshed }
+    }
+
+    /// Pure, off-actor: every `.md` under `root`, parsed. No index access.
+    nonisolated static func scanVault(at root: URL) -> [Note] {
+        var notes: [Note] = []
         let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey])
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "md" else { continue }
             let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            try index.upsert(Frontmatter.parse(text, path: url))
-            seen.insert(url.path)
+            notes.append(Frontmatter.parse(text, path: url))
         }
-        // Prune index rows whose backing file no longer exists on disk.
-        for row in try index.all() where !seen.contains(row.path.path) {
-            try index.remove(path: row.path)
-        }
+        return notes
+    }
+
+    /// Synchronous rescan. Kept for tests and for callers that must observe the
+    /// result immediately; production paths use `startBackgroundRebuild`.
+    public func rebuild() throws {
+        guard let root = vaultRoot, let index else { return }
+        try index.replaceAll(with: Self.scanVault(at: root))
         rows = try index.all()
     }
 
@@ -113,9 +195,33 @@ public final class LoreStore {
         return note
     }
 
-    public func save(_ note: Note) throws {
+    /// Writes `note` back to its file.
+    ///
+    /// Refuses when the file changed on disk since it was loaded, unless
+    /// `overwritingExternalChanges` is set. `externalChangeDetected(for:)`
+    /// already existed and was already correct — `save` simply never consulted
+    /// it. So an edit made in Obsidian (or by the agent's `edit_file`, or by a
+    /// sync client) while a note sat open in Lore's editor was destroyed by the
+    /// editor's next 500ms autosave: silently, with no diff and no undo. That
+    /// is a note-taking app losing notes.
+    ///
+    /// Detection is mtime-based and therefore best-effort — a write inside the
+    /// filesystem's timestamp granularity can still slip through. A much
+    /// smaller hole than not checking at all.
+    public func save(_ note: Note, overwritingExternalChanges: Bool = false) throws {
         guard let index else { throw LoreError.noVault }
+        if !overwritingExternalChanges, externalChangeDetected(for: note) {
+            throw LoreError.externalChange(note.path)
+        }
         var updated = note; updated.updated = Date()
+
+        // Suppress the watcher across our own write. Saving fires
+        // `FolderWatcher`, whose handler is a FULL `rebuild()` — re-reading and
+        // re-indexing every markdown file in the vault, on the main actor, in
+        // response to our own single-file write. On a large vault every
+        // autosave stalled the editor mid-keystroke.
+        suppressWatcherUntil = Date().addingTimeInterval(Self.selfWriteSuppressionWindow)
+
         try Frontmatter.serialize(updated).write(to: note.path, atomically: true, encoding: .utf8)
         try index.upsert(updated)
         rows = try index.all()
@@ -154,4 +260,10 @@ public final class LoreStore {
     }
 }
 
-public enum LoreError: Error { case noVault }
+public enum LoreError: Error, Equatable {
+    case noVault
+    /// The note's file changed on disk since it was loaded. Saving would
+    /// discard those changes, so the caller must decide: reload, or overwrite
+    /// via `save(_:overwritingExternalChanges: true)`.
+    case externalChange(URL)
+}

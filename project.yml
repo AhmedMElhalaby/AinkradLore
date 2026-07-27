@@ -14,7 +14,7 @@ settings:
 packages:
   AinkradAppKit:
     url: https://github.com/AhmedMElhalaby/AinkradAppKit
-    revision: bbad66a43c414d0e9c22e193ba3d326fb5d23532
+    revision: e68f8365785c68b7a98b19d86b521f1d358afe00
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
@@ -35,6 +35,11 @@ targets:
     type: bundle
     platform: macOS
     sources: [Sources/LorePlugin]
+    postBuildScripts:
+      # Generate AinkradAPIVersion from the SDK this build linked,
+      # rather than trusting the hand-typed Info.plist value.
+      - script: '"$SRCROOT/scripts/stamp-api-version.sh"'
+        name: Stamp AinkradAPIVersion
     dependencies:
       - target: LoreFeature
       - package: GRDB
