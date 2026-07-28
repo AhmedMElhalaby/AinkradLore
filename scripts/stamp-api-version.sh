@@ -21,7 +21,17 @@
 set -euo pipefail
 
 PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
-[[ -f "$PLIST" ]] || { echo "warning: no Info.plist at $PLIST — skipping API-version stamp"; exit 0; }
+if [[ ! -f "$PLIST" ]]; then
+  # Never a warning. A skipped stamp leaves the stale hand-typed value in the
+  # bundle, the host then refuses to load the plugin, and nothing says why —
+  # the exact invisible failure this script exists to prevent. It has already
+  # cost a debugging session once.
+  echo "error: no Info.plist at $PLIST — refusing to ship an unverified AinkradAPIVersion" >&2
+  echo "note: the script phase must run AFTER the Info.plist is copied into the bundle." >&2
+  echo "note: check that project.yml declares inputFiles: [\$(TARGET_BUILD_DIR)/\$(INFOPLIST_PATH)]" >&2
+  echo "note: on this phase, and that INFOPLIST_FILE / TARGET_BUILD_DIR are set for the target." >&2
+  exit 1
+fi
 
 # Locate the SDK source. Two shapes, because both are real:
 #   • revision-pinned  -> SwiftPM checkout beside the build products
