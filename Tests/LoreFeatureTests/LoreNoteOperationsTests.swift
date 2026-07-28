@@ -191,6 +191,38 @@ struct LoreNoteOperationsTests {
         #expect(outcome.text.contains("title"))
     }
 
+    /// `create_note` is ungated, so a title reaching it may have come from a
+    /// model that read untrusted content. Each of these titles would otherwise
+    /// slug straight into a path component. The assertion is on the OUTCOME:
+    /// nothing may appear anywhere outside the vault root.
+    @Test func createRejectsTitlesThatEscapeTheVault() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The sibling directory `../../escape` and friends would land in.
+        let outside = root.deletingLastPathComponent()
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])
+
+        for title in ["../../escape", "a/b", "..", ".hidden", "./x"] {
+            let outcome = await run(operations, ["operation": "create", "title": title])
+            #expect(outcome.isError, "\"\(title)\" was accepted")
+            #expect(store.rows.isEmpty, "\"\(title)\" created an indexed note")
+        }
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])
+        #expect(after.subtracting(before).isEmpty, "a file was written outside the vault")
+        // And every note file that does exist is inside the vault root.
+        #expect(LoreStore.scanVault(at: root).isEmpty)
+    }
+
+    @Test func createStillAcceptsAnOrdinaryTitle() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outcome = await run(operations, ["operation": "create", "title": "My Note"])
+        #expect(outcome.isError == false)
+        let row = try #require(store.rows.first { $0.title == "My Note" })
+        #expect(row.path.lastPathComponent == "my-note.md")
+        #expect(row.path.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/"))
+    }
+
     /// The reason `save_note` can be classified non-destructive: an omitted
     /// field is left alone, so a call that only adds a tag cannot blank a body
     /// the model never read.

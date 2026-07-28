@@ -134,6 +134,7 @@ struct LoreNoteOperations {
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failure("create_note requires a non-empty \"title\".")
         }
+        if let rejection = filenameRejection(for: title) { return .failure(rejection) }
         var note = try store.create(title: title)
         // `create` writes an empty note, so fold any body/tags in with one
         // follow-up save rather than making the model call save_note itself.
@@ -174,6 +175,59 @@ struct LoreNoteOperations {
     }
 
     // MARK: - helpers
+
+    /// The filename slug `LoreStore.create` will derive from `title`.
+    ///
+    /// Duplicated from the store on purpose: this check must know the exact
+    /// path the store is ABOUT to write, and it must run BEFORE the write —
+    /// checking afterwards would mean the escape already happened. Kept next to
+    /// the boundary rather than changing `create`'s behaviour for the app's own
+    /// UI, where the title comes from the person at the keyboard. If the
+    /// store's slug rule ever changes, this must change with it.
+    private static func slug(for title: String) -> String {
+        title.isEmpty ? "untitled" : title.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
+    /// Nil when `title` yields a filename that lands inside the vault; an
+    /// actionable message otherwise.
+    ///
+    /// The MCP layer is a new trust boundary: a title here can come from a
+    /// model that read untrusted content, and `create_note` is ungated
+    /// (`destructive: false`). Unsanitised, `../../escape` would resolve
+    /// outside the vault root, making the tool a primitive for writing an
+    /// attacker-chosen file at an attacker-chosen path — and a note written
+    /// outside the vault is also indexed and then vanishes on the next
+    /// `rebuild()` (which scans only the vault), leaving the assistant holding
+    /// an id that no longer resolves.
+    ///
+    /// The check is on the OUTCOME, not on a character blocklist: build the URL
+    /// the store would build, standardize it (which collapses `..` lexically),
+    /// and require that it sits DIRECTLY in the intended note folder — the
+    /// parent must be the folder itself, so `a/b` (still inside the vault, but
+    /// not where the caller was told the note goes) is rejected too. Rejecting
+    /// rather than silently mangling, so the model can retry with a sane title.
+    private func filenameRejection(for title: String) -> String? {
+        guard let root = store.vaultRoot else { return nil }  // `run` already refused.
+        let dir = store.defaultNoteFolder.isEmpty
+            ? root : root.appendingPathComponent(store.defaultNoteFolder, isDirectory: true)
+        let slug = Self.slug(for: title)
+        // A leading dot is rejected up front: `.hidden` stays inside the vault,
+        // so the containment check cannot catch it, but it writes a file the
+        // user cannot see in Finder and that Obsidian ignores.
+        guard !slug.hasPrefix(".") else {
+            return "create_note refused the title \"\(title)\": a note name cannot start with "
+                + "a dot. Retry with a plain title."
+        }
+        let candidate = dir.appendingPathComponent("\(slug).md").standardizedFileURL
+        let folder = dir.standardizedFileURL.path
+        guard candidate.deletingLastPathComponent().path == folder,
+              candidate.path.hasPrefix(folder + "/") else {
+            return "create_note refused the title \"\(title)\": it would write outside the "
+                + "vault's note folder. Retry with a title that has no slashes or \"..\" "
+                + "path components."
+        }
+        return nil
+    }
 
     /// Resolves the `note` argument to an indexed row. Accepts the frontmatter
     /// id (what `search_notes` reports) or an absolute file path, because the
