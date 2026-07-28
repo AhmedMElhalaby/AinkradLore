@@ -1,0 +1,242 @@
+import Foundation
+import AinkradAppKit
+
+/// The sink behind Lore's MCP tools: decodes one `{"operation": ..., ...}`
+/// payload and drives the `LoreStore` that the on-screen instance is using.
+///
+/// Deliberately the SAME store the UI holds (see `LoreApp.mcpServer(for:)`), so
+/// a note the assistant writes appears in the sidebar immediately and the
+/// external-change bookkeeping is shared rather than duplicated.
+///
+/// ## Why this does not go through `LoreStore.load`
+///
+/// `load(_:)` is the app's read API, but it has a WRITE side effect: it records
+/// the file's modification date in `openMTimes`, which is the baseline
+/// `externalChangeDetected(for:)` compares against. Calling it from here would
+/// tell the store "the newest on-disk version has been seen" on behalf of an
+/// editor that has not seen it — so an agent read of a note that is open in
+/// Lore's editor with a stale buffer would silently disarm the guard that stops
+/// the editor's next autosave destroying an outside edit. That is precisely the
+/// note-losing bug `save(_:overwritingExternalChanges:)` exists to prevent, and
+/// re-introducing it through a tool advertised as `readOnly` would be worse than
+/// the original.
+///
+/// So both `read` and `save` parse the file with `Frontmatter.parse` directly.
+/// They observe the mtime bookkeeping; they never move it.
+@MainActor
+struct LoreNoteOperations {
+    let store: LoreStore
+
+    /// What every tool says when Lore has no vault yet.
+    ///
+    /// This is the fresh-install state — `LoreStore.init` only activates a
+    /// vault if a security-scoped bookmark resolves — and the assistant WILL
+    /// hit it. Choosing a folder requires a real file-picker grant, so no tool
+    /// can fix it; the only useful answer is to say plainly what is missing and
+    /// who can supply it. Every operation checks this before touching anything,
+    /// rather than each one failing differently: without a vault, `search`
+    /// silently returns nothing, `create`/`save`/`delete` throw
+    /// `LoreError.noVault`, and `allTags`/`subfolders` return empty arrays —
+    /// three different confusing answers to one question.
+    static let noVaultMessage =
+        "Lore has no vault configured, so there are no notes to work with. "
+        + "Open the Lore app and choose a vault folder in its settings "
+        + "(this needs a folder-picker grant, so it cannot be done from here)."
+
+    /// Backs the `lore://vault` resource: where the vault is and how big it is,
+    /// or the same actionable not-configured message the tools give.
+    func vaultSummary() -> String {
+        guard let root = store.vaultRoot else { return Self.noVaultMessage }
+        return """
+            vault: \(root.path)
+            notes: \(store.rows.count)
+            tags: \(store.allTags.count)
+            new notes are created in: \(store.defaultNoteFolder.isEmpty ? "(the vault root)" : store.defaultNoteFolder)
+            """
+    }
+
+    func run(_ json: String) async -> AgentActionResult {
+        guard let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let operation = object["operation"] as? String else {
+            return .failure("Lore: malformed request")
+        }
+        guard store.vaultRoot != nil else { return .failure(Self.noVaultMessage) }
+
+        do {
+            switch operation {
+            case "search":     return searchNotes(object)
+            case "read":       return try readNote(object)
+            case "listTags":   return listTags()
+            case "listFolders": return listFolders()
+            case "create":     return try createNote(object)
+            case "save":       return try saveNote(object)
+            case "delete":     return try deleteNote(object)
+            default:           return .failure("Lore: unknown operation \"\(operation)\"")
+            }
+        } catch let error as LoreError {
+            return .failure(describe(error))
+        } catch let OperationError.message(text) {
+            return .failure(text)
+        } catch {
+            return .failure("Lore: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - read
+
+    private func searchNotes(_ object: [String: Any]) -> AgentActionResult {
+        let query = (object["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let limit = max(1, (object["limit"] as? Int) ?? 25)
+        // An empty query is a browse, not a search: the FTS index has nothing
+        // to match on, so answer from the already-loaded rows, newest first.
+        let rows = query.isEmpty
+            ? store.rows.sorted { $0.updated > $1.updated }
+            : store.search(query)
+        guard !rows.isEmpty else {
+            return .success(query.isEmpty ? "The vault has no notes yet." : "No notes match \"\(query)\".")
+        }
+        let listed = rows.prefix(limit).map(describe(row:))
+        let more = rows.count > limit ? "\n(\(rows.count - limit) more not shown)" : ""
+        return .success(listed.joined(separator: "\n") + more)
+    }
+
+    private func readNote(_ object: [String: Any]) throws -> AgentActionResult {
+        let row = try resolve(object)
+        let note = try parse(row)
+        let tags = note.tags.isEmpty ? "(none)" : note.tags.joined(separator: ", ")
+        return .success("""
+            id: \(note.id)
+            title: \(note.title)
+            tags: \(tags)
+            path: \(relative(note.path))
+
+            \(note.body)
+            """)
+    }
+
+    private func listTags() -> AgentActionResult {
+        let tags = store.allTags
+        return .success(tags.isEmpty ? "The vault has no tags." : tags.joined(separator: "\n"))
+    }
+
+    private func listFolders() -> AgentActionResult {
+        let folders = store.subfolders
+        return .success(folders.isEmpty
+            ? "The vault root has no subfolders."
+            : folders.joined(separator: "\n"))
+    }
+
+    // MARK: - write
+
+    private func createNote(_ object: [String: Any]) throws -> AgentActionResult {
+        guard let title = object["title"] as? String,
+              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure("create_note requires a non-empty \"title\".")
+        }
+        var note = try store.create(title: title)
+        // `create` writes an empty note, so fold any body/tags in with one
+        // follow-up save rather than making the model call save_note itself.
+        // No external change is possible in between: `create` just wrote the
+        // file and recorded its mtime.
+        if let body = object["body"] as? String { note.body = body }
+        if let tags = stringList(object["tags"]) { note.tags = tags }
+        if object["body"] != nil || object["tags"] != nil { try store.save(note) }
+        return .success("Created \"\(note.title)\" (id \(note.id)) at \(relative(note.path)).")
+    }
+
+    private func saveNote(_ object: [String: Any]) throws -> AgentActionResult {
+        let row = try resolve(object)
+        // PATCH, not replace. Start from what is on disk right now and apply
+        // only the fields the caller actually sent, so a call that means "add a
+        // tag" cannot blank a body the model never saw. Parsed directly rather
+        // than via `store.load` — see this type's doc comment.
+        var note = try parse(row)
+        if let title = object["title"] as? String { note.title = title }
+        if let body = object["body"] as? String { note.body = body }
+        if let tags = stringList(object["tags"]) { note.tags = tags }
+
+        // THE SINK the `save_note` / `save_note_overwriting` guard mirrors.
+        // `as? Bool` here is the exact coercion `LoreMCPServer`'s
+        // `GuardRule("overwritingExternalChanges", .bool(true))` assumes. If
+        // this line is ever loosened — a string parse, a "yes" alias — that
+        // rule must widen in the same commit, or `save_note` becomes an ungated
+        // overwrite of edits made outside Ainkrad.
+        let overwriting = (object["overwritingExternalChanges"] as? Bool) ?? false
+        try store.save(note, overwritingExternalChanges: overwriting)
+        return .success("Saved \"\(note.title)\" (id \(note.id)).")
+    }
+
+    private func deleteNote(_ object: [String: Any]) throws -> AgentActionResult {
+        let row = try resolve(object)
+        try store.delete(row)
+        return .success("Deleted \"\(row.title)\" (\(relative(row.path))).")
+    }
+
+    // MARK: - helpers
+
+    /// Resolves the `note` argument to an indexed row. Accepts the frontmatter
+    /// id (what `search_notes` reports) or an absolute file path, because the
+    /// assistant frequently already holds a path from the filesystem tools.
+    private func resolve(_ object: [String: Any]) throws -> IndexRow {
+        guard let identifier = object["note"] as? String, !identifier.isEmpty else {
+            throw OperationError.message("This tool requires a \"note\" (an id or an absolute path).")
+        }
+        if let row = store.rows.first(where: { $0.id == identifier }) { return row }
+        if let row = store.rows.first(where: { $0.path.path == identifier }) { return row }
+        throw OperationError.message(
+            "No note in the vault has id or path \"\(identifier)\". "
+            + "Use search_notes to find the note's id.")
+    }
+
+    private func parse(_ row: IndexRow) throws -> Note {
+        let text = try String(contentsOf: row.path, encoding: .utf8)
+        return Frontmatter.parse(text, path: row.path)
+    }
+
+    /// Only accepts a genuine array of strings. A bare string is NOT coerced to
+    /// a one-element list: `tags: "a, b"` almost certainly means two tags, and
+    /// guessing which would silently mangle the note's metadata.
+    private func stringList(_ any: Any?) -> [String]? {
+        guard let array = any as? [Any] else { return nil }
+        return array.compactMap { $0 as? String }
+    }
+
+    private func describe(row: IndexRow) -> String {
+        let tags = row.tags.isEmpty ? "" : "  [\(row.tags.joined(separator: ", "))]"
+        return "\(row.id)  \(row.title)\(tags)  —  \(relative(row.path))"
+    }
+
+    /// Vault-relative where possible: an absolute path leaks the user's home
+    /// directory into the transcript for no benefit.
+    private func relative(_ url: URL) -> String {
+        guard let root = store.vaultRoot?.standardizedFileURL.path else { return url.path }
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(root + "/") else { return path }
+        return String(path.dropFirst(root.count + 1))
+    }
+
+    private func describe(_ error: LoreError) -> String {
+        switch error {
+        case .noVault:
+            return Self.noVaultMessage
+        case .externalChange(let url):
+            // The one error whose recovery is a DIFFERENT tool, so name it.
+            return "\(relative(url)) was changed outside Ainkrad since Lore last read it. "
+                + "Saving now would discard those changes. Use read_note to see the current "
+                + "contents and re-apply your edit, or call save_note_overwriting to discard "
+                + "them deliberately (that needs approval and cannot be undone)."
+        }
+    }
+
+    /// A message-only failure for argument problems, so `run`'s single catch
+    /// can format everything.
+    private enum OperationError: Error {
+        case message(String)
+    }
+}
+
+private extension AgentActionResult {
+    static func success(_ text: String) -> AgentActionResult { .init(text: text, isError: false) }
+    static func failure(_ text: String) -> AgentActionResult { .init(text: text, isError: true) }
+}
