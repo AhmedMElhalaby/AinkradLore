@@ -43,6 +43,29 @@ public struct LoreApp: AinkradApp {
         }
     }
 
+    /// The per-host MCP server, created once and cached — the same shape as
+    /// `stores`, keyed by the same instance id, because the server MUST drive
+    /// the store the window is showing. Building a fresh store per call would
+    /// hand the assistant a detached second SQLite connection with its own
+    /// external-change bookkeeping, and nothing it wrote would appear in the UI.
+    @MainActor private static let mcpServers = PluginInstanceStorage<MCPAppServer>()
+
+    @MainActor static func mcpServer(for host: HostServices) -> MCPAppServer {
+        mcpServers.value(for: instance(of: host)) {
+            let operations = LoreNoteOperations(store: store(for: host))
+            let (server, failures) = LoreMCPServer.make(
+                appID: id,
+                perform: { json in await operations.run(json) },
+                vaultSummary: { operations.vaultSummary() })
+            // A dropped tool is a silently missing capability — say so rather
+            // than let the assistant just never see it.
+            if !failures.isEmpty {
+                host.log.error("Lore MCP: tools rejected — \(failures.joined(separator: ", "))")
+            }
+            return server
+        }
+    }
+
     public static func makeRootView(host: HostServices) -> AnyView {
         AnyView(LoreRootView(store: store(for: host), theme: host.theme))
     }
@@ -52,6 +75,16 @@ public struct LoreApp: AinkradApp {
     public static func chromeFill(host: HostServices) -> Color? { host.theme.tokens.background }
 }
 
+/// Publishes Lore's note operations to the host assistant as MCP tools.
+/// Cached per host by `mcpServer(for:)`, so the assistant and the UI share one
+/// store — and therefore one index, one vault watcher, and one view of which
+/// notes have changed on disk.
+extension LoreApp: AinkradAppMCP {
+    public static func makeMCPServer(host: HostServices) -> MCPAppServer {
+        mcpServer(for: host)
+    }
+}
+
 /// Generation 8: release this instance's resources when the host closes it.
 /// Lore holds the heaviest of any plugin — an open SQLite database, its file
 /// descriptor, and an FSEvents vault watcher — all of which used to outlive the
@@ -59,5 +92,10 @@ public struct LoreApp: AinkradApp {
 extension LoreApp: AinkradAppTeardown {
     public static func teardown(instance: PluginInstanceID) {
         stores.remove(instance)?.shutdown()
+        // The MCP server captures the store (and so its SQLite handle) in every
+        // tool closure — leaving it registered would keep a shut-down store
+        // alive for the rest of the process and let the assistant keep calling
+        // into a vault-less instance.
+        mcpServers.remove(instance)
     }
 }
