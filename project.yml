@@ -14,7 +14,7 @@ settings:
 packages:
   AinkradAppKit:
     url: https://github.com/AhmedMElhalaby/AinkradAppKit
-    revision: dd96b2daf1cd528cf4c8b77cccffbed3fb066fb3
+    revision: d5d994bdd8e79d530410a1c370657fa593fa4ce6
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
@@ -40,6 +40,14 @@ targets:
       # rather than trusting the hand-typed Info.plist value.
       - script: '"$SRCROOT/scripts/stamp-api-version.sh"'
         name: Stamp AinkradAPIVersion
+        # The plist is an INPUT, not an output: declaring it makes the build
+        # system order this phase after the task that copies it into the
+        # bundle. Without it the script races that copy and finds nothing.
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        # No outputs, so keep it running every build: the linked SDK revision
+        # can change generation without any source file changing.
+        basedOnDependencyAnalysis: false
     dependencies:
       - target: LoreFeature
       - package: GRDB
