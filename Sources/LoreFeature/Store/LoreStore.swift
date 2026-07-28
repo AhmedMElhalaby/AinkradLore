@@ -110,6 +110,16 @@ public final class LoreStore {
         startBackgroundRebuild()
     }
 
+    /// Test seam: wait until no background rescan is in flight.
+    ///
+    /// `activate` kicks one off, and `async` tests suspend often enough for its
+    /// `replaceAll` to land in the middle of one — wiping notes the test had
+    /// already created. Synchronous `XCTest` cases never yielded, so this only
+    /// became necessary with the `async` swift-testing suites.
+    func settleForTesting() async {
+        while isRebuilding { await Task.yield() }
+    }
+
     /// Kicks off an off-actor rescan, coalescing with one already in flight.
     ///
     /// FSEvents delivers bursts (a `git checkout` in the vault is hundreds of
