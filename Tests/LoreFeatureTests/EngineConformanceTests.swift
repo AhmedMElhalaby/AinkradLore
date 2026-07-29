@@ -195,6 +195,25 @@ final class EngineConformanceTests: XCTestCase {
     func test_registryHasAtLeastTwoEngines() {
         XCTAssertGreaterThanOrEqual(EngineRegistry.engines.count, 2)
     }
+
+    func test_markdownIndexPayloadCarriesLinksAndAliases() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-links-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("n.md")
+        try """
+        ---
+        id: a
+        title: T
+        aliases: [Alt]
+        ---
+        see [[Other]] and ![[Pic]]
+        """.write(to: url, atomically: true, encoding: .utf8)
+        let engine = try MarkdownEngine.load(url)
+        XCTAssertEqual(engine.indexPayload.links.map(\.rawTarget), ["Other", "Pic"])
+        XCTAssertEqual(engine.indexPayload.links.last?.isEmbed, true)
+        XCTAssertEqual(engine.indexPayload.aliases, ["Alt"])
+    }
 }
 
 /// PlainTextEngine's lossy-decode / refuse-to-save contract. A lossily-decoded

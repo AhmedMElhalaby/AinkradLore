@@ -25,15 +25,18 @@ public struct IndexPayload: Sendable {
     public var tags: [String]
     public var properties: [FrontmatterPair]
     public var outline: [OutlineEntry]
-    /// Outbound link targets. Always empty in M0; M1 populates it.
-    public var links: [String]
+    /// Outbound links, in document order. Populated by M1.
+    public var links: [DocumentLink]
+    /// Alternate names this document answers to, from frontmatter `aliases`.
+    public var aliases: [String]
 
     public init(title: String, plaintext: String, tags: [String] = [],
                 properties: [FrontmatterPair] = [], outline: [OutlineEntry] = [],
-                links: [String] = [], id: String? = nil) {
+                links: [DocumentLink] = [], aliases: [String] = [], id: String? = nil) {
         self.id = id
         self.title = title; self.plaintext = plaintext; self.tags = tags
         self.properties = properties; self.outline = outline; self.links = links
+        self.aliases = aliases
     }
 }
 

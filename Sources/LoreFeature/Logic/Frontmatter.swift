@@ -54,6 +54,7 @@ public enum Frontmatter {
             id: scalar("id") ?? UUID().uuidString,
             title: scalar("title") ?? deriveTitle(body, path: path),
             tags: entry("tags").map(list(of:)) ?? [],
+            aliases: entry("aliases").map(list(of:)) ?? [],
             created: entry("created").flatMap { date(from: $0.inlineValue)?.date } ?? now,
             updated: entry("updated").flatMap { date(from: $0.inlineValue)?.date } ?? now,
             body: body,
@@ -471,7 +472,7 @@ public enum Frontmatter {
         let now = Date()
         let text = layout.strippedText
         return Note(path: path, id: UUID().uuidString, title: deriveTitle(text, path: path),
-                    tags: [], created: now, updated: now, body: text, extra: [],
+                    tags: [], aliases: [], created: now, updated: now, body: text, extra: [],
                     rawFrontmatter: nil, lineEnding: layout.ending, hasByteOrderMark: layout.bom)
     }
 

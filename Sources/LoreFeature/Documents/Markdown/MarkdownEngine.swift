@@ -33,6 +33,8 @@ public final class MarkdownEngine: DocumentEngine {
                      tags: note.tags,
                      properties: note.extra,
                      outline: Self.outline(of: note.body),
+                     links: LinkParser.links(in: note.body),
+                     aliases: note.aliases,
                      id: note.id)
     }
 
