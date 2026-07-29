@@ -12,7 +12,6 @@ final class EngineRegistryTests: XCTestCase {
     }
 
     func test_registry_hasAtLeastOneEngine() throws {
-        try XCTSkipIf(EngineRegistry.engines.isEmpty, "engines land in Tasks 3-4")
         XCTAssertFalse(EngineRegistry.engines.isEmpty)
     }
 
@@ -106,5 +105,81 @@ final class MarkdownEngineTests: XCTestCase {
         try engine.save(to: url)
         let reloaded = try MarkdownEngine.load(url)
         XCTAssertEqual(reloaded.note.extra.map(\.key), ["status"])
+    }
+}
+
+/// Run against EVERY registered engine. M3-M5 engines inherit these by
+/// registering — that is the point of the suite.
+final class EngineConformanceTests: XCTestCase {
+
+    /// A minimal valid document each engine can load, keyed by identifier.
+    /// A new engine must add its sample here, which is the forcing function
+    /// that keeps this suite honest.
+    private static let samples: [String: (name: String, contents: String)] = [
+        "markdown": ("c.md", "---\nid: a\ntitle: T\n---\nbody"),
+        "plaintext": ("c.txt", "plain body text"),
+    ]
+
+    private func write(_ name: String, _ contents: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-conf-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    func test_everyEngineHasASample() {
+        for engine in EngineRegistry.engines {
+            XCTAssertNotNil(Self.samples[engine.identifier],
+                            "engine \(engine.identifier) has no conformance sample")
+        }
+    }
+
+    func test_loadSaveLoad_isByteStable() throws {
+        for engine in EngineRegistry.engines {
+            guard let sample = Self.samples[engine.identifier] else { continue }
+            let url = try write(sample.name, sample.contents)
+            let loaded = try engine.load(url)
+            try loaded.save(to: url)
+            let after = try String(contentsOf: url, encoding: .utf8)
+            try loaded.save(to: url)
+            let afterTwice = try String(contentsOf: url, encoding: .utf8)
+            XCTAssertEqual(after, afterTwice,
+                           "\(engine.identifier): save is not idempotent")
+        }
+    }
+
+    func test_canOpenIsMutuallyExclusive() throws {
+        for engine in EngineRegistry.engines {
+            guard let sample = Self.samples[engine.identifier] else { continue }
+            let url = try write(sample.name, sample.contents)
+            let claimers = EngineRegistry.engines.filter { $0.canOpen(url) }
+            XCTAssertEqual(claimers.count, 1,
+                           "\(sample.name) claimed by \(claimers.map { $0.identifier })")
+        }
+    }
+
+    func test_indexPayload_survivesAdversarialInput() throws {
+        let cases: [(String, String)] = [
+            ("empty", ""),
+            ("huge", String(repeating: "lorem ipsum ", count: 200_000)),
+            ("binaryish", String(decoding: Data((0...255).map(UInt8.init)), as: UTF8.self)),
+        ]
+        for engine in EngineRegistry.engines {
+            guard let sample = Self.samples[engine.identifier] else { continue }
+            let ext = (sample.name as NSString).pathExtension
+            for (label, contents) in cases {
+                let url = try write("adversarial-\(label).\(ext)", contents)
+                let loaded = try engine.load(url)
+                let payload = loaded.indexPayload
+                XCTAssertNotNil(payload.plaintext,
+                                "\(engine.identifier)/\(label) produced no plaintext")
+            }
+        }
+    }
+
+    func test_registryHasAtLeastTwoEngines() {
+        XCTAssertGreaterThanOrEqual(EngineRegistry.engines.count, 2)
     }
 }
