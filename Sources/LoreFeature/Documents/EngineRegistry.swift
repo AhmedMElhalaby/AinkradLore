@@ -5,8 +5,10 @@ import Foundation
 /// so order is a tie-break that should never actually be needed — it exists so
 /// a bug produces deterministic behavior rather than a coin flip.
 public enum EngineRegistry {
-    // Populated by Task 3 (MarkdownEngine) and Task 4 (PlainTextEngine).
-    public static let engines: [any DocumentEngine.Type] = []
+    // Task 4 (PlainTextEngine) appends to this.
+    public static let engines: [any DocumentEngine.Type] = [
+        MarkdownEngine.self,
+    ]
 
     public static func engine(for url: URL) -> (any DocumentEngine.Type)? {
         engines.first { $0.canOpen(url) }
