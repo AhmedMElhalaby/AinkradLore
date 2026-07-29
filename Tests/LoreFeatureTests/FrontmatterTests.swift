@@ -46,4 +46,53 @@ final class FrontmatterTests: XCTestCase {
         XCTAssertEqual(reparsed.tags, ["a"])
         XCTAssertEqual(reparsed.body, "body text")
     }
+
+    func test_parse_capturesUnmodelledKeysInOrder() {
+        let text = """
+        ---
+        id: abc
+        aliases: [one, two]
+        title: Kept
+        status: active
+        ---
+        body text
+        """
+        let note = Frontmatter.parse(text, path: URL(fileURLWithPath: "/tmp/x.md"))
+        XCTAssertEqual(note.extra.map(\.key), ["aliases", "status"])
+        XCTAssertEqual(note.extra.first?.rawValue, "[one, two]")
+    }
+
+    func test_serialize_reemitsUnmodelledKeys() {
+        let text = """
+        ---
+        id: abc
+        title: Kept
+        status: active
+        cssclasses: wide
+        ---
+        body text
+        """
+        let note = Frontmatter.parse(text, path: URL(fileURLWithPath: "/tmp/x.md"))
+        let out = Frontmatter.serialize(note)
+        XCTAssertTrue(out.contains("status: active"), out)
+        XCTAssertTrue(out.contains("cssclasses: wide"), out)
+    }
+
+    func test_roundTrip_isStableAcrossTwoPasses() {
+        let text = """
+        ---
+        id: abc
+        title: Kept
+        tags: [a, b]
+        created: 2026-01-01
+        updated: 2026-01-02
+        source: https://example.com
+        ---
+        body text
+        """
+        let path = URL(fileURLWithPath: "/tmp/x.md")
+        let once = Frontmatter.serialize(Frontmatter.parse(text, path: path))
+        let twice = Frontmatter.serialize(Frontmatter.parse(once, path: path))
+        XCTAssertEqual(once, twice)
+    }
 }
