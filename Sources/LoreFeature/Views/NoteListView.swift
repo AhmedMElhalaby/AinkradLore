@@ -8,8 +8,14 @@ struct NoteListView: View {
     let theme: HostTheme
     let onSelect: (IndexRow) -> Void
     let onNew: () -> Void
+    /// Delete affordance, inherited from the old `NoteEditorPane`: it lives on
+    /// the row's context menu now that the editor pane is engine-owned.
+    let onDelete: (IndexRow) -> Void
 
     @State private var activeTag: String?
+    /// The row a delete was requested for. Deleting a file is destructive and
+    /// irreversible, so it keeps its confirmation.
+    @State private var pendingDelete: IndexRow?
 
     private var visible: [IndexRow] {
         var base = query.isEmpty ? store.rows : store.search(query)
@@ -61,11 +67,32 @@ struct NoteListView: View {
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
+                            .contextMenu {
+                                Button("Delete", role: .destructive) { pendingDelete = row }
+                            }
                         }
                     }
                 }
             }
         }
         .padding(AinkradSpacing.md)
+        .ainkradConfirmDialog(
+            isPresented: deleteBinding,
+            title: "Delete document",
+            message: "Delete “\(pendingDeleteName)”? This removes the file from disk.",
+            confirmTitle: "Delete",
+            isDestructive: true) {
+                if let row = pendingDelete { onDelete(row) }
+                pendingDelete = nil
+            }
+    }
+
+    private var deleteBinding: Binding<Bool> {
+        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
+    }
+
+    private var pendingDeleteName: String {
+        guard let row = pendingDelete else { return "" }
+        return row.title.isEmpty ? row.path.lastPathComponent : row.title
     }
 }
