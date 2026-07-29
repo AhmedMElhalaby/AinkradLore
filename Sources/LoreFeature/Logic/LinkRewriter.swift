@@ -56,8 +56,8 @@ public enum LinkRewriter {
                             inboundLinks: [(sourceFile: URL, rawTarget: String)],
                             vaultRoot: URL) -> RenamePlan {
         let edits = inboundLinks.compactMap { link -> LinkEdit? in
-            guard let newTarget = rewritten(link.rawTarget, from: source,
-                                            to: destination, vaultRoot: vaultRoot),
+            guard let newTarget = rewritten(link.rawTarget, to: destination,
+                                            vaultRoot: vaultRoot),
                   newTarget != link.rawTarget else { return nil }
             return LinkEdit(file: link.sourceFile, oldTarget: link.rawTarget,
                              newTarget: newTarget)
@@ -65,9 +65,14 @@ public enum LinkRewriter {
         return RenamePlan(source: source, destination: destination, edits: edits)
     }
 
-    /// Rewrites a single raw link target, or returns `nil` if the target does
-    /// not refer to `source` at all.
-    static func rewritten(_ rawTarget: String, from source: URL, to destination: URL,
+    /// Rewrites a single raw link target to reflect `destination`, or returns
+    /// `nil` when no sensible rewrite exists — currently only when the target
+    /// names an explicit path or extension (so it must track the move) but
+    /// `destination` does not live under `vaultRoot`. In that case there is no
+    /// vault-relative path to produce, and inventing one (e.g. an absolute
+    /// filesystem path) would hand the confirmation UI a corrupted-looking
+    /// target that is worse than simply omitting the edit.
+    static func rewritten(_ rawTarget: String, to destination: URL,
                           vaultRoot: URL) -> String? {
         // Split off the fragment; it is carried through untouched.
         var body = rawTarget
@@ -86,12 +91,30 @@ public enum LinkRewriter {
             // An explicit path, or an explicit extension, names a location
             // precisely enough that it must track a move — recompute it
             // against the vault root rather than only swapping the basename.
-            newBody = destination.deletingPathExtension().path
-                .replacingOccurrences(of: vaultRoot.path + "/", with: "")
+            guard let relative = vaultRelativePath(of: destination.deletingPathExtension(),
+                                                    vaultRoot: vaultRoot) else {
+                return nil
+            }
+            newBody = relative
         } else {
             newBody = newBase
         }
         if hadExtension { newBody += ".md" }
         return newBody + fragment
+    }
+
+    /// Strips `vaultRoot`'s path components from the front of `path`'s
+    /// components, returning `nil` if `path` is not actually nested under
+    /// `vaultRoot`. Compares components, not raw strings, so it is immune to
+    /// trailing slashes and to the root's path text recurring elsewhere
+    /// inside the destination path (a plain `replacingOccurrences` would
+    /// mangle both of those cases).
+    private static func vaultRelativePath(of path: URL, vaultRoot: URL) -> String? {
+        let rootComponents = vaultRoot.standardizedFileURL.pathComponents
+        let pathComponents = path.standardizedFileURL.pathComponents
+        guard pathComponents.count > rootComponents.count,
+              Array(pathComponents.prefix(rootComponents.count)) == rootComponents
+        else { return nil }
+        return pathComponents.suffix(from: rootComponents.count).joined(separator: "/")
     }
 }

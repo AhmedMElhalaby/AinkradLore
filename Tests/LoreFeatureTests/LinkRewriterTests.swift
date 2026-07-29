@@ -72,4 +72,62 @@ final class LinkRewriterTests: XCTestCase {
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Design.md")
     }
+
+    func test_destinationOutsideVaultRootProducesNoEdit() {
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Design.md"),
+            to: URL(fileURLWithPath: "/elsewhere/Design.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            vaultRoot: root)
+        XCTAssertTrue(plan.edits.isEmpty)
+    }
+
+    func test_vaultRootWithTrailingSlashBehavesIdentically() {
+        let trailingRoot = URL(fileURLWithPath: "/v/")
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Design.md"),
+            to: URL(fileURLWithPath: "/v/Projects/Design.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            vaultRoot: trailingRoot)
+        XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Design.md")
+    }
+
+    func test_vaultRootTextRecurringInsideDestinationDoesNotCorruptTarget() {
+        // vaultRoot is "/v"; destination happens to contain "/v/" again as a
+        // path segment further down. A substring replace would mangle this;
+        // a path-component comparison must not.
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Design.md"),
+            to: URL(fileURLWithPath: "/v/a/v/Design.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            vaultRoot: root)
+        XCTAssertEqual(plan.edits.first?.newTarget, "a/v/Design.md")
+    }
+
+    func test_normalNestedDestinationYieldsCorrectVaultRelativeTarget() {
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Design.md"),
+            to: URL(fileURLWithPath: "/v/Projects/Nested/Design.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            vaultRoot: root)
+        XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Nested/Design.md")
+    }
+
+    func test_combinedShapeRenamePreservesPathExtensionAndFragment() {
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Projects/Design.md"),
+            to: URL(fileURLWithPath: "/v/Projects/Architecture.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview")],
+            vaultRoot: root)
+        XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Architecture.md#Overview")
+    }
+
+    func test_combinedShapeMovePreservesPathExtensionAndFragment() {
+        let plan = LinkRewriter.plan(
+            renaming: URL(fileURLWithPath: "/v/Projects/Design.md"),
+            to: URL(fileURLWithPath: "/v/Archive/Projects/Design.md"),
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview")],
+            vaultRoot: root)
+        XCTAssertEqual(plan.edits.first?.newTarget, "Archive/Projects/Design.md#Overview")
+    }
 }
