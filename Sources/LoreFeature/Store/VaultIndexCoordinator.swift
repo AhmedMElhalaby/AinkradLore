@@ -260,7 +260,11 @@ public final class VaultIndexCoordinator {
         guard let index else { throw LoreError.noVault }
         let type = type(of: engine).identifier
         let payload = engine.indexPayload
-        var documents = rows.map { (url: $0.path, title: $0.title, aliases: $0.aliases) }
+        // Exclude the STALE row for this same document (if it already exists in
+        // `rows`): otherwise its old title/alias keys would stay resolvable
+        // until the next full rescan, alongside the fresh keys appended below.
+        var documents = rows.filter { $0.path != url }
+            .map { (url: $0.path, title: $0.title, aliases: $0.aliases) }
         documents.append((url: url, title: payload.title, aliases: payload.aliases))
         let resolver = LinkResolver(documents: documents)
         let resolvedLinks = payload.links.map {

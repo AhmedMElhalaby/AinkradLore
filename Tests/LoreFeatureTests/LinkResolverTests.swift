@@ -54,4 +54,35 @@ final class LinkResolverTests: XCTestCase {
         let r = resolver([("/v/Notes/Design.md", "Design", [])])
         XCTAssertEqual(r.resolve("Notes/Design.md")?.path, "/v/Notes/Design.md")
     }
+
+    /// Pins the CRITICAL determinism bug: two documents at EQUAL-length paths
+    /// both matching an explicit suffix must resolve to the same one
+    /// regardless of the order they were passed to `init` — never to whichever
+    /// happened to land first in `Dictionary.values`'s randomized iteration
+    /// order. The tiebreak is lexicographic on the full path.
+    func test_explicitPathAmbiguousEqualLengthResolvesLexicographicallyRegardlessOfInputOrder() {
+        let a = ("/v/Aaa/Notes/Design.md", "Design", [String]())
+        let b = ("/v/Bbb/Notes/Design.md", "Design", [String]())
+
+        let forward = resolver([a, b])
+        let reversed = resolver([b, a])
+
+        // Both paths are the same length; "/v/Aaa/..." < "/v/Bbb/..." lexicographically.
+        XCTAssertEqual(forward.resolve("Notes/Design")?.path, "/v/Aaa/Notes/Design.md")
+        XCTAssertEqual(reversed.resolve("Notes/Design")?.path, "/v/Aaa/Notes/Design.md")
+    }
+
+    /// Pins the same class of bug one step quieter: equal-length basename
+    /// collisions (no explicit path in the link) must resolve identically
+    /// regardless of input order, via the lexicographic tiebreak in `byKey`.
+    func test_basenameAmbiguousEqualLengthResolvesLexicographicallyRegardlessOfInputOrder() {
+        let a = ("/v/Aaa/Design.md", "Design", [String]())
+        let b = ("/v/Bbb/Design.md", "Design", [String]())
+
+        let forward = resolver([a, b])
+        let reversed = resolver([b, a])
+
+        XCTAssertEqual(forward.resolve("Design")?.path, "/v/Aaa/Design.md")
+        XCTAssertEqual(reversed.resolve("Design")?.path, "/v/Aaa/Design.md")
+    }
 }
