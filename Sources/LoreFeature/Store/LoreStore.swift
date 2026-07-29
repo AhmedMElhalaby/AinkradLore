@@ -33,10 +33,61 @@ public final class LoreStore {
     public var vaultRoot: URL? { coordinator.vaultRoot }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
     public func rebuild() throws { try coordinator.rebuild() }
-    public func shutdown() { coordinator.shutdown() }
+    public func shutdown() {
+        coordinator.shutdown()
+        tabs = []
+        selectedTab = nil
+        openError = nil
+    }
     func settleForTesting() async { await coordinator.settleForTesting() }
     func handleVaultChange() { coordinator.handleVaultChange() }
     func startBackgroundRebuild() { coordinator.startBackgroundRebuild() }
+
+    // MARK: - Tabs
+
+    public private(set) var tabs: [DocumentSession] = []
+    public private(set) var selectedTab: DocumentSession?
+    /// Set when the last open attempt failed. The UI renders the fallback
+    /// viewer from this rather than silently doing nothing — a file the list
+    /// shows must always produce a visible response when clicked.
+    public private(set) var openError: (url: URL, error: Error)?
+
+    public func open(_ row: IndexRow) { open(url: row.path) }
+
+    public func open(url: URL) {
+        if let existing = tabs.first(where: { $0.url == url }) {
+            selectedTab = existing
+            return
+        }
+        do {
+            let session = try DocumentSession.open(url: url, coordinator: coordinator)
+            tabs.append(session)
+            selectedTab = session
+            openError = nil
+        } catch {
+            openError = (url, error)
+        }
+    }
+
+    public func selectTab(_ session: DocumentSession) { selectedTab = session }
+
+    /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
+    /// 500ms debounce, so a tab closed immediately after a keystroke could
+    /// otherwise lose that edit. A read-only session can never be dirty (see
+    /// `DocumentSession.markChanged`), so this only ever writes a document the
+    /// engine can actually save.
+    public func closeTab(_ session: DocumentSession) {
+        guard let idx = tabs.firstIndex(where: { $0 === session }) else { return }
+        if session.isDirty && !session.isReadOnly {
+            try? session.saveNow()
+        }
+        tabs.remove(at: idx)
+        if selectedTab === session {
+            selectedTab = tabs.indices.contains(idx) ? tabs[idx]
+                        : tabs.indices.contains(idx - 1) ? tabs[idx - 1]
+                        : tabs.last
+        }
+    }
 
     /// Every distinct tag across all indexed notes, sorted — drives the sidebar
     /// tag-filter chips.

@@ -10,7 +10,12 @@ import Observation
 /// rather than an error the UI had no affordance for.
 @MainActor
 @Observable
-public final class DocumentSession {
+public final class DocumentSession: Identifiable {
+    /// Stable identity, minted once at init. `url` is mutable (see below), so
+    /// tab identity (SwiftUI `ForEach`, dictionary keys, etc.) must key off
+    /// `id`, never off `url`.
+    public let id = UUID()
+
     /// The file this session writes to. MUTABLE: `resolveBySavingCopy()`
     /// repoints it at the copy (see there). Callers that key tab identity off a
     /// session must follow this value rather than caching it.
