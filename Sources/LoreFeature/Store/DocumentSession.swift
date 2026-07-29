@@ -11,11 +11,21 @@ import Observation
 @MainActor
 @Observable
 public final class DocumentSession {
-    public let url: URL
+    /// The file this session writes to. MUTABLE: `resolveBySavingCopy()`
+    /// repoints it at the copy (see there). Callers that key tab identity off a
+    /// session must follow this value rather than caching it.
+    public private(set) var url: URL
     public let engine: any DocumentEngine
 
     public private(set) var isDirty = false
     public private(set) var conflict = false
+
+    /// The last save failure that was NOT a conflict — disk full, permissions,
+    /// a read-only volume, an engine refusing to round-trip. Conflicts have
+    /// their own flag and their own three resolutions; everything else used to
+    /// vanish into the autosave's `try?` with `isDirty` as the only hint.
+    /// Cleared by every successful write and every successful resolution.
+    public private(set) var lastSaveError: Error?
 
     /// True when the engine cannot write this document back faithfully — today
     /// only a `PlainTextEngine` whose bytes failed a strict UTF-8 decode. Such
@@ -46,7 +56,11 @@ public final class DocumentSession {
     private var cachedTitle: String
 
     private static let autosaveDelay: Duration = .milliseconds(500)
-    private static let selfWriteSuppressionWindow: TimeInterval = 1.0
+    /// One policy, one owner: the coordinator decides how long its own watcher
+    /// ignores the echo of our writes.
+    private static var selfWriteSuppressionWindow: TimeInterval {
+        VaultIndexCoordinator.selfWriteSuppressionWindow
+    }
 
     public init(url: URL, engine: any DocumentEngine, coordinator: VaultIndexCoordinator) {
         self.url = url
@@ -70,10 +84,12 @@ public final class DocumentSession {
     /// Called by the engine's editor after every user mutation. Debounced, so
     /// typing produces one write per pause rather than one per keystroke.
     public func markChanged() {
-        isDirty = true
-        // A read-only document can never be written; scheduling an autosave
-        // would only produce a failed write per pause, forever.
+        // A read-only document can never be written, so it is never marked
+        // dirty either: scheduling an autosave would produce a failed write per
+        // typing pause, and a dirty flag nothing can ever clear would make the
+        // tab's close-confirmation nag forever on a file that cannot be saved.
         guard !isReadOnly else { return }
+        isDirty = true
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: Self.autosaveDelay)
@@ -85,8 +101,11 @@ public final class DocumentSession {
     }
 
     public func saveNow() throws {
-        guard !isReadOnly else { throw EngineError.notRoundTrippable(url) }
+        try guardWritable()
         if let disk = Self.mtime(of: url), disk > baseline {
+            // A conflict is not a `lastSaveError`: it has its own flag and its
+            // own three resolutions. Conflating them would make the UI show
+            // both a banner and an error for one situation.
             conflict = true
             throw LoreError.externalChange(url)
         }
@@ -94,7 +113,18 @@ public final class DocumentSession {
     }
 
     public func resolveByOverwriting() throws {
+        try guardWritable()
         try write()
+    }
+
+    /// Session-level write policy, enforced before any engine call. Today only
+    /// `PlainTextEngine` self-guards; an engine that did not would otherwise
+    /// bypass this entirely.
+    private func guardWritable() throws {
+        guard isReadOnly else { return }
+        let error = EngineError.notRoundTrippable(url)
+        lastSaveError = error
+        throw error
     }
 
     public func resolveByReloading() throws {
@@ -106,14 +136,23 @@ public final class DocumentSession {
         cachedTitle = engine.indexPayload.title
         conflict = false
         isDirty = false
+        lastSaveError = nil
         reloadGeneration += 1
     }
 
     /// Writes our version beside the original as `name (Lore copy).ext`,
-    /// leaving the on-disk file untouched. The escape hatch that makes the
-    /// other two resolutions safe to offer.
+    /// leaving the on-disk file untouched, and ADOPTS the copy: from here on
+    /// this session edits and saves the copy.
+    ///
+    /// "My version lives here now, and the file I was fighting over is left
+    /// alone" is the only reading under which continuing to type is safe. The
+    /// alternative — keep pointing at the original — leaves the session
+    /// permanently in conflict with a file it will never win against, so every
+    /// subsequent autosave fails silently through its `try?` and the user's
+    /// ongoing work is persisted nowhere while the tab looks clean.
     @discardableResult
     public func resolveBySavingCopy() throws -> URL {
+        try guardWritable()
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         var candidate = url.deletingLastPathComponent()
@@ -124,19 +163,33 @@ public final class DocumentSession {
                 .appendingPathComponent("\(base) (Lore copy \(n)).\(ext)")
             n += 1
         }
+        coordinator.suppressWatcher(for: Self.selfWriteSuppressionWindow)
         try engine.save(to: candidate)
+        url = candidate
+        baseline = Self.mtime(of: candidate) ?? .distantPast
+        cachedTitle = engine.indexPayload.title
         conflict = false
         isDirty = false
+        lastSaveError = nil
+        try? coordinator.indexDocument(engine, at: candidate)
         return candidate
     }
 
     private func write() throws {
         coordinator.suppressWatcher(for: Self.selfWriteSuppressionWindow)
-        try engine.save(to: url)
+        do {
+            try engine.save(to: url)
+        } catch {
+            // Disk full, permissions, a read-only volume: not a conflict, and
+            // previously invisible because the autosave discards this throw.
+            lastSaveError = error
+            throw error
+        }
         baseline = Self.mtime(of: url) ?? .distantPast
         cachedTitle = engine.indexPayload.title
         isDirty = false
         conflict = false
+        lastSaveError = nil
         // The file is truth; the index is derived. A failed index write must
         // never make a successful save look like a failure.
         try? coordinator.indexDocument(engine, at: url)
