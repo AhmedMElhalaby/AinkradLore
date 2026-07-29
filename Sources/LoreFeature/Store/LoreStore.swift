@@ -33,6 +33,56 @@ public final class LoreStore {
     public var vaultRoot: URL? { coordinator.vaultRoot }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
     public func rebuild() throws { try coordinator.rebuild() }
+
+    // MARK: - Links
+
+    public struct Backlink: Identifiable, Sendable {
+        public let id: URL
+        public let row: IndexRow
+        /// The line in the source document that contains the link. Empty when
+        /// the file cannot be read — context is a nicety, never a failure.
+        public let context: String
+    }
+
+    public func backlinks(to url: URL) -> [Backlink] {
+        coordinator.backlinkRows(to: url).map { row in
+            Backlink(id: row.path, row: row, context: Self.context(in: row.path, for: url))
+        }
+    }
+
+    private static func context(in source: URL, for target: URL) -> String {
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else { return "" }
+        let needle = target.deletingPathExtension().lastPathComponent.lowercased()
+        for line in text.split(separator: "\n") where line.lowercased().contains(needle) {
+            return String(line.trimmingCharacters(in: .whitespaces).prefix(200))
+        }
+        return ""
+    }
+
+    public func unresolvedLinks(from url: URL) -> [String] {
+        coordinator.unresolvedLinks(from: url)
+    }
+
+    public func resolveLink(_ rawTarget: String) -> URL? {
+        coordinator.currentResolver().resolve(rawTarget)
+    }
+
+    @discardableResult
+    public func openLink(_ rawTarget: String) -> Bool {
+        guard let url = resolveLink(rawTarget) else { return false }
+        open(url: url)
+        return true
+    }
+
+    /// Documents whose title or an alias starts with `prefix`, for `[[` completion.
+    public func linkCompletions(matching prefix: String) -> [IndexRow] {
+        let needle = prefix.lowercased()
+        guard !needle.isEmpty else { return Array(rows.prefix(20)) }
+        return rows.filter { row in
+            row.title.lowercased().hasPrefix(needle)
+                || row.aliases.contains { $0.lowercased().hasPrefix(needle) }
+        }
+    }
     /// Releases the vault. Tabs are flushed FIRST — see `closeAllTabs` — so a
     /// teardown never costs the user unsaved work, and so the flush still has a
     /// live index to update before the coordinator drops it.

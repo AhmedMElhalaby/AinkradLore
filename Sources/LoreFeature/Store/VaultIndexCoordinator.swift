@@ -249,6 +249,32 @@ public final class VaultIndexCoordinator {
         (try? index?.search(query)) ?? []
     }
 
+    /// `FileManager`'s enumerator (in `scanVault`) hands back paths resolved
+    /// via `realpath(3)` — on macOS `/tmp` and `/var` are themselves symlinks
+    /// into `/private`, and `URL.resolvingSymlinksInPath()` deliberately
+    /// leaves those three roots alone (Apple's documented exception). Without
+    /// matching that resolution here, a caller-constructed URL under either
+    /// path (any vault under `/tmp`, and every test vault) would never match
+    /// a stored row and silently return no backlinks.
+    private static func canonical(_ url: URL) -> URL {
+        var buffer = [Int8](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(url.path, &buffer) != nil else { return url }
+        return URL(fileURLWithPath: String(cString: buffer))
+    }
+
+    func backlinkRows(to url: URL) -> [IndexRow] {
+        (try? index?.backlinks(to: Self.canonical(url))) ?? []
+    }
+    func unresolvedLinks(from url: URL) -> [String] {
+        (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []
+    }
+    /// A resolver over the CURRENT index rows, for link clicks and completion.
+    func currentResolver() -> LinkResolver {
+        LinkResolver(documents: rows.map {
+            (url: $0.path, title: $0.title, aliases: $0.aliases)
+        })
+    }
+
     /// Index one document after a save, without a whole-vault rescan.
     ///
     /// Resolves this document's own outbound links immediately, against the
