@@ -73,9 +73,16 @@ struct LoreRootView: View {
 /// The tab is closed BEFORE the file is removed, and forced: a dirty session's
 /// pending save would otherwise either refuse the close or write the file back
 /// out again after the delete.
+///
+/// The debounced autosave is cancelled explicitly and FIRST. Closing the tab
+/// already cancels it, but the file is about to be unlinked and this is the one
+/// path where a stray write does not merely resurrect stale content — it
+/// recreates a file the user deliberately deleted. Belt and braces on the
+/// destructive path.
 @MainActor
 func deleteDocument(_ row: IndexRow, in store: LoreStore) {
     if let tab = store.tabs.first(where: { $0.url == row.path }) {
+        tab.cancelPendingSave()
         store.closeTab(tab, force: true)
     }
     try? store.delete(row)

@@ -68,7 +68,15 @@ struct NoteListView: View {
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
                             .contextMenu {
-                                Button("Delete", role: .destructive) { pendingDelete = row }
+                                // Unclaimed rows list so the sidebar tells the
+                                // truth about the vault — but Lore cannot open
+                                // them, so M0 does not arm an irreversible
+                                // delete against arbitrary binaries the user
+                                // has no way to inspect here first. A later
+                                // milestone can decide that deliberately.
+                                if row.type != EngineRegistry.unclaimedType {
+                                    Button("Delete", role: .destructive) { pendingDelete = row }
+                                }
                             }
                         }
                     }

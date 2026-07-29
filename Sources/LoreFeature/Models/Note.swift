@@ -41,8 +41,18 @@ public struct Note: Identifiable, Equatable, Sendable {
     ///
     /// Carried for the same reason as `lineEnding`: PowerShell redirects, older
     /// Notepad and several exporters emit one, and a BOM shifts the opening
-    /// `---` fence so the frontmatter is not recognised at all. Stripped on
-    /// read, restored on write.
+    /// `---` fence so the frontmatter is not recognised at all. Stripped by
+    /// `Frontmatter.parse`, restored by `Frontmatter.serialize`.
+    ///
+    /// IN THE PRODUCT THIS IS ALWAYS `false`: all three read sites
+    /// (`MarkdownEngine.load`, `LoreStore.load`, `LoreNoteOperations`) use
+    /// `String(contentsOf:encoding:.utf8)`, which consumes the BOM before
+    /// `parse` ever sees it, so a BOM-prefixed file loses its 3-byte mark on
+    /// save. This path is currently exercised only by tests, which call `parse`
+    /// directly. That is a deliberate, signed-off trade: swapping the most
+    /// safety-critical reads in the product to manual decoding is not worth a
+    /// cosmetic 3-byte fix. Nothing else about the file is affected — the
+    /// fence is still found, and no property or body text is lost.
     public var hasByteOrderMark: Bool
 
     /// The exact prefix `serialize` must put back before the opening fence.

@@ -105,6 +105,25 @@ public final class DocumentSession: Identifiable {
         }
     }
 
+    /// Disarms a debounced autosave that has not fired yet.
+    ///
+    /// MUST be called by anything that stops owning this session — closing its
+    /// tab, tearing the store down, switching vaults — and BEFORE deleting the
+    /// file it points at. Without it the task armed by `markChanged` outlives
+    /// the tab: the SwiftUI view, a captured `selectedTab` or a frame still in
+    /// flight keeps the session alive for the remaining 500ms, and the save
+    /// lands afterwards. On the delete path that RECREATES the file the user
+    /// just deleted, containing the content they chose to discard; on the
+    /// "Close anyway → those edits are lost" path it silently persists them
+    /// anyway, making the dialog a lie.
+    ///
+    /// Deliberately does NOT clear `isDirty`: the in-memory document really is
+    /// unsaved, and callers that want it on disk call `saveNow()` first.
+    public func cancelPendingSave() {
+        saveTask?.cancel()
+        saveTask = nil
+    }
+
     public func saveNow() throws {
         try guardWritable()
         if let disk = Self.mtime(of: url), disk > baseline {

@@ -33,8 +33,42 @@ public final class LoreStore {
     public var vaultRoot: URL? { coordinator.vaultRoot }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
     public func rebuild() throws { try coordinator.rebuild() }
+    /// Releases the vault. Tabs are flushed FIRST — see `closeAllTabs` — so a
+    /// teardown never costs the user unsaved work, and so the flush still has a
+    /// live index to update before the coordinator drops it.
     public func shutdown() {
+        closeAllTabs()
         coordinator.shutdown()
+    }
+
+    /// Flush-and-drop every open tab. The one lifecycle used by BOTH teardown
+    /// and vault switching, in this exact order:
+    ///
+    /// 1. save every dirty, writable session — `shutdown` used to just assign
+    ///    `tabs = []`, bypassing all of `closeTab`'s hardening. A conflicted
+    ///    tab stays dirty indefinitely (its autosave keeps failing through
+    ///    `try?`), so that was not a 500ms window: it was "the user has a
+    ///    conflict banner up, the host tears the instance down, edits gone".
+    /// 2. cancel pending autosaves — otherwise a debounced write lands after
+    ///    the store has moved on, into a vault the user has already left.
+    /// 3. clear the tab state.
+    ///
+    /// A save that REFUSES (external-change conflict, read-only volume) cannot
+    /// be surfaced from here: this is a non-interactive teardown, and the store
+    /// holds only a `PluginDocumentStore` — the host exposes no logger to it —
+    /// so there is nowhere to report to. The session's own `conflict` /
+    /// `lastSaveError` flags still hold the reason, but the session is about to
+    /// be released. This is a known, accepted residual: a conflicted tab open
+    /// at teardown keeps the ON-DISK file (the other writer's version) and
+    /// loses the in-memory edit. Wiring a host logger through would let us at
+    /// least record it, and is the right M1 follow-up.
+    private func closeAllTabs() {
+        for tab in tabs {
+            if tab.isDirty && !tab.isReadOnly {
+                try? tab.saveNow()
+            }
+            tab.cancelPendingSave()
+        }
         tabs = []
         selectedTab = nil
         openError = nil
@@ -94,6 +128,12 @@ public final class LoreStore {
                 if !force { return false }
             }
         }
+        // Past this point the tab IS being removed, on both the normal and the
+        // forced path, so the debounced autosave must be disarmed: it would
+        // otherwise fire into a document nobody owns any more — writing back
+        // edits the user chose to discard, or resurrecting a file a delete is
+        // about to unlink.
+        session.cancelPendingSave()
         tabs.remove(at: idx)
         if selectedTab === session {
             selectedTab = tabs.indices.contains(idx) ? tabs[idx]
@@ -126,18 +166,29 @@ public final class LoreStore {
         documents.setData(relative.data(using: .utf8), forKey: Self.defaultFolderKey)
     }
 
+    /// Switching vaults is a teardown of the old one, not just a new root:
+    /// tabs, selection and `openError` all point INTO the previous vault, and
+    /// left alone they keep autosaving into vault A while the user is looking
+    /// at vault B. Same lifecycle as `shutdown`.
     public func setVaultRoot(_ url: URL) throws {
         try VaultBookmark.save(url, to: documents)
+        closeAllTabs()
         try coordinator.activate(root: url)
     }
 
-    /// Test seam: activate without a security-scoped bookmark.
-    func setVaultRootForTesting(_ url: URL) throws { try coordinator.activate(root: url) }
+    /// Test seam: activate without a security-scoped bookmark. Performs the
+    /// same tab teardown as `setVaultRoot`, so tests exercise the real switch.
+    func setVaultRootForTesting(_ url: URL) throws {
+        closeAllTabs()
+        try coordinator.activate(root: url)
+    }
 
     // MARK: - Documents
     //
-    // `load` and `save` stay here until Task 7 moves them to `DocumentSession`
-    // so the MCP layer keeps compiling.
+    // `load` and `save` stay here deliberately: Task 7 did NOT take them, and
+    // Task 10 kept them because the MCP note tools are their only remaining
+    // callers (the UI goes through `DocumentSession`). M6 owns the redesign
+    // that decides where note-level read/write really belongs.
 
     public func load(_ row: IndexRow) throws -> Note {
         let text = try String(contentsOf: row.path, encoding: .utf8)

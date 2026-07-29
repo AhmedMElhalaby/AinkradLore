@@ -79,6 +79,12 @@ public enum Frontmatter {
     ///   fence reading as `"---\r"`.
     /// - A leading U+FEFF comes from PowerShell redirects, older Notepad and
     ///   several exporters; it leaves the fence reading as `"\u{FEFF}---"`.
+    ///   NOTE: the BOM half is currently exercised only by tests. Every read
+    ///   site in the product decodes with `String(contentsOf:encoding:.utf8)`,
+    ///   which strips the BOM before this function is reached, so `bom` is
+    ///   always `false` in production and a BOM-prefixed file loses its mark on
+    ///   save (see `Note.hasByteOrderMark` for why that is accepted). The CRLF
+    ///   half is fully live.
     ///
     /// LINE ENDINGS, PRECISELY: any `"\r\n"` anywhere in the document wins for
     /// the WHOLE document. A file with consistent endings — every real-world

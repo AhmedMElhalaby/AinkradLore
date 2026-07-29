@@ -125,9 +125,16 @@ public final class VaultIndexCoordinator {
     /// Pure, off-actor: every engine-openable file under `root`, loaded and
     /// reduced to its index payload. No index access.
     ///
-    /// Files no engine claims are skipped: they stay visible in Finder and can
-    /// still be opened in the fallback viewer, but there is nothing meaningful
-    /// to put in a full-text index for them.
+    /// Files no engine claims are indexed too, but METADATA ONLY: type
+    /// `EngineRegistry.unclaimedType`, empty plaintext, the filename (with its
+    /// extension — there is no engine to derive anything better) as the title.
+    ///
+    /// They used to be skipped entirely, which made the sidebar lie: a vault of
+    /// `.pdf`/`.xlsx` showed as empty, and `FallbackViewer`'s "can't open this
+    /// yet" branch was unreachable because nothing could ever be clicked to
+    /// reach it. The spec's failure-modes table requires the opposite. Empty
+    /// plaintext is the point: an unclaimed row must never match a full-text
+    /// search for content nobody parsed.
     nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
         var entries: [IndexEntry] = []
         // Only components BELOW the root are ours to judge. Testing the
@@ -137,15 +144,19 @@ public final class VaultIndexCoordinator {
         // no error to explain it.
         let rootDepth = root.standardizedFileURL.pathComponents.count
         let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: [.contentModificationDateKey])
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey])
         while let url = enumerator?.nextObject() as? URL {
             // Skip package internals and tool directories: `.obsidian`,
             // `.git`, `.trash`, and (later) `.lore` package contents are not
             // documents in their own right.
             let relative = url.standardizedFileURL.pathComponents.dropFirst(rootDepth)
             if relative.contains(where: { $0.hasPrefix(".") }) { continue }
-            guard let engineType = EngineRegistry.engine(for: url),
-                  let engine = try? engineType.load(url) else { continue }
+            // Directories are not documents. They were filtered out for free
+            // while unclaimed files were skipped; now that those are indexed,
+            // every folder would otherwise become a row.
+            let values = try? url.resourceValues(
+                forKeys: [.isDirectoryKey, .contentModificationDateKey])
+            if values?.isDirectory == true { continue }
             // File mtime is DELIBERATELY authoritative for `updated`, and
             // supersedes markdown's frontmatter `updated:` value, which the
             // pre-M0 scan used. Two reasons: it is uniform across document
@@ -153,8 +164,19 @@ public final class VaultIndexCoordinator {
             // frontmatter field is day-granularity, so a whole day's notes
             // tie and `ORDER BY updated DESC` sorts them arbitrarily. This
             // changes sidebar ordering for vaults where the two disagree.
-            let updated = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate) ?? Date()
+            let updated = values?.contentModificationDate ?? Date()
+
+            // An engine that claims the file but fails to LOAD it is left out,
+            // as before: that is a real error, not an unclaimed type, and this
+            // scan has nowhere to report it.
+            guard let engineType = EngineRegistry.engine(for: url) else {
+                entries.append(IndexEntry(
+                    url: url, type: EngineRegistry.unclaimedType,
+                    payload: IndexPayload(title: url.lastPathComponent, plaintext: ""),
+                    updated: updated))
+                continue
+            }
+            guard let engine = try? engineType.load(url) else { continue }
             var payload = engine.indexPayload
             payload.plaintext = Self.capped(payload.plaintext)
             entries.append(IndexEntry(url: url, type: engineType.identifier,

@@ -100,8 +100,11 @@ final class LoreStoreTests: XCTestCase {
             to: root.appendingPathComponent("c.xlsx"), atomically: true, encoding: .utf8)
 
         let entries = VaultIndexCoordinator.scanVault(at: root)
-        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext"],
-                       "unclaimed types must not be indexed")
+        // `.xlsx` is indexed as an UNCLAIMED row rather than skipped: the list
+        // must not lie about what is in the vault (see `scanVault`). It carries
+        // no plaintext, so it is metadata only.
+        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext", "unclaimed"])
+        XCTAssertEqual(entries.first { $0.type == "unclaimed" }?.payload.plaintext, "")
     }
 
     func test_search_findsPlainTextDocuments() async throws {
@@ -163,6 +166,86 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertFalse(capped.unicodeScalars.contains("\u{FFFD}"),
                        "truncation cut through a scalar")
         XCTAssertTrue(capped.dropFirst().allSatisfy { $0 == "é" })
+    }
+
+    // MARK: - unclaimed file types
+    //
+    // A vault full of `.xlsx` must not make the file list lie about what is
+    // there. Files no engine claims are indexed as metadata-only rows so they
+    // list, and clicking one reaches the fallback viewer's "can't open this
+    // yet" branch.
+
+    private func makeMixedVault() throws -> URL {
+        let root = tempDir()
+        try "---\nid: m\ntitle: Note\n---\nbody".write(
+            to: root.appendingPathComponent("note.md"), atomically: true, encoding: .utf8)
+        try "plain".write(
+            to: root.appendingPathComponent("log.txt"), atomically: true, encoding: .utf8)
+        try "let x = 1".write(
+            to: root.appendingPathComponent("code.swift"), atomically: true, encoding: .utf8)
+        try "%PDF-1.4 zorkmid".write(
+            to: root.appendingPathComponent("paper.pdf"), atomically: true, encoding: .utf8)
+        try "sheetstuff zorkmid".write(
+            to: root.appendingPathComponent("book.xlsx"), atomically: true, encoding: .utf8)
+        return root
+    }
+
+    func test_mixedVault_listsEveryFileIncludingUnclaimedTypes() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        XCTAssertEqual(Set(s.rows.map(\.path.lastPathComponent)),
+                       ["note.md", "log.txt", "code.swift", "paper.pdf", "book.xlsx"])
+    }
+
+    func test_unclaimedRow_isMetadataOnlyAndTitledByFilename() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
+        XCTAssertEqual(row.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(row.title, "book.xlsx")
+        XCTAssertTrue(row.tags.isEmpty)
+        XCTAssertTrue(row.properties.isEmpty)
+        let entry = try XCTUnwrap(VaultIndexCoordinator.scanVault(at: root)
+            .first { $0.url.lastPathComponent == "book.xlsx" })
+        XCTAssertEqual(entry.payload.plaintext, "")
+    }
+
+    func test_unclaimedRows_doNotMatchSearchesForBodyTextTheyDoNotHave() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        XCTAssertTrue(s.search("zorkmid").isEmpty,
+                      "an unclaimed row matched body text that was never indexed")
+        // The filename IS indexed as the title, so the row is still findable.
+        XCTAssertEqual(s.search("book").map(\.path.lastPathComponent), ["book.xlsx"])
+    }
+
+    func test_openingUnclaimedRow_setsUnsupportedOpenError() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
+        s.open(row)
+        XCTAssertTrue(s.tabs.isEmpty)
+        XCTAssertEqual(s.openError?.url, row.path)
+        // This is what `FallbackViewer.isUnsupported` keys off — the branch the
+        // review found unreachable.
+        XCTAssertEqual(s.openError?.error as? EngineError, .unsupported(row.path))
+    }
+
+    func test_scanVault_stillSkipsDotPrefixedComponentsBelowTheRoot() throws {
+        let root = tempDir()
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        try "ref".write(to: git.appendingPathComponent("HEAD"), atomically: true, encoding: .utf8)
+        try "obj".write(to: git.appendingPathComponent("pack.idx"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
+    }
+
+    func test_scanVault_doesNotIndexDirectoriesAsUnclaimedRows() throws {
+        let root = tempDir()
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Projects", isDirectory: true),
+            withIntermediateDirectories: true)
+        XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
     func test_externalChange_flagsOpenNote() throws {

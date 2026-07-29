@@ -10,6 +10,15 @@ public enum EngineRegistry {
         PlainTextEngine.self,
     ]
 
+    /// The index `type` of a file no engine claims.
+    ///
+    /// Such files are still indexed — metadata only, empty plaintext — so the
+    /// sidebar does not lie about what is in the vault (spec: "a vault full of
+    /// `.xlsx` must not make the file list lie about what's there"). It is not
+    /// an engine identifier and never will be: no `DocumentEngine` can produce
+    /// it, so `type == unclaimedType` means exactly "Lore cannot open this".
+    public static let unclaimedType = "unclaimed"
+
     public static func engine(for url: URL) -> (any DocumentEngine.Type)? {
         engines.first { $0.canOpen(url) }
     }

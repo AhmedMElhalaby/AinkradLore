@@ -104,7 +104,7 @@ final class TabsTests: XCTestCase {
         XCTAssertEqual(onDisk, externalContent)
     }
 
-    func test_closeTab_forceClosesDespiteConflict() throws {
+    func test_closeTab_forceClosesDespiteConflict() async throws {
         let root = tempDir(); let s = try makeStore(root)
         let url = root.appendingPathComponent("a.md")
         try "---\nid: a\ntitle: A\n---\nx".write(to: url, atomically: true, encoding: .utf8)
@@ -124,6 +124,113 @@ final class TabsTests: XCTestCase {
         let closed = s.closeTab(session, force: true)
         XCTAssertTrue(closed)
         XCTAssertTrue(s.tabs.isEmpty)
+        // "Close anyway → those edits are lost" must be TRUE on disk, not just
+        // in the tab bar: the external writer's content is what stays.
+        let onDisk = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertEqual(onDisk, externalContent)
+
+        // And it must still be true after the 500ms autosave debounce elapses.
+        // Without `cancelPendingSave`, the task armed by `markChanged` above
+        // outlives the closed tab and writes the discarded edit back out.
+        try await Task.sleep(for: .milliseconds(900))
+        let afterDebounce = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertEqual(afterDebounce, externalContent)
+    }
+
+    /// The seventh data-loss defect: a dirty tab that is force-closed and then
+    /// DELETED must stay deleted. The pending autosave used to survive the
+    /// close, fire after the unlink, and recreate the file the user just
+    /// deleted — containing the content they chose to discard.
+    func test_deleteAfterForceClose_doesNotRecreateFileAfterDebounce() async throws {
+        let root = tempDir(); let s = try makeStore(root)
+        let url = root.appendingPathComponent("a.md")
+        try "---\nid: a\ntitle: A\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        try s.rebuild()
+        // Open through the ROW, exactly as the sidebar does, so the session's
+        // url and the row's path are the same value `deleteDocument` matches on.
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "a.md" })
+        s.open(row)
+        let session = s.selectedTab!
+        guard let engine = session.engine as? MarkdownEngine else {
+            return XCTFail("expected MarkdownEngine")
+        }
+        engine.note.body = "discarded edit"
+        session.markChanged()
+
+        // The real delete affordance, not a re-implementation of it.
+        deleteDocument(row, in: s)
+        XCTAssertTrue(s.tabs.isEmpty, "delete must close the document's tab")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+
+        try await Task.sleep(for: .milliseconds(900))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                       "pending autosave resurrected a deleted file")
+    }
+
+    /// The primitive item 2 adds, tested on its own: an armed autosave that is
+    /// cancelled never writes.
+    func test_cancelPendingSave_stopsTheDebouncedWrite() async throws {
+        let root = tempDir(); let s = try makeStore(root)
+        let url = root.appendingPathComponent("a.md")
+        let original = "---\nid: a\ntitle: A\n---\nx"
+        try original.write(to: url, atomically: true, encoding: .utf8)
+        s.open(url: url)
+        let session = s.selectedTab!
+        guard let engine = session.engine as? MarkdownEngine else {
+            return XCTFail("expected MarkdownEngine")
+        }
+        engine.note.body = "never written"
+        session.markChanged()
+        session.cancelPendingSave()
+
+        try await Task.sleep(for: .milliseconds(900))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), original)
+        XCTAssertTrue(session.isDirty, "cancelling must not pretend the document was saved")
+    }
+
+    /// Item 3: teardown must not silently discard a dirty tab.
+    func test_shutdown_savesDirtyTabsBeforeClearingThem() throws {
+        let root = tempDir(); let s = try makeStore(root)
+        let url = root.appendingPathComponent("a.md")
+        try "---\nid: a\ntitle: A\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        s.open(url: url)
+        let session = s.selectedTab!
+        guard let engine = session.engine as? MarkdownEngine else {
+            return XCTFail("expected MarkdownEngine")
+        }
+        engine.note.body = "work in progress"
+        session.markChanged()
+
+        s.shutdown()
+        XCTAssertTrue(s.tabs.isEmpty)
+        XCTAssertNil(s.selectedTab)
+        let onDisk = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("work in progress"))
+    }
+
+    /// Item 4: switching vaults must go through the same lifecycle as teardown.
+    /// Tabs from vault A must not survive into vault B, still autosaving into A.
+    func test_setVaultRoot_savesDirtyTabsIntoOldVaultAndClearsThem() throws {
+        let rootA = tempDir(); let s = try makeStore(rootA)
+        let url = rootA.appendingPathComponent("a.md")
+        try "---\nid: a\ntitle: A\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        s.open(url: url)
+        let session = s.selectedTab!
+        guard let engine = session.engine as? MarkdownEngine else {
+            return XCTFail("expected MarkdownEngine")
+        }
+        engine.note.body = "belongs to vault A"
+        session.markChanged()
+
+        let rootB = tempDir()
+        try s.setVaultRootForTesting(rootB)
+
+        XCTAssertTrue(s.tabs.isEmpty)
+        XCTAssertNil(s.selectedTab)
+        XCTAssertNil(s.openError)
+        XCTAssertEqual(s.vaultRoot, rootB)
+        let onDisk = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("belongs to vault A"))
     }
 
     func test_closeTab_readOnlySessionClosesImmediately() throws {

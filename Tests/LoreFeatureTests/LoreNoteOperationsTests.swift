@@ -152,6 +152,38 @@ struct LoreNoteOperationsTests {
         #expect(outcome.text.contains("search_notes"))
     }
 
+    /// Unclaimed files (`.pdf`, `.xlsx`) now appear in `store.rows` so the
+    /// sidebar does not lie about the vault. The note tools must be unmoved by
+    /// that: they are type-filtered to markdown and stay so.
+    @Test func noteToolsIgnoreUnclaimedFileTypes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "Real Note")
+        note.body = "zorkmid body"
+        try store.save(note)
+        try "%PDF-1.4 zorkmid".write(to: root.appendingPathComponent("paper.pdf"),
+                                     atomically: true, encoding: .utf8)
+        try "sheet zorkmid".write(to: root.appendingPathComponent("book.xlsx"),
+                                  atomically: true, encoding: .utf8)
+        try store.rebuild()
+        #expect(store.rows.count == 3, "precondition: unclaimed rows are indexed")
+
+        let listed = await run(operations, ["operation": "search"])
+        #expect(listed.isError == false)
+        #expect(listed.text.contains("Real Note"))
+        #expect(listed.text.contains("paper.pdf") == false)
+        #expect(listed.text.contains("book.xlsx") == false)
+
+        let searched = await run(operations, ["operation": "search", "query": "zorkmid"])
+        #expect(searched.text.contains("paper.pdf") == false)
+        #expect(searched.text.contains("book.xlsx") == false)
+
+        let resolved = await run(operations,
+                                 ["operation": "read",
+                                  "note": root.appendingPathComponent("book.xlsx").path])
+        #expect(resolved.isError)
+    }
+
     @Test func readReturnsTitleTagsAndBody() async throws {
         let (root, operations, store) = try await makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
