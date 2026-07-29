@@ -66,7 +66,7 @@ final class RootViewSmokeTests: XCTestCase {
         store.open(url: b)
         XCTAssertEqual(store.tabs.count, 2)
 
-        let row = IndexRow(path: a, id: "a", title: "A", tags: [], updated: Date(),
+        let row = IndexRow(path: a, id: "a", title: "A", tags: [], aliases: [], updated: Date(),
                            type: MarkdownEngine.identifier, properties: [])
         deleteDocument(row, in: store)
 

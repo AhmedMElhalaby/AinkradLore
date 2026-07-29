@@ -1,6 +1,21 @@
 import Foundation
 import GRDB
 
+/// A link after resolution: what the author wrote, and what it points at.
+///
+/// Both halves are stored. `targetPath` drives backlinks and navigation;
+/// `rawTarget` is what rename rewriting must find and replace, so that a link
+/// written `[[design]]` is rewritten `[[new-name]]` rather than being silently
+/// normalized to a full path.
+public struct ResolvedLink: Sendable, Equatable {
+    public let rawTarget: String
+    public let targetPath: URL?
+    public let isEmbed: Bool
+    public init(rawTarget: String, targetPath: URL?, isEmbed: Bool) {
+        self.rawTarget = rawTarget; self.targetPath = targetPath; self.isEmbed = isEmbed
+    }
+}
+
 /// One document's contribution to the index: where it lives, which engine
 /// claims it, and the payload that engine produced.
 public struct IndexEntry: Sendable {
@@ -8,8 +23,11 @@ public struct IndexEntry: Sendable {
     public let type: String
     public let payload: IndexPayload
     public let updated: Date
-    public init(url: URL, type: String, payload: IndexPayload, updated: Date) {
+    public let resolvedLinks: [ResolvedLink]
+    public init(url: URL, type: String, payload: IndexPayload, updated: Date,
+                resolvedLinks: [ResolvedLink] = []) {
         self.url = url; self.type = type; self.payload = payload; self.updated = updated
+        self.resolvedLinks = resolvedLinks
     }
 }
 
@@ -18,6 +36,7 @@ public struct IndexRow: Equatable, Sendable {
     public let id: String
     public let title: String
     public let tags: [String]
+    public let aliases: [String]
     public let updated: Date
     public let type: String
     public let properties: [FrontmatterPair]
@@ -32,7 +51,7 @@ public final class LoreIndex: @unchecked Sendable {
     /// Bump whenever the schema changes. On mismatch the file is deleted and
     /// rebuilt from disk — safe precisely because the index is derived state,
     /// so there is no migration SQL to get wrong.
-    static let schemaVersion: Int32 = 2
+    static let schemaVersion: Int32 = 3
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -66,7 +85,7 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS documents(
                     path TEXT PRIMARY KEY, id TEXT, title TEXT, tags TEXT,
-                    updated DOUBLE, plaintext TEXT, type TEXT, properties TEXT);
+                    aliases TEXT, updated DOUBLE, plaintext TEXT, type TEXT, properties TEXT);
             """)
             // Standalone FTS5 index keyed by the same rowid as `documents` (NOT
             // external-content: external-content tables corrupt on the manual
@@ -74,6 +93,19 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts
                 USING fts5(title, plaintext);
+            """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS links(
+                    source_path TEXT NOT NULL,
+                    raw_target  TEXT NOT NULL,
+                    target_path TEXT,
+                    is_embed    INTEGER NOT NULL DEFAULT 0);
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS links_by_target ON links(target_path);
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS links_by_source ON links(source_path);
             """)
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
@@ -125,14 +157,16 @@ public final class LoreIndex: @unchecked Sendable {
 
     private static func write(_ entry: IndexEntry, into db: Database) throws {
         try db.execute(sql: """
-            INSERT INTO documents(path,id,title,tags,updated,plaintext,type,properties)
-            VALUES(?,?,?,?,?,?,?,?)
+            INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties)
+            VALUES(?,?,?,?,?,?,?,?,?)
             ON CONFLICT(path) DO UPDATE SET
                 id=excluded.id, title=excluded.title, tags=excluded.tags,
+                aliases=excluded.aliases,
                 updated=excluded.updated, plaintext=excluded.plaintext,
                 type=excluded.type, properties=excluded.properties;
         """, arguments: [entry.url.path, entry.payload.id ?? entry.url.path, entry.payload.title,
                          entry.payload.tags.joined(separator: ","),
+                         entry.payload.aliases.joined(separator: ","),
                          entry.updated.timeIntervalSince1970,
                          entry.payload.plaintext, entry.type,
                          encode(entry.payload.properties)])
@@ -141,6 +175,15 @@ public final class LoreIndex: @unchecked Sendable {
         try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
         try db.execute(sql: "INSERT INTO documents_fts(rowid,title,plaintext) VALUES(?,?,?)",
                        arguments: [rowid, entry.payload.title, entry.payload.plaintext])
+        try db.execute(sql: "DELETE FROM links WHERE source_path = ?",
+                       arguments: [entry.url.path])
+        for link in entry.resolvedLinks {
+            try db.execute(sql: """
+                INSERT INTO links(source_path, raw_target, target_path, is_embed)
+                VALUES(?,?,?,?);
+            """, arguments: [entry.url.path, link.rawTarget,
+                             link.targetPath?.path, link.isEmbed ? 1 : 0])
+        }
     }
 
     /// Replaces the whole index with `entries`, in a SINGLE write transaction.
@@ -164,6 +207,7 @@ public final class LoreIndex: @unchecked Sendable {
                                                arguments: [path])
                 try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
                 try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
+                try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
             }
         }
     }
@@ -174,6 +218,7 @@ public final class LoreIndex: @unchecked Sendable {
                                            arguments: [path.path])
             try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
             try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path.path])
+            try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path.path])
         }
     }
 
@@ -238,8 +283,49 @@ public final class LoreIndex: @unchecked Sendable {
         IndexRow(path: URL(fileURLWithPath: r["path"]),
                  id: r["id"], title: r["title"],
                  tags: (r["tags"] as String).split(separator: ",").map(String.init),
+                 aliases: (r["aliases"] as String).split(separator: ",").map(String.init),
                  updated: Date(timeIntervalSince1970: r["updated"]),
                  type: r["type"],
                  properties: decode(r["properties"]))
+    }
+
+    // MARK: - Links
+
+    /// Documents containing a link that resolves to `target`.
+    public func backlinks(to target: URL) throws -> [IndexRow] {
+        try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT DISTINCT d.* FROM documents d
+                JOIN links l ON l.source_path = d.path
+                WHERE l.target_path = ?
+                ORDER BY d.updated DESC;
+            """, arguments: [target.path]).map(Self.row)
+        }
+    }
+
+    /// This document's outbound links that resolve to nothing. A normal state:
+    /// it is how a link to a not-yet-written note behaves.
+    public func unresolvedLinks(from source: URL) throws -> [String] {
+        try dbQueue.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT raw_target FROM links
+                WHERE source_path = ? AND target_path IS NULL;
+            """, arguments: [source.path])
+        }
+    }
+
+    public func outgoingLinks(from source: URL) throws -> [ResolvedLink] {
+        try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT raw_target, target_path, is_embed FROM links
+                WHERE source_path = ?;
+            """, arguments: [source.path]).map { r in
+                ResolvedLink(rawTarget: r["raw_target"],
+                             targetPath: (r["target_path"] as String?).map {
+                                 URL(fileURLWithPath: $0)
+                             },
+                             isEmbed: (r["is_embed"] as Int) == 1)
+            }
+        }
     }
 }
