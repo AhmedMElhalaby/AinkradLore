@@ -69,4 +69,80 @@ final class LinkParserTests: XCTestCase {
     func test_emptyTargetIsIgnored() {
         XCTAssertEqual(targets("[[]] [[   ]]"), [])
     }
+
+    // MARK: - Fence length / character matching (Finding 1)
+
+    func test_longerFenceIsNotClosedByAShorterBareLineOfTheSameCharacter() {
+        let body = """
+        real [[Before]]
+
+        ````
+        ```
+        not a link [[Inside]]
+        ```
+        ````
+
+        real [[After]]
+        """
+        XCTAssertEqual(targets(body), ["Before", "After"])
+    }
+
+    func test_backtickFenceIsNotClosedByATildeFence() {
+        let body = """
+        ```
+        [[Fenced]]
+        ~~~
+        still fenced [[AlsoFenced]]
+        ```
+        real [[Real]]
+        """
+        XCTAssertEqual(targets(body), ["Real"])
+    }
+
+    func test_tildeFenceIsNotClosedByABacktickFence() {
+        let body = """
+        ~~~
+        [[Fenced]]
+        ```
+        still fenced [[AlsoFenced]]
+        ~~~
+        real [[Real]]
+        """
+        XCTAssertEqual(targets(body), ["Real"])
+    }
+
+    func test_fenceWithInfoStringOpensCorrectly() {
+        let body = """
+        ```swift
+        let x = "[[NotALink]]"
+        ```
+        real [[Real]]
+        """
+        XCTAssertEqual(targets(body), ["Real"])
+    }
+
+    func test_unclosedFenceSwallowsRestOfDocument() {
+        let body = """
+        real [[Before]]
+
+        ```
+        [[Inside]]
+        still no closer, [[AlsoInside]]
+        """
+        XCTAssertEqual(targets(body), ["Before"])
+    }
+
+    // MARK: - Dangling backtick (Finding 2)
+
+    func test_danglingBacktickDoesNotSwallowRestOfLine() {
+        XCTAssertEqual(targets("a ` stray backtick then [[Design]]"), ["Design"])
+    }
+
+    func test_balancedInlineCodeStillSkipsButLaterLinkIsFound() {
+        XCTAssertEqual(targets("`code` then [[Design]]"), ["Design"])
+    }
+
+    func test_linkFullyInsideInlineCodeIsStillIgnored() {
+        XCTAssertEqual(targets("`[[NotALink]]`"), [])
+    }
 }
