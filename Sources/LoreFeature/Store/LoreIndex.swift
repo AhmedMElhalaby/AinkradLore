@@ -40,16 +40,26 @@ public final class LoreIndex: @unchecked Sendable {
         // still open on it is an SQLite API violation ("vnode unlinked while
         // in use"), which libsqlite3 logs loudly and which leaves the reopened
         // handle pointing at a file nobody can reach.
+        //
+        // ANY failure to open, probe or close the existing file counts as
+        // stale. The index is entirely derived state, so a corrupt or
+        // truncated file must cost exactly one rescan — never the vault. Left
+        // as a thrown error it propagates out of `activate`, and the user gets
+        // a plugin that permanently refuses to open their notes because a
+        // cache file went bad.
         if FileManager.default.fileExists(atPath: path.path) {
-            let stale: Bool
+            var stale = true
             do {
                 let probe = try DatabaseQueue(path: path.path)
-                stale = try probe.read { db in
+                let version = try probe.read { db in
                     try Int32.fetchOne(db, sql: "PRAGMA user_version") ?? 0
-                } != Self.schemaVersion
+                }
                 try probe.close()
+                stale = version != Self.schemaVersion
+            } catch {
+                stale = true
             }
-            if stale { try Self.recreate(at: path) }
+            if stale { Self.recreate(at: path) }
         }
         dbQueue = try DatabaseQueue(path: path.path)
         try dbQueue.write { db in
@@ -69,7 +79,10 @@ public final class LoreIndex: @unchecked Sendable {
         }
     }
 
-    private static func recreate(at path: URL) throws {
+    /// Deletes the index file and its sidecars. Non-throwing on purpose: a
+    /// missing file is the desired end state, so nothing here is an error the
+    /// caller could act on.
+    private static func recreate(at path: URL) {
         for suffix in ["", "-wal", "-shm"] {
             try? FileManager.default.removeItem(
                 atPath: path.path + suffix)
@@ -88,6 +101,11 @@ public final class LoreIndex: @unchecked Sendable {
         properties.map { "\($0.key)\u{1F}\($0.rawValue)" }.joined(separator: "\u{1E}")
     }
 
+    /// Known lossy edge: a property whose key or value literally contains
+    /// U+001F or U+001E is dropped rather than mis-split. Unreachable today —
+    /// `Frontmatter.parse` yields single-line, whitespace-trimmed scalars, and
+    /// neither separator can appear in one — and M5's typed columns remove the
+    /// encoding entirely.
     private static func decode(_ raw: String) -> [FrontmatterPair] {
         guard !raw.isEmpty else { return [] }
         return raw.components(separatedBy: "\u{1E}").compactMap { field in

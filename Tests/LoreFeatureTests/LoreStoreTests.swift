@@ -114,6 +114,57 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertEqual(s.search("needle").map(\.title), ["b"])
     }
 
+    /// A vault under a dot-prefixed ancestor (`~/.local/share/notes`, a
+    /// `.worktrees/` checkout, a sandbox container) must still index. Judging
+    /// the absolute path made those vaults silently empty.
+    func test_scanVault_indexesAVaultUnderADotPrefixedAncestor() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hidden-\(UUID())", isDirectory: true)
+        let root = parent.appendingPathComponent("vault", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try "alpha".write(to: root.appendingPathComponent("a.txt"),
+                          atomically: true, encoding: .utf8)
+        // ...while a dot directory INSIDE the vault is still skipped.
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        try "beta".write(to: git.appendingPathComponent("b.txt"),
+                         atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.map(\.url.lastPathComponent), ["a.txt"])
+    }
+
+    func test_scanVault_capsIndexedPlaintextButStillSearchesIt() throws {
+        let root = tempDir()
+        let limit = VaultIndexCoordinator.maxIndexedPlaintextBytes
+        // "needle" up front, then well past the cap.
+        let big = "needle\n" + String(repeating: "x", count: limit + 5_000)
+        try big.write(to: root.appendingPathComponent("big.log"),
+                      atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertLessThanOrEqual(entries[0].payload.plaintext.utf8.count, limit)
+        XCTAssertLessThan(entries[0].payload.plaintext.utf8.count, big.utf8.count)
+
+        let index = try LoreIndex(path: root.appendingPathComponent("i.sqlite"))
+        try index.replaceAll(with: entries)
+        XCTAssertEqual(index.searchOrEmpty("needle").map(\.title), ["big"])
+    }
+
+    func test_cappedTruncatesOnAScalarBoundary() {
+        let limit = VaultIndexCoordinator.maxIndexedPlaintextBytes
+        // Every "é" is 2 UTF-8 bytes; the leading "a" makes the byte cap land
+        // in the middle of one.
+        let text = "a" + String(repeating: "é", count: limit)
+        let capped = VaultIndexCoordinator.capped(text)
+        XCTAssertEqual(capped.utf8.count, limit - 1, "half a scalar was kept or too much dropped")
+        XCTAssertFalse(capped.unicodeScalars.contains("\u{FFFD}"),
+                       "truncation cut through a scalar")
+        XCTAssertTrue(capped.dropFirst().allSatisfy { $0 == "é" })
+    }
+
     func test_externalChange_flagsOpenNote() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Open")

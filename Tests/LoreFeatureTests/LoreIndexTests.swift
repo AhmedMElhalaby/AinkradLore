@@ -62,6 +62,18 @@ final class LoreIndexTests: XCTestCase {
         XCTAssertEqual(try index.all().first?.properties.first?.key, "status")
     }
 
+    /// A corrupt index must cost a rescan, never the vault: if `init` threw,
+    /// `activate` would fail and the user's notes would never open again.
+    func test_corruptIndexFileSelfHeals() throws {
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("idx-\(UUID()).sqlite")
+        try Data(repeating: 0xAB, count: 4096).write(to: dbURL)
+
+        let index = try LoreIndex(path: dbURL)
+        try index.upsert(entry("a", title: "Alpha", body: "recovered needle"))
+        XCTAssertEqual(index.searchOrEmpty("needle").map(\.title), ["Alpha"])
+    }
+
     func test_staleSchemaIsRebuiltNotRead() throws {
         let dbURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("idx-\(UUID()).sqlite")

@@ -130,21 +130,67 @@ public final class VaultIndexCoordinator {
     /// to put in a full-text index for them.
     nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
         var entries: [IndexEntry] = []
+        // Only components BELOW the root are ours to judge. Testing the
+        // absolute path would make a vault under any dot-prefixed ancestor —
+        // `~/.local/share/notes`, a `.worktrees/` checkout, a sandbox
+        // container — index zero files, silently, showing an empty vault with
+        // no error to explain it.
+        let rootDepth = root.standardizedFileURL.pathComponents.count
         let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: [.contentModificationDateKey])
         while let url = enumerator?.nextObject() as? URL {
             // Skip package internals and tool directories: `.obsidian`,
             // `.git`, `.trash`, and (later) `.lore` package contents are not
             // documents in their own right.
-            if url.pathComponents.contains(where: { $0.hasPrefix(".") }) { continue }
+            let relative = url.standardizedFileURL.pathComponents.dropFirst(rootDepth)
+            if relative.contains(where: { $0.hasPrefix(".") }) { continue }
             guard let engineType = EngineRegistry.engine(for: url),
                   let engine = try? engineType.load(url) else { continue }
+            // File mtime is DELIBERATELY authoritative for `updated`, and
+            // supersedes markdown's frontmatter `updated:` value, which the
+            // pre-M0 scan used. Two reasons: it is uniform across document
+            // types (plaintext has no frontmatter to read), and the
+            // frontmatter field is day-granularity, so a whole day's notes
+            // tie and `ORDER BY updated DESC` sorts them arbitrarily. This
+            // changes sidebar ordering for vaults where the two disagree.
             let updated = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate) ?? Date()
+            var payload = engine.indexPayload
+            payload.plaintext = Self.capped(payload.plaintext)
             entries.append(IndexEntry(url: url, type: engineType.identifier,
-                                      payload: engine.indexPayload, updated: updated))
+                                      payload: payload, updated: updated))
         }
         return entries
+    }
+
+    /// Upper bound on the indexed text of a single document.
+    ///
+    /// `scanVault` holds every loaded payload resident until `replaceAll`
+    /// applies them in one transaction, so without a cap total rescan memory
+    /// is the size of the vault's indexable content. That was tolerable when
+    /// only `.md` was scanned; `PlainTextEngine` claims `log`, `csv` and
+    /// `json`, where single files run to hundreds of megabytes. Searching the
+    /// first megabyte of a giant log is the right trade — holding the whole
+    /// corpus in RAM is not. Truncation affects the INDEX ONLY; nothing here
+    /// touches what is written back to disk.
+    nonisolated static let maxIndexedPlaintextBytes = 1_048_576
+
+    /// Truncates to at most `maxIndexedPlaintextBytes` UTF-8 bytes, cutting on
+    /// a scalar boundary so the result is never a mangled half-character.
+    nonisolated static func capped(_ text: String) -> String {
+        guard text.utf8.count > maxIndexedPlaintextBytes else { return text }
+        var bytes = Array(text.utf8.prefix(maxIndexedPlaintextBytes))
+        // Walk back to the last lead byte (anything that is not a 10xxxxxx
+        // continuation). If the sequence it starts would run past the cut, the
+        // scalar is incomplete — drop it whole.
+        var i = bytes.count - 1
+        while i >= 0, bytes[i] & 0xC0 == 0x80 { i -= 1 }
+        if i >= 0 {
+            let lead = bytes[i]
+            let width = lead < 0x80 ? 1 : (lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4))
+            if i + width > bytes.count { bytes.removeSubrange(i...) }
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// Synchronous rescan. Kept for tests and for callers that must observe the
