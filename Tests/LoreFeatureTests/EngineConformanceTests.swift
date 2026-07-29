@@ -21,6 +21,26 @@ final class EngineRegistryTests: XCTestCase {
         XCTAssertNil(EngineRegistry.engine(for: url))
     }
 
+    func test_load_dispatchesThroughTheRegisteredEngine() throws {
+        let url = try tempFile("n.md", """
+        ---
+        id: abc
+        title: Hello
+        ---
+        searchable haystack
+        """)
+        let engine = try EngineRegistry.load(url)
+        XCTAssertEqual(engine.indexPayload.title, "Hello")
+        XCTAssertTrue(engine.indexPayload.plaintext.contains("haystack"))
+    }
+
+    func test_load_throwsUnsupportedForAnUnclaimedType() throws {
+        let url = try tempFile("sheet.xlsx", "binary-ish")
+        XCTAssertThrowsError(try EngineRegistry.load(url)) { error in
+            XCTAssertEqual(error as? EngineError, .unsupported(url))
+        }
+    }
+
     func test_engineIdentifiersAreUnique() {
         let ids = EngineRegistry.engines.map { $0.identifier }
         XCTAssertEqual(Set(ids).count, ids.count, "duplicate engine identifiers: \(ids)")
