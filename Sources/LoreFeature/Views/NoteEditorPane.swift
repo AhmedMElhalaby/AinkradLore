@@ -69,13 +69,15 @@ struct NoteEditorPane: View {
 
     private func loadFromDisk() {
         let row = IndexRow(path: note.path, id: note.id, title: note.title,
-                           tags: note.tags, updated: note.updated)
+                           tags: note.tags, updated: note.updated,
+                           type: MarkdownEngine.identifier, properties: note.extra)
         if let fresh = try? store.load(row) { note = fresh }
     }
 
     private func deleteNote() {
         let row = IndexRow(path: note.path, id: note.id, title: note.title,
-                           tags: note.tags, updated: note.updated)
+                           tags: note.tags, updated: note.updated,
+                           type: MarkdownEngine.identifier, properties: note.extra)
         try? store.delete(row)
         onDelete()
     }

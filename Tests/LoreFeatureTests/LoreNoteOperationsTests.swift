@@ -210,7 +210,7 @@ struct LoreNoteOperationsTests {
         let after = Set((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])
         #expect(after.subtracting(before).isEmpty, "a file was written outside the vault")
         // And every note file that does exist is inside the vault root.
-        #expect(LoreStore.scanVault(at: root).isEmpty)
+        #expect(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
     @Test func createStillAcceptsAnOrdinaryTitle() async throws {

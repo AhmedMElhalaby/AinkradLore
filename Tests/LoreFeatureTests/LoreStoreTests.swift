@@ -90,6 +90,30 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertFalse(s.rows.contains { $0.id == "deep" }, "rebuild should prune deleted files")
     }
 
+    func test_scanVault_indexesEveryEngineOpenableType() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Note\n---\nalpha".write(
+            to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try "beta text".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try "gamma".write(
+            to: root.appendingPathComponent("c.xlsx"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext"],
+                       "unclaimed types must not be indexed")
+    }
+
+    func test_search_findsPlainTextDocuments() async throws {
+        let root = tempDir()
+        try "beta needle".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        XCTAssertEqual(s.search("needle").map(\.title), ["b"])
+    }
+
     func test_externalChange_flagsOpenNote() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Open")
