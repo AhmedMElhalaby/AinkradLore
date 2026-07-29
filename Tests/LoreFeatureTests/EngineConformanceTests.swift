@@ -118,10 +118,11 @@ final class EngineConformanceTests: XCTestCase {
     /// Each sample must be byte-identical to what its engine's own `save`
     /// re-emits after a no-op load, since `test_loadSaveLoad_isByteStable`
     /// asserts against the ORIGINAL contents, not just idempotency. The
-    /// markdown sample therefore matches `Frontmatter.serialize`'s exact
-    /// output (empty tags list, no extra properties, no trailing newline).
+    /// markdown sample is deliberately a REAL Obsidian shape — block-sequence
+    /// `tags` and `aliases` plus a comment — because those are exactly what a
+    /// model-re-emitting serializer destroys. The assertion stays strict.
     private static let samples: [String: (name: String, contents: String)] = [
-        "markdown": ("c.md", "---\nid: a\ntitle: T\ntags: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\nbody"),
+        "markdown": ("c.md", "---\nid: a\ntitle: T\ntags:\n  - alpha\n  - beta\ncreated: 2026-01-01\nupdated: 2026-01-01\naliases:\n  - one\n# a trailing comment\n---\nbody"),
         "plaintext": ("c.txt", "plain body text"),
     ]
 

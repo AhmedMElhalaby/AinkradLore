@@ -78,6 +78,267 @@ final class FrontmatterTests: XCTestCase {
         XCTAssertTrue(out.contains("cssclasses: wide"), out)
     }
 
+    // MARK: - preserve-and-patch (Task 1b)
+
+    /// Every case here asserts a BYTE-EXACT round trip of an unmodified note.
+    /// The old "parse into a model, re-emit from the model" design could not
+    /// pass any of them that involve a shape `Note` does not model.
+    private func assertByteExact(_ text: String, _ message: String = "",
+                                 line: UInt = #line) {
+        let out = Frontmatter.serialize(Frontmatter.parse(text, path: path))
+        XCTAssertEqual(out, text, message, line: line)
+    }
+
+    func test_byteExact_blockSequenceAliases() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        aliases:
+          - one
+          - two
+        created: 2026-01-01
+        updated: 2026-01-01
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_blockSequenceCssclasses() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        cssclasses:
+          - wide
+          - dark
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_blockSequenceTags() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        tags:
+          - work
+          - ideas
+        ---
+        body
+        """)
+    }
+
+    /// The critical one: a block-sequence `tags:` must be READ into `note.tags`
+    /// (or tag filtering and the index silently see an untagged vault) and
+    /// still be written back as a block sequence.
+    func test_blockSequenceTags_areReadAndWrittenBackUnchanged() {
+        let text = """
+        ---
+        id: a
+        title: T
+        tags:
+          - work
+          - "quoted tag"
+        ---
+        body
+        """
+        let note = Frontmatter.parse(text, path: path)
+        XCTAssertEqual(note.tags, ["work", "quoted tag"])
+        XCTAssertEqual(Frontmatter.serialize(note), text)
+    }
+
+    func test_byteExact_inlineListsStillWork() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        tags: [work, ideas]
+        aliases: [one, two]
+        created: 2026-01-01
+        updated: 2026-01-01
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_isoCreatedIsNotRewritten() {
+        let text = """
+        ---
+        id: a
+        title: T
+        created: 2026-01-02T10:00:00Z
+        updated: 2026-01-02T10:00:00Z
+        ---
+        body
+        """
+        let note = Frontmatter.parse(text, path: path)
+        XCTAssertEqual(note.created, Date(timeIntervalSince1970: 1_767_348_000))
+        XCTAssertEqual(Frontmatter.serialize(note), text)
+    }
+
+    func test_byteExact_dayCreatedIsNotRewritten() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        created: 2026-01-02
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_unparseableCreatedIsLeftAlone() {
+        let text = """
+        ---
+        id: a
+        title: T
+        created: sometime last tuesday
+        ---
+        body
+        """
+        // It parses to `now` in the model, but the file must not be touched.
+        assertByteExact(text, "an unparseable date must never be overwritten")
+    }
+
+    func test_byteExact_commentsAndBlankLines() {
+        assertByteExact("""
+        ---
+        # the note's identity
+        id: a
+        title: T
+
+        # obsidian properties
+        aliases:
+          - one
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_quotedValuesAndColonsAndHashes() {
+        assertByteExact("""
+        ---
+        id: a
+        title: "Ratio: 3#4"
+        source: https://example.com/a#b
+        note: 'it: works'
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_blockScalars() {
+        assertByteExact("""
+        ---
+        id: a
+        title: T
+        description: |
+          line one
+          line two
+        summary: >
+          folded text
+        ---
+        body
+        """)
+    }
+
+    func test_byteExact_keyOrderIsPreserved() {
+        assertByteExact("""
+        ---
+        updated: 2026-01-01
+        zeta: last
+        title: T
+        created: 2026-01-01
+        alpha: first
+        id: a
+        tags: [x]
+        ---
+        body
+        """)
+    }
+
+    func test_changingTitle_altersOnlyTheTitleLine() {
+        let text = """
+        ---
+        id: a
+        title: Old
+        aliases:
+          - one
+        created: 2026-01-02T10:00:00Z
+        # keep me
+        status: active
+        ---
+        body
+        """
+        var note = Frontmatter.parse(text, path: path)
+        note.title = "New"
+        let out = Frontmatter.serialize(note)
+        XCTAssertEqual(out, text.replacingOccurrences(of: "title: Old", with: "title: New"))
+    }
+
+    func test_noFrontmatter_serializesFromTheModel() {
+        let note = Frontmatter.parse("# Heading\nplain", path: path)
+        XCTAssertNil(note.rawFrontmatter)
+        let out = Frontmatter.serialize(note)
+        XCTAssertTrue(out.hasPrefix("---\nid: \(note.id)\ntitle: Heading\n"), out)
+        XCTAssertTrue(out.hasSuffix("---\n# Heading\nplain"), out)
+    }
+
+    func test_emptyFrontmatterBlock_gainsOnlyAnIdAndKeepsBody() {
+        let note = Frontmatter.parse("---\n---\nbody", path: path)
+        XCTAssertEqual(note.rawFrontmatter, "")
+        XCTAssertEqual(note.body, "body")
+        // Only `id` is appended: a derived title, an empty tag list and dates
+        // that defaulted to "now" are fabrications, not preserved facts.
+        XCTAssertEqual(Frontmatter.serialize(note), "---\nid: \(note.id)\n---\nbody")
+    }
+
+    func test_absentModelledKeysAreAppendedOnlyWhenTheyCarryRealValues() {
+        var note = Frontmatter.parse("""
+        ---
+        aliases:
+          - one
+        ---
+        body
+        """, path: path)
+        note.title = "Explicit"
+        note.tags = ["x"]
+        XCTAssertEqual(Frontmatter.serialize(note), """
+        ---
+        aliases:
+          - one
+        id: \(note.id)
+        title: Explicit
+        tags: [x]
+        ---
+        body
+        """)
+    }
+
+    func test_unmodelledBlockSequence_isFlattenedForTheIndexOnly() {
+        let note = Frontmatter.parse("""
+        ---
+        id: a
+        aliases:
+          - one
+          - two
+        ---
+        body
+        """, path: path)
+        XCTAssertEqual(note.extra.map(\.key), ["aliases"])
+        XCTAssertEqual(note.extra.first?.rawValue, "[one, two]")
+    }
+
+    private static func day(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: date)
+    }
+
     func test_roundTrip_isStableAcrossTwoPasses() {
         let text = """
         ---

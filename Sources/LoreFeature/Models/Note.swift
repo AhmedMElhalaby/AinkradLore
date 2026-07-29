@@ -14,12 +14,26 @@ public struct Note: Identifiable, Equatable, Sendable {
     public var created: Date
     public var updated: Date
     public var body: String
+    /// The unmodelled `key: value` pairs, flattened to one line each.
+    ///
+    /// DERIVED, read-only-in-spirit: it feeds `IndexPayload.properties` so
+    /// property views can query them. It is NOT used to write the file — see
+    /// `rawFrontmatter` — so the two cannot disagree about what lands on disk.
     public var extra: [FrontmatterPair]
 
+    /// The document's original frontmatter block, verbatim, without its `---`
+    /// fences. `nil` when the file had no frontmatter at all.
+    ///
+    /// This is the source of truth for serialization: `Frontmatter.serialize`
+    /// patches modelled keys into this text instead of re-emitting a block from
+    /// the model, so everything Lore does not model survives a save intact.
+    public var rawFrontmatter: String?
+
     public init(path: URL, id: String, title: String, tags: [String],
-                created: Date, updated: Date, body: String, extra: [FrontmatterPair] = []) {
+                created: Date, updated: Date, body: String, extra: [FrontmatterPair] = [],
+                rawFrontmatter: String? = nil) {
         self.path = path; self.id = id; self.title = title; self.tags = tags
         self.created = created; self.updated = updated; self.body = body
-        self.extra = extra
+        self.extra = extra; self.rawFrontmatter = rawFrontmatter
     }
 }
