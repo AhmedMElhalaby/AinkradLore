@@ -76,10 +76,23 @@ public final class LoreStore {
     /// otherwise lose that edit. A read-only session can never be dirty (see
     /// `DocumentSession.markChanged`), so this only ever writes a document the
     /// engine can actually save.
-    public func closeTab(_ session: DocumentSession) {
-        guard let idx = tabs.firstIndex(where: { $0 === session }) else { return }
+    ///
+    /// A `false` return means the document still has unsaved work and is
+    /// still open: the tab was NOT removed, its selection was left
+    /// untouched, and the session's own `conflict` / `lastSaveError` flags
+    /// already explain why (a real save failure, or an external change).
+    /// Callers must not assume a `false` return means the tab is gone.
+    /// Pass `force: true` to remove the tab regardless — the user explicitly
+    /// choosing to discard.
+    @discardableResult
+    public func closeTab(_ session: DocumentSession, force: Bool = false) -> Bool {
+        guard let idx = tabs.firstIndex(where: { $0 === session }) else { return false }
         if session.isDirty && !session.isReadOnly {
-            try? session.saveNow()
+            do {
+                try session.saveNow()
+            } catch {
+                if !force { return false }
+            }
         }
         tabs.remove(at: idx)
         if selectedTab === session {
@@ -87,6 +100,7 @@ public final class LoreStore {
                         : tabs.indices.contains(idx - 1) ? tabs[idx - 1]
                         : tabs.last
         }
+        return true
     }
 
     /// Every distinct tag across all indexed notes, sorted — drives the sidebar
