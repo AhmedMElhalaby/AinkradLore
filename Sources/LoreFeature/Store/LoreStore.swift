@@ -307,6 +307,16 @@ public final class LoreStore {
         openMTimes[row.path] = nil
     }
 
+    /// Follow a rename in the legacy note API's mtime map. Left stale, the
+    /// entry is keyed by a path that no longer exists, so
+    /// `externalChangeDetected(for:)` finds no baseline for the renamed note
+    /// and returns false — turning `save`'s external-change guard off for it.
+    func transferOpenMTime(from old: URL, to new: URL) {
+        guard let known = openMTimes[old] else { return }
+        openMTimes[old] = nil
+        openMTimes[new] = known
+    }
+
     /// True if the file changed on disk since we last loaded/saved it.
     public func externalChangeDetected(for note: Note) -> Bool {
         guard let known = openMTimes[note.path], let disk = try? mtime(of: note.path) else { return false }

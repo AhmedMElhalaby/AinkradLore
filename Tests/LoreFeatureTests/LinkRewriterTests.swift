@@ -296,3 +296,163 @@ final class RenameApplicationTests: XCTestCase {
         XCTAssertTrue(text.contains("The design of [[Design Notes]] and [[Architecture]]."), text)
     }
 }
+
+/// The four defects the Task 7 review found after the first pass.
+@MainActor
+final class RenameApplicationHardeningTests: XCTestCase {
+    private func vault() throws -> (URL, LoreStore) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-rename2-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let s = LoreStore(documents: FakeDocs(),
+                          indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try s.setVaultRootForTesting(root)
+        return (root, s)
+    }
+
+    private func write(_ root: URL, _ name: String, _ text: String) throws -> URL {
+        let url = root.appendingPathComponent(name)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// FINDING 1. A tab that is dirty AND already conflicted cannot flush: its
+    /// `saveNow` re-throws `externalChange`. The plan-time baseline was
+    /// captured AFTER that external edit, so the mtime guard would let the
+    /// rewrite through and the post-rewrite reload would then replace the
+    /// engine's contents — silently destroying the user's unsaved text.
+    func test_dirtyConflictedTabKeepsUnsavedTextAndIsReportedAsSkipped() async throws {
+        let (root, s) = try vault()
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Design]]")
+        let design = try write(root, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+
+        s.open(url: a)
+        let session = try XCTUnwrap(s.selectedTab)
+        let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
+        engine.note.body = "UNSAVED WORK\n\nsee [[Design]]"
+        session.markChanged()
+        session.cancelPendingSave()
+
+        // An external edit lands BEFORE planning, so the session is already in
+        // conflict and the plan-time baseline already reflects that edit.
+        try await Task.sleep(for: .seconds(1.1))
+        let external = "---\nid: a\ntitle: A\n---\nEXTERNAL [[Design]]"
+        try external.write(to: a, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try session.saveNow())
+        XCTAssertTrue(session.conflict)
+        XCTAssertTrue(session.isDirty)
+
+        let report = s.apply(s.plan(rename: design, to: "Architecture"))
+
+        // The file was not written...
+        XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), external)
+        // ...the outcome is in the report...
+        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertFalse(report.rewritten.contains { $0.lastPathComponent == "a.md" })
+        // ...and the unsaved text is still in the editor, still conflicted,
+        // for the user to resolve themselves.
+        XCTAssertTrue(session.isDirty)
+        XCTAssertTrue(session.conflict)
+        XCTAssertTrue(engine.note.body.contains("UNSAVED WORK"))
+    }
+
+    /// FINDING 2. `moveItem` can fail for reasons other than a collision. A
+    /// missing destination folder must be refused BEFORE any link is rewritten.
+    func test_moveIntoMissingFolderRefusesAndWritesNothing() async throws {
+        let (root, s) = try vault()
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Projects/Design]]")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Projects"), withIntermediateDirectories: true)
+        let design = try write(root, "Projects/Design.md",
+                               "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+
+        let missing = root.appendingPathComponent("Nope")
+        let plan = s.plan(move: design, toFolder: missing)
+        XCTAssertFalse(plan.edits.isEmpty, "precondition: there is something to rewrite")
+
+        let report = s.apply(plan)
+        XCTAssertNil(report.movedTo)
+        XCTAssertEqual(report.rewritten, [])
+        XCTAssertEqual(report.failed.count, 1)
+        XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("[[Projects/Design]]"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: design.path))
+    }
+
+    /// FINDING 3. A self-linking document is both the move source and a rewrite
+    /// target. Matching sessions by path after `adoptRenamed` never finds it,
+    /// so it kept pre-rewrite text and its next save reverted the self-link.
+    func test_selfLinkingDocumentSurvivesRenameAcrossItsNextSave() async throws {
+        let (root, s) = try vault()
+        let design = try write(root, "Design.md",
+                               "---\nid: d\ntitle: Design\n---\nsee [[Design]] here")
+        await s.settleForTesting(); try s.rebuild()
+
+        s.open(url: design)
+        let session = try XCTUnwrap(s.selectedTab)
+        let plan = s.plan(rename: design, to: "Architecture")
+        XCTAssertEqual(plan.edits.count, 1, "precondition: the self-link is an edit")
+
+        _ = s.apply(plan)
+        let moved = root.appendingPathComponent("Architecture.md")
+        XCTAssertEqual(session.url.lastPathComponent, "Architecture.md")
+        XCTAssertTrue(try String(contentsOf: moved, encoding: .utf8).contains("[[Architecture]]"))
+
+        // The real regression: the session's next save must not write a stale
+        // pre-rewrite buffer back over the rewrite.
+        session.markChanged()
+        session.cancelPendingSave()
+        try session.saveNow()
+        let text = try String(contentsOf: moved, encoding: .utf8)
+        XCTAssertTrue(text.contains("[[Architecture]]"), text)
+        XCTAssertFalse(text.contains("[[Design]]"), text)
+    }
+
+    /// FINDING 4. "Opened it and nothing matched" is neither a write nor a
+    /// refusal, and reporting it as `rewritten` makes the report untruthful.
+    func test_applyEditsDistinguishesWrittenUnchangedAndSkipped() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-outcome-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("a.md")
+        try "see [[Design]]".write(to: file, atomically: true, encoding: .utf8)
+        let baseline = try XCTUnwrap(FileManager.default
+            .attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+
+        let hit = [LinkEdit(file: file, oldTarget: "Design", newTarget: "Architecture")]
+        let miss = [LinkEdit(file: file, oldTarget: "Nothing", newTarget: "Else")]
+
+        // Nothing matches: unchanged, and the file is left byte-identical.
+        XCTAssertEqual(try LinkRewriter.applyEdits(miss, to: file, baseline: baseline),
+                       .unchanged)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "see [[Design]]")
+
+        // No baseline: fail closed.
+        XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file, baseline: nil), .skipped)
+        // Stale baseline: refuse.
+        XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file,
+                                                   baseline: .distantPast), .skipped)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "see [[Design]]")
+
+        // A real match writes.
+        XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file, baseline: baseline),
+                       .written)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "see [[Architecture]]")
+    }
+
+    /// MINOR. The moved file, when it was itself rewritten, must be reported at
+    /// its NEW path — the old one no longer exists by the time the UI renders.
+    func test_reportNamesTheMovedFileAtItsNewPath() async throws {
+        let (root, s) = try vault()
+        let design = try write(root, "Design.md",
+                               "---\nid: d\ntitle: Design\n---\nsee [[Design]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        let report = s.apply(s.plan(rename: design, to: "Architecture"))
+        XCTAssertEqual(report.rewritten.map(\.lastPathComponent), ["Architecture.md"])
+        for url in report.rewritten {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), url.path)
+        }
+    }
+}

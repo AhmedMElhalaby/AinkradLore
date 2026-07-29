@@ -174,18 +174,25 @@ public enum LinkRewriter {
 public struct RenameReport: Sendable {
     /// Files whose inbound links were rewritten.
     public let rewritten: [URL]
-    /// Files left ALONE because they changed on disk after the plan was
-    /// computed. Their links still point at the old name; nothing was lost.
+    /// Files left ALONE, either because they changed on disk after the plan was
+    /// computed or because a tab still holds unsaved edits to them. Their links
+    /// still point at the old name; nothing was lost.
     public let skipped: [URL]
+    /// Files that were opened and matched nothing — no delimiter-anchored
+    /// occurrence of the old target survived to rewrite time. Nothing was
+    /// written, so they must not be listed as `rewritten` (an untruthful
+    /// report) nor as `skipped` (nothing was refused).
+    public let unchanged: [URL]
     /// Files that could not be processed, with a human-readable reason. Also
     /// carries plan-time unrewritable links and a refused move.
     public let failed: [(url: URL, reason: String)]
     /// The new location, or nil if the file was not moved.
     public let movedTo: URL?
 
-    public init(rewritten: [URL], skipped: [URL],
+    public init(rewritten: [URL], skipped: [URL], unchanged: [URL] = [],
                 failed: [(url: URL, reason: String)], movedTo: URL?) {
         self.rewritten = rewritten; self.skipped = skipped
+        self.unchanged = unchanged
         self.failed = failed; self.movedTo = movedTo
     }
 
@@ -195,28 +202,40 @@ public struct RenameReport: Sendable {
 }
 
 extension LinkRewriter {
+    /// What `applyEdits` did to one file. Three states, not a `Bool`: "opened
+    /// it and nothing matched" is neither a write nor a refusal, and collapsing
+    /// it into either one makes the report lie — and, worse, drags that file's
+    /// tab through a `resolveByReloading()` it never needed.
+    enum EditOutcome {
+        case written
+        /// No delimiter-anchored occurrence matched. Nothing was written.
+        case unchanged
+        /// Refused: the file changed on disk since the plan, or we have no
+        /// baseline to compare against.
+        case skipped
+    }
+
     /// Applies one file's edits, refusing if the file changed since `baseline`.
-    /// Returns `false` when skipped, `true` when written.
     ///
     /// A nil `baseline` is treated as "changed": we cannot prove the file is
     /// the one we planned against, and this operation edits files the user did
     /// not open. Failing closed costs a redo; failing open costs their text.
-    static func applyEdits(_ edits: [LinkEdit], to file: URL, baseline: Date?) throws -> Bool {
-        guard let baseline else { return false }
+    static func applyEdits(_ edits: [LinkEdit], to file: URL,
+                           baseline: Date?) throws -> EditOutcome {
+        guard let baseline else { return .skipped }
         guard let disk = try? FileManager.default
                 .attributesOfItem(atPath: file.path)[.modificationDate] as? Date,
-              disk <= baseline else { return false }
+              disk <= baseline else { return .skipped }
         let text = try String(contentsOf: file, encoding: .utf8)
         var out = text
         for edit in edits {
             out = replacingLinkTargets(in: out, from: edit.oldTarget, to: edit.newTarget)
         }
-        // Not a skip and not a failure: nothing matched, so there is nothing to
-        // write. Rewriting identical bytes would only bump the mtime and make
-        // every OTHER open editor think the file changed underneath it.
-        guard out != text else { return true }
+        // Rewriting identical bytes would only bump the mtime and make every
+        // OTHER open editor think the file changed underneath it.
+        guard out != text else { return .unchanged }
         try out.write(to: file, atomically: true, encoding: .utf8)
-        return true
+        return .written
     }
 
     /// Replaces `[[old]]`, `[[old|display]]`, `![[old]]` and `[t](old)` while

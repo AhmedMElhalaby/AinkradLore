@@ -210,11 +210,20 @@ public final class DocumentSession: Identifiable {
     ///
     /// `isDirty` is deliberately NOT cleared: unsaved edits are still unsaved,
     /// they just belong to a file with a new name now.
+    /// An UNRESOLVED conflict survives the rename. The externally-edited
+    /// content moved along with the file, so the disagreement is still live:
+    /// clearing the flag and adopting the moved file's mtime as the baseline
+    /// would let this session's next autosave overwrite the other writer's
+    /// text silently — the rename would have laundered a conflict into a data
+    /// loss. `.distantPast` keeps `saveNow` throwing until the user picks one
+    /// of the three resolutions, exactly as before the rename.
     public func adoptRenamed(_ newURL: URL) {
+        let unresolvedConflict = conflict && isDirty
         url = newURL
-        baseline = Self.mtime(of: newURL) ?? .distantPast
-        conflict = false
-        lastSaveError = nil
+        baseline = unresolvedConflict ? .distantPast
+                                      : (Self.mtime(of: newURL) ?? .distantPast)
+        conflict = unresolvedConflict
+        if !unresolvedConflict { lastSaveError = nil }
     }
 
     private func write() throws {
