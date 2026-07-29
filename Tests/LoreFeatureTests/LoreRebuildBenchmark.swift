@@ -17,7 +17,7 @@ final class LoreRebuildBenchmark: XCTestCase {
             try "---\ntitle: Note \(i)\ntags: [a, b]\n---\n\(String(repeating: "body text ", count: 40))\n"
                 .write(to: root.appendingPathComponent("n\(i).md"), atomically: true, encoding: .utf8)
         }
-        let notes = LoreStore.scanVault(at: root)
+        let notes = VaultIndexCoordinator.scanVault(at: root)
         XCTAssertEqual(notes.count, noteCount)
 
         // OLD: one write transaction per note, then one per pruned row.

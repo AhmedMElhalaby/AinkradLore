@@ -90,6 +90,200 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertFalse(s.rows.contains { $0.id == "deep" }, "rebuild should prune deleted files")
     }
 
+    func test_scanVault_indexesEveryEngineOpenableType() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Note\n---\nalpha".write(
+            to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try "beta text".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try "gamma".write(
+            to: root.appendingPathComponent("c.xlsx"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        // `.xlsx` is indexed as an UNCLAIMED row rather than skipped: the list
+        // must not lie about what is in the vault (see `scanVault`). It carries
+        // no plaintext, so it is metadata only.
+        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext", "unclaimed"])
+        XCTAssertEqual(entries.first { $0.type == "unclaimed" }?.payload.plaintext, "")
+    }
+
+    func test_search_findsPlainTextDocuments() async throws {
+        let root = tempDir()
+        try "beta needle".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        XCTAssertEqual(s.search("needle").map(\.title), ["b"])
+    }
+
+    /// A vault under a dot-prefixed ancestor (`~/.local/share/notes`, a
+    /// `.worktrees/` checkout, a sandbox container) must still index. Judging
+    /// the absolute path made those vaults silently empty.
+    func test_scanVault_indexesAVaultUnderADotPrefixedAncestor() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".hidden-\(UUID())", isDirectory: true)
+        let root = parent.appendingPathComponent("vault", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try "alpha".write(to: root.appendingPathComponent("a.txt"),
+                          atomically: true, encoding: .utf8)
+        // ...while a dot directory INSIDE the vault is still skipped.
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        try "beta".write(to: git.appendingPathComponent("b.txt"),
+                         atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.map(\.url.lastPathComponent), ["a.txt"])
+    }
+
+    func test_scanVault_capsIndexedPlaintextButStillSearchesIt() throws {
+        let root = tempDir()
+        let limit = VaultIndexCoordinator.maxIndexedPlaintextBytes
+        // "needle" up front, then well past the cap.
+        let big = "needle\n" + String(repeating: "x", count: limit + 5_000)
+        try big.write(to: root.appendingPathComponent("big.log"),
+                      atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertLessThanOrEqual(entries[0].payload.plaintext.utf8.count, limit)
+        XCTAssertLessThan(entries[0].payload.plaintext.utf8.count, big.utf8.count)
+
+        let index = try LoreIndex(path: root.appendingPathComponent("i.sqlite"))
+        try index.replaceAll(with: entries)
+        XCTAssertEqual(index.searchOrEmpty("needle").map(\.title), ["big"])
+    }
+
+    func test_cappedTruncatesOnAScalarBoundary() {
+        let limit = VaultIndexCoordinator.maxIndexedPlaintextBytes
+        // Every "é" is 2 UTF-8 bytes; the leading "a" makes the byte cap land
+        // in the middle of one.
+        let text = "a" + String(repeating: "é", count: limit)
+        let capped = VaultIndexCoordinator.capped(text)
+        XCTAssertEqual(capped.utf8.count, limit - 1, "half a scalar was kept or too much dropped")
+        XCTAssertFalse(capped.unicodeScalars.contains("\u{FFFD}"),
+                       "truncation cut through a scalar")
+        XCTAssertTrue(capped.dropFirst().allSatisfy { $0 == "é" })
+    }
+
+    // MARK: - unclaimed file types
+    //
+    // A vault full of `.xlsx` must not make the file list lie about what is
+    // there. Files no engine claims are indexed as metadata-only rows so they
+    // list, and clicking one reaches the fallback viewer's "can't open this
+    // yet" branch.
+
+    private func makeMixedVault() throws -> URL {
+        let root = tempDir()
+        try "---\nid: m\ntitle: Note\n---\nbody".write(
+            to: root.appendingPathComponent("note.md"), atomically: true, encoding: .utf8)
+        try "plain".write(
+            to: root.appendingPathComponent("log.txt"), atomically: true, encoding: .utf8)
+        try "let x = 1".write(
+            to: root.appendingPathComponent("code.swift"), atomically: true, encoding: .utf8)
+        try "%PDF-1.4 zorkmid".write(
+            to: root.appendingPathComponent("paper.pdf"), atomically: true, encoding: .utf8)
+        try "sheetstuff zorkmid".write(
+            to: root.appendingPathComponent("book.xlsx"), atomically: true, encoding: .utf8)
+        return root
+    }
+
+    func test_mixedVault_listsEveryFileIncludingUnclaimedTypes() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        XCTAssertEqual(Set(s.rows.map(\.path.lastPathComponent)),
+                       ["note.md", "log.txt", "code.swift", "paper.pdf", "book.xlsx"])
+    }
+
+    func test_unclaimedRow_isMetadataOnlyAndTitledByFilename() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
+        XCTAssertEqual(row.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(row.title, "book.xlsx")
+        XCTAssertTrue(row.tags.isEmpty)
+        XCTAssertTrue(row.properties.isEmpty)
+        let entry = try XCTUnwrap(VaultIndexCoordinator.scanVault(at: root)
+            .first { $0.url.lastPathComponent == "book.xlsx" })
+        XCTAssertEqual(entry.payload.plaintext, "")
+    }
+
+    func test_unclaimedRows_doNotMatchSearchesForBodyTextTheyDoNotHave() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        XCTAssertTrue(s.search("zorkmid").isEmpty,
+                      "an unclaimed row matched body text that was never indexed")
+        // The filename IS indexed as the title, so the row is still findable.
+        XCTAssertEqual(s.search("book").map(\.path.lastPathComponent), ["book.xlsx"])
+    }
+
+    func test_openingUnclaimedRow_setsUnsupportedOpenError() throws {
+        let root = try makeMixedVault(); let s = try makeStore(root)
+        try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
+        s.open(row)
+        XCTAssertTrue(s.tabs.isEmpty)
+        XCTAssertEqual(s.openError?.url, row.path)
+        // This is what `FallbackViewer.isUnsupported` keys off — the branch the
+        // review found unreachable.
+        XCTAssertEqual(s.openError?.error as? EngineError, .unsupported(row.path))
+    }
+
+    func test_scanVault_stillSkipsDotPrefixedComponentsBelowTheRoot() throws {
+        let root = tempDir()
+        let git = root.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: git, withIntermediateDirectories: true)
+        try "ref".write(to: git.appendingPathComponent("HEAD"), atomically: true, encoding: .utf8)
+        try "obj".write(to: git.appendingPathComponent("pack.idx"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
+    }
+
+    func test_scanVault_doesNotIndexDirectoriesAsUnclaimedRows() throws {
+        let root = tempDir()
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Projects", isDirectory: true),
+            withIntermediateDirectories: true)
+        XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
+    }
+
+    func test_scanVault_indexesAPackageAsOneUnclaimedRowNotItsInternals() throws {
+        let root = tempDir()
+        let pkg = root.appendingPathComponent("Report.pages", isDirectory: true)
+        let contents = pkg.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        try "<xml/>".write(
+            to: contents.appendingPathComponent("index.xml"), atomically: true, encoding: .utf8)
+        try "jpegbytes".write(
+            to: pkg.appendingPathComponent("preview.jpg"), atomically: true, encoding: .utf8)
+
+        // Confirm the fixture is actually treated as a package on this
+        // system before trusting the assertions below — package-ness comes
+        // from UTI registration, not the `.pages` name alone, and a false
+        // negative here would make the test pass for the wrong reason.
+        let isPackage = try pkg.resourceValues(forKeys: [.isPackageKey]).isPackage
+        XCTAssertEqual(isPackage, true, "fixture is not recognized as a package on this system")
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(entries.first?.payload.title, "Report.pages")
+    }
+
+    func test_scanVault_plainSubdirectoryYieldsNoRowButItsFilesAreStillIndexed() throws {
+        let root = tempDir()
+        let folder = root.appendingPathComponent("Projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "log line".write(
+            to: folder.appendingPathComponent("run.log"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.url.lastPathComponent, "run.log")
+        XCTAssertFalse(entries.contains { $0.url.lastPathComponent == "Projects" })
+    }
+
     func test_externalChange_flagsOpenNote() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Open")

@@ -1,9 +1,26 @@
 import Foundation
 import GRDB
 
+/// One document's contribution to the index: where it lives, which engine
+/// claims it, and the payload that engine produced.
+public struct IndexEntry: Sendable {
+    public let url: URL
+    public let type: String
+    public let payload: IndexPayload
+    public let updated: Date
+    public init(url: URL, type: String, payload: IndexPayload, updated: Date) {
+        self.url = url; self.type = type; self.payload = payload; self.updated = updated
+    }
+}
+
 public struct IndexRow: Equatable, Sendable {
-    public let path: URL; public let id: String; public let title: String
-    public let tags: [String]; public let updated: Date
+    public let path: URL
+    public let id: String
+    public let title: String
+    public let tags: [String]
+    public let updated: Date
+    public let type: String
+    public let properties: [FrontmatterPair]
 }
 
 /// `@unchecked Sendable`: the only stored property is a GRDB `DatabaseQueue`,
@@ -12,92 +29,159 @@ public struct IndexRow: Equatable, Sendable {
 public final class LoreIndex: @unchecked Sendable {
     private let dbQueue: DatabaseQueue
 
+    /// Bump whenever the schema changes. On mismatch the file is deleted and
+    /// rebuilt from disk — safe precisely because the index is derived state,
+    /// so there is no migration SQL to get wrong.
+    static let schemaVersion: Int32 = 2
+
     public init(path: URL) throws {
+        // Probe the existing file's version in its own scope and CLOSE it
+        // before deleting: unlinking a database file while a connection is
+        // still open on it is an SQLite API violation ("vnode unlinked while
+        // in use"), which libsqlite3 logs loudly and which leaves the reopened
+        // handle pointing at a file nobody can reach.
+        //
+        // ANY failure to open, probe or close the existing file counts as
+        // stale. The index is entirely derived state, so a corrupt or
+        // truncated file must cost exactly one rescan — never the vault. Left
+        // as a thrown error it propagates out of `activate`, and the user gets
+        // a plugin that permanently refuses to open their notes because a
+        // cache file went bad.
+        if FileManager.default.fileExists(atPath: path.path) {
+            var stale = true
+            do {
+                let probe = try DatabaseQueue(path: path.path)
+                let version = try probe.read { db in
+                    try Int32.fetchOne(db, sql: "PRAGMA user_version") ?? 0
+                }
+                try probe.close()
+                stale = version != Self.schemaVersion
+            } catch {
+                stale = true
+            }
+            if stale { Self.recreate(at: path) }
+        }
         dbQueue = try DatabaseQueue(path: path.path)
         try dbQueue.write { db in
             try db.execute(sql: """
-                CREATE TABLE IF NOT EXISTS notes(
-                    path TEXT PRIMARY KEY, id TEXT, title TEXT,
-                    tags TEXT, updated DOUBLE, body TEXT);
+                CREATE TABLE IF NOT EXISTS documents(
+                    path TEXT PRIMARY KEY, id TEXT, title TEXT, tags TEXT,
+                    updated DOUBLE, plaintext TEXT, type TEXT, properties TEXT);
             """)
-            // Standalone FTS5 index keyed by the same rowid as `notes` (NOT external-content:
-            // external-content tables corrupt on the manual INSERT/DELETE we do in upsert/remove).
+            // Standalone FTS5 index keyed by the same rowid as `documents` (NOT
+            // external-content: external-content tables corrupt on the manual
+            // INSERT/DELETE we do in upsert/remove).
             try db.execute(sql: """
-                CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts
-                USING fts5(title, body);
+                CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts
+                USING fts5(title, plaintext);
             """)
+            try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
     }
 
-    public func upsert(_ note: Note) throws {
+    /// Deletes the index file and its sidecars. Non-throwing on purpose: a
+    /// missing file is the desired end state, so nothing here is an error the
+    /// caller could act on.
+    private static func recreate(at path: URL) {
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(
+                atPath: path.path + suffix)
+        }
+    }
+
+    // MARK: - Property encoding
+
+    // ASCII unit/record separators rather than JSON: property values are raw
+    // YAML source text that may contain quotes, braces, and newlines, and
+    // separators that cannot appear in a single-line YAML scalar are simpler
+    // and cheaper than escaping. M5 replaces this with typed columns when
+    // views need to query properties.
+
+    private static func encode(_ properties: [FrontmatterPair]) -> String {
+        properties.map { "\($0.key)\u{1F}\($0.rawValue)" }.joined(separator: "\u{1E}")
+    }
+
+    /// Known lossy edge: a property whose key or value literally contains
+    /// U+001F or U+001E is dropped rather than mis-split. Unreachable today —
+    /// `Frontmatter.parse` yields single-line, whitespace-trimmed scalars, and
+    /// neither separator can appear in one — and M5's typed columns remove the
+    /// encoding entirely.
+    private static func decode(_ raw: String) -> [FrontmatterPair] {
+        guard !raw.isEmpty else { return [] }
+        return raw.components(separatedBy: "\u{1E}").compactMap { field in
+            let parts = field.components(separatedBy: "\u{1F}")
+            guard parts.count == 2 else { return nil }
+            return FrontmatterPair(key: parts[0], rawValue: parts[1])
+        }
+    }
+
+    // MARK: - Writes
+
+    public func upsert(_ entry: IndexEntry) throws {
         try dbQueue.write { db in
-            try db.execute(sql: """
-                INSERT INTO notes(path,id,title,tags,updated,body)
-                VALUES(?,?,?,?,?,?)
-                ON CONFLICT(path) DO UPDATE SET
-                    id=excluded.id, title=excluded.title, tags=excluded.tags,
-                    updated=excluded.updated, body=excluded.body;
-            """, arguments: [note.path.path, note.id, note.title,
-                             note.tags.joined(separator: ","),
-                             note.updated.timeIntervalSince1970, note.body])
-            let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM notes WHERE path=?",
-                                           arguments: [note.path.path])
-            try db.execute(sql: "DELETE FROM notes_fts WHERE rowid=?", arguments: [rowid])
-            try db.execute(sql: "INSERT INTO notes_fts(rowid,title,body) VALUES(?,?,?)",
-                           arguments: [rowid, note.title, note.body])
+            try Self.write(entry, into: db)
         }
     }
 
-    /// Replaces the whole index with `notes`, in a SINGLE write transaction.
+    private static func write(_ entry: IndexEntry, into db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO documents(path,id,title,tags,updated,plaintext,type,properties)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(path) DO UPDATE SET
+                id=excluded.id, title=excluded.title, tags=excluded.tags,
+                updated=excluded.updated, plaintext=excluded.plaintext,
+                type=excluded.type, properties=excluded.properties;
+        """, arguments: [entry.url.path, entry.payload.id ?? entry.url.path, entry.payload.title,
+                         entry.payload.tags.joined(separator: ","),
+                         entry.updated.timeIntervalSince1970,
+                         entry.payload.plaintext, entry.type,
+                         encode(entry.payload.properties)])
+        let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
+                                       arguments: [entry.url.path])
+        try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
+        try db.execute(sql: "INSERT INTO documents_fts(rowid,title,plaintext) VALUES(?,?,?)",
+                       arguments: [rowid, entry.payload.title, entry.payload.plaintext])
+    }
+
+    /// Replaces the whole index with `entries`, in a SINGLE write transaction.
     ///
     /// `rebuild` used to call `upsert` per note and then `remove` per stale
     /// row — one SQLite transaction each. A vault with a few thousand notes
     /// meant a few thousand transactions, every one of them an fsync, all on
     /// the main actor. Batching them into one transaction is most of why a
     /// rescan is now fast enough to be unnoticeable.
-    public func replaceAll(with notes: [Note]) throws {
+    public func replaceAll(with entries: [IndexEntry]) throws {
         try dbQueue.write { db in
-            let keep = Set(notes.map(\.path.path))
-            for note in notes {
-                try db.execute(sql: """
-                    INSERT INTO notes(path,id,title,tags,updated,body)
-                    VALUES(?,?,?,?,?,?)
-                    ON CONFLICT(path) DO UPDATE SET
-                        id=excluded.id, title=excluded.title, tags=excluded.tags,
-                        updated=excluded.updated, body=excluded.body;
-                """, arguments: [note.path.path, note.id, note.title,
-                                 note.tags.joined(separator: ","),
-                                 note.updated.timeIntervalSince1970, note.body])
-                let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM notes WHERE path=?",
-                                               arguments: [note.path.path])
-                try db.execute(sql: "DELETE FROM notes_fts WHERE rowid=?", arguments: [rowid])
-                try db.execute(sql: "INSERT INTO notes_fts(rowid,title,body) VALUES(?,?,?)",
-                               arguments: [rowid, note.title, note.body])
+            let keep = Set(entries.map(\.url.path))
+            for entry in entries {
+                try Self.write(entry, into: db)
             }
             // Prune rows whose backing file is gone.
-            let stale = try String.fetchAll(db, sql: "SELECT path FROM notes")
+            let stale = try String.fetchAll(db, sql: "SELECT path FROM documents")
                 .filter { !keep.contains($0) }
             for path in stale {
-                let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM notes WHERE path=?",
+                let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
                                                arguments: [path])
-                try db.execute(sql: "DELETE FROM notes_fts WHERE rowid=?", arguments: [rowid])
-                try db.execute(sql: "DELETE FROM notes WHERE path=?", arguments: [path])
+                try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
+                try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
             }
         }
     }
 
     public func remove(path: URL) throws {
         try dbQueue.write { db in
-            let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM notes WHERE path=?",
+            let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
                                            arguments: [path.path])
-            try db.execute(sql: "DELETE FROM notes_fts WHERE rowid=?", arguments: [rowid])
-            try db.execute(sql: "DELETE FROM notes WHERE path=?", arguments: [path.path])
+            try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
+            try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path.path])
         }
     }
 
+    // MARK: - Reads
+
     public func all() throws -> [IndexRow] {
         try dbQueue.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM notes ORDER BY updated DESC").map(Self.row)
+            try Row.fetchAll(db, sql: "SELECT * FROM documents ORDER BY updated DESC").map(Self.row)
         }
     }
 
@@ -105,11 +189,17 @@ public final class LoreIndex: @unchecked Sendable {
         guard let expression = Self.ftsExpression(for: query) else { return try all() }
         return try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT n.* FROM notes n
-                JOIN notes_fts f ON f.rowid = n.rowid
-                WHERE notes_fts MATCH ? ORDER BY rank;
+                SELECT n.* FROM documents n
+                JOIN documents_fts f ON f.rowid = n.rowid
+                WHERE documents_fts MATCH ? ORDER BY rank;
             """, arguments: [expression]).map(Self.row)
         }
+    }
+
+    /// `search` throwing is never actionable at a call site; this is the shape
+    /// every caller already used via `try?`.
+    public func searchOrEmpty(_ query: String) -> [IndexRow] {
+        (try? search(query)) ?? []
     }
 
     /// Turns raw user input into a safe FTS5 MATCH expression, or `nil` when
@@ -145,8 +235,11 @@ public final class LoreIndex: @unchecked Sendable {
     }
 
     private static func row(_ r: Row) -> IndexRow {
-        IndexRow(path: URL(fileURLWithPath: r["path"]), id: r["id"], title: r["title"],
+        IndexRow(path: URL(fileURLWithPath: r["path"]),
+                 id: r["id"], title: r["title"],
                  tags: (r["tags"] as String).split(separator: ",").map(String.init),
-                 updated: Date(timeIntervalSince1970: r["updated"]))
+                 updated: Date(timeIntervalSince1970: r["updated"]),
+                 type: r["type"],
+                 properties: decode(r["properties"]))
     }
 }

@@ -108,12 +108,80 @@ struct LoreNoteOperationsTests {
         #expect(outcome.text.contains("Browseable"))
     }
 
+    /// `IndexRow.type` now spans markdown notes AND plaintext/source files
+    /// (Task 5's generalized index). `search_notes` is documented as
+    /// searching notes; silently surfacing a `.txt` match would be the tool
+    /// lying about its own contract.
+    @Test func searchOnlyReturnsMarkdownNotes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "A")
+        note.body = "needle"
+        try store.save(note)
+        try "needle in plain text".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "search", "query": "needle"])
+        #expect(outcome.isError == false)
+        #expect(outcome.text.contains(note.id))
+        #expect(outcome.text.contains("b.txt") == false,
+                "note tools must not claim plain-text files are notes")
+    }
+
     @Test func searchReportsNoMatchesWithoutErroring() async throws {
         let (root, operations, _) = try await makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
         let outcome = await run(operations, ["operation": "search", "query": "nothingatall"])
         #expect(outcome.isError == false)
         #expect(outcome.text.contains("No notes match"))
+    }
+
+    /// `resolve` backs `read_note`/`save_note`/`delete_note`; it must not
+    /// resolve a non-markdown row even when the caller's identifier happens to
+    /// match one exactly (its path, here).
+    @Test func readCannotResolveANonMarkdownFile() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let textURL = root.appendingPathComponent("notes.txt")
+        try "plain text, not a note".write(to: textURL, atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "read", "note": textURL.path])
+        #expect(outcome.isError)
+        #expect(outcome.text.contains("search_notes"))
+    }
+
+    /// Unclaimed files (`.pdf`, `.xlsx`) now appear in `store.rows` so the
+    /// sidebar does not lie about the vault. The note tools must be unmoved by
+    /// that: they are type-filtered to markdown and stay so.
+    @Test func noteToolsIgnoreUnclaimedFileTypes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "Real Note")
+        note.body = "zorkmid body"
+        try store.save(note)
+        try "%PDF-1.4 zorkmid".write(to: root.appendingPathComponent("paper.pdf"),
+                                     atomically: true, encoding: .utf8)
+        try "sheet zorkmid".write(to: root.appendingPathComponent("book.xlsx"),
+                                  atomically: true, encoding: .utf8)
+        try store.rebuild()
+        #expect(store.rows.count == 3, "precondition: unclaimed rows are indexed")
+
+        let listed = await run(operations, ["operation": "search"])
+        #expect(listed.isError == false)
+        #expect(listed.text.contains("Real Note"))
+        #expect(listed.text.contains("paper.pdf") == false)
+        #expect(listed.text.contains("book.xlsx") == false)
+
+        let searched = await run(operations, ["operation": "search", "query": "zorkmid"])
+        #expect(searched.text.contains("paper.pdf") == false)
+        #expect(searched.text.contains("book.xlsx") == false)
+
+        let resolved = await run(operations,
+                                 ["operation": "read",
+                                  "note": root.appendingPathComponent("book.xlsx").path])
+        #expect(resolved.isError)
     }
 
     @Test func readReturnsTitleTagsAndBody() async throws {
@@ -210,7 +278,7 @@ struct LoreNoteOperationsTests {
         let after = Set((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])
         #expect(after.subtracting(before).isEmpty, "a file was written outside the vault")
         // And every note file that does exist is inside the vault root.
-        #expect(LoreStore.scanVault(at: root).isEmpty)
+        #expect(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
     @Test func createStillAcceptsAnOrdinaryTitle() async throws {

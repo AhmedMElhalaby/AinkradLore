@@ -49,10 +49,21 @@ struct LoreNoteOperations {
         guard let root = store.vaultRoot else { return Self.noVaultMessage }
         return """
             vault: \(root.path)
-            notes: \(store.rows.count)
+            notes: \(noteRows.count)
             tags: \(store.allTags.count)
             new notes are created in: \(store.defaultNoteFolder.isEmpty ? "(the vault root)" : store.defaultNoteFolder)
             """
+    }
+
+    /// `store.rows` is every indexed document — plaintext and other
+    /// non-markdown files included, since Task 5 generalized the index beyond
+    /// notes. The MCP tools are all named and documented as operating on
+    /// NOTES, so every listing/search/resolution path filters down to this
+    /// before the caller ever sees a row. Skipping the filter anywhere here
+    /// would mean a `*_note` tool silently returning (or resolving an id to) a
+    /// `.swift` or `.log` file — the tool lying about its own contract.
+    private var noteRows: [IndexRow] {
+        store.rows.filter { $0.type == MarkdownEngine.identifier }
     }
 
     func run(_ json: String) async -> AgentActionResult {
@@ -91,8 +102,8 @@ struct LoreNoteOperations {
         // An empty query is a browse, not a search: the FTS index has nothing
         // to match on, so answer from the already-loaded rows, newest first.
         let rows = query.isEmpty
-            ? store.rows.sorted { $0.updated > $1.updated }
-            : store.search(query)
+            ? noteRows.sorted { $0.updated > $1.updated }
+            : store.search(query).filter { $0.type == MarkdownEngine.identifier }
         guard !rows.isEmpty else {
             return .success(query.isEmpty ? "The vault has no notes yet." : "No notes match \"\(query)\".")
         }
@@ -116,7 +127,12 @@ struct LoreNoteOperations {
     }
 
     private func listTags() -> AgentActionResult {
-        let tags = store.allTags
+        // `store.allTags` walks every indexed row, not just notes. Plaintext
+        // rows carry no tags today, but computing this from `noteRows`
+        // rather than `store.allTags` keeps the guarantee true by
+        // construction instead of by accident of what plaintext happens not
+        // to populate.
+        let tags = Array(Set(noteRows.flatMap(\.tags))).sorted()
         return .success(tags.isEmpty ? "The vault has no tags." : tags.joined(separator: "\n"))
     }
 
@@ -236,8 +252,12 @@ struct LoreNoteOperations {
         guard let identifier = object["note"] as? String, !identifier.isEmpty else {
             throw OperationError.message("This tool requires a \"note\" (an id or an absolute path).")
         }
-        if let row = store.rows.first(where: { $0.id == identifier }) { return row }
-        if let row = store.rows.first(where: { $0.path.path == identifier }) { return row }
+        // Resolution is scoped to `noteRows` too: a `.swift` file that happens
+        // to share an id or path with what the caller passed must not resolve
+        // at all, let alone become something `read_note`/`save_note`/
+        // `delete_note` then treats as a note.
+        if let row = noteRows.first(where: { $0.id == identifier }) { return row }
+        if let row = noteRows.first(where: { $0.path.path == identifier }) { return row }
         throw OperationError.message(
             "No note in the vault has id or path \"\(identifier)\". "
             + "Use search_notes to find the note's id.")
