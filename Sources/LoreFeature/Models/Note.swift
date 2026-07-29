@@ -37,12 +37,24 @@ public struct Note: Identifiable, Equatable, Sendable {
     /// which is its own kind of corruption.
     public var lineEnding: String
 
+    /// Whether the file began with a U+FEFF byte order mark.
+    ///
+    /// Carried for the same reason as `lineEnding`: PowerShell redirects, older
+    /// Notepad and several exporters emit one, and a BOM shifts the opening
+    /// `---` fence so the frontmatter is not recognised at all. Stripped on
+    /// read, restored on write.
+    public var hasByteOrderMark: Bool
+
+    /// The exact prefix `serialize` must put back before the opening fence.
+    public var leadingMark: String { hasByteOrderMark ? "\u{FEFF}" : "" }
+
     public init(path: URL, id: String, title: String, tags: [String],
                 created: Date, updated: Date, body: String, extra: [FrontmatterPair] = [],
-                rawFrontmatter: String? = nil, lineEnding: String = "\n") {
+                rawFrontmatter: String? = nil, lineEnding: String = "\n",
+                hasByteOrderMark: Bool = false) {
         self.path = path; self.id = id; self.title = title; self.tags = tags
         self.created = created; self.updated = updated; self.body = body
         self.extra = extra; self.rawFrontmatter = rawFrontmatter
-        self.lineEnding = lineEnding
+        self.lineEnding = lineEnding; self.hasByteOrderMark = hasByteOrderMark
     }
 }

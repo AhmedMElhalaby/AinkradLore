@@ -45,6 +45,57 @@ final class FrontmatterPatchTests: XCTestCase {
         XCTAssertEqual(Frontmatter.parse("---\nid: a\n---\nbody", path: path).lineEnding, "\n")
     }
 
+    /// Documents, rather than promises, what mixed endings do: any CRLF present
+    /// wins for the WHOLE document. Not a per-line guarantee.
+    func test_mixedLineEndings_areEmittedEntirelyAsCRLF() {
+        let out = Frontmatter.serialize(
+            Frontmatter.parse("---\nid: a\ntitle: T\r\nother: x\n---\nbody", path: path))
+        XCTAssertEqual(out, "---\r\nid: a\r\ntitle: T\r\nother: x\r\n---\r\nbody")
+    }
+
+    // MARK: - byte order mark (review finding, round 2 item 1)
+
+    /// A BOM shifts the opening fence to "\u{FEFF}---", so without this the
+    /// frontmatter is not recognised and a fabricated block is prepended above
+    /// the user's real one — the same total-property-loss failure as CRLF, on a
+    /// file Obsidian renders perfectly.
+
+    func test_bom_unmodifiedRoundTripIsByteExact() {
+        assertByteExact("\u{FEFF}---\nid: a\ntitle: T\nstatus: x\n---\nb")
+    }
+
+    func test_bom_isRecognisedAsFrontmatterNotAsBody() {
+        let note = Frontmatter.parse("\u{FEFF}---\nid: a\ntitle: T\nstatus: x\n---\nb", path: path)
+        XCTAssertTrue(note.hasByteOrderMark)
+        XCTAssertEqual(note.id, "a")
+        XCTAssertEqual(note.title, "T")
+        XCTAssertEqual(note.extra.map(\.key), ["status"])
+        XCTAssertEqual(note.body, "b")
+    }
+
+    func test_bom_titleChangeAltersOnlyTheTitleLineAndKeepsTheMark() {
+        let text = "\u{FEFF}---\nid: a\ntitle: Old\nstatus: x\n---\nb"
+        var note = Frontmatter.parse(text, path: path)
+        note.title = "New"
+        XCTAssertEqual(Frontmatter.serialize(note),
+                       "\u{FEFF}---\nid: a\ntitle: New\nstatus: x\n---\nb")
+    }
+
+    /// Both preservation mechanisms composing.
+    func test_bomAndCRLF_roundTripByteExact() {
+        assertByteExact("\u{FEFF}---\r\nid: a\r\ntitle: T\r\naliases:\r\n  - one\r\n---\r\nbody")
+    }
+
+    func test_bom_withNoFrontmatter_isNotDuplicatedIntoTheBody() {
+        let text = "\u{FEFF}# Heading\nplain"
+        let note = Frontmatter.parse(text, path: path)
+        XCTAssertTrue(note.hasByteOrderMark)
+        XCTAssertEqual(note.body, "# Heading\nplain", "the mark must not be left inside the body")
+        let out = Frontmatter.serialize(note)
+        XCTAssertTrue(out.hasPrefix("\u{FEFF}---\n"), out)
+        XCTAssertEqual(out.filter { $0 == "\u{FEFF}" }.count, 1, out)
+    }
+
     // MARK: - hostile scalar values (review finding: Critical 2)
 
     /// `serialize` then `parse` must return the EXACT original string for
@@ -87,6 +138,12 @@ final class FrontmatterPatchTests: XCTestCase {
         assertTitleSurvives("true")
         assertTitleSurvives("[not, a, list]")
         assertTitleSurvives("back\\slash")
+        // Escaping is only correct if the escape character itself round-trips.
+        assertTitleSurvives("\\")
+        assertTitleSurvives("\\\\")
+        assertTitleSurvives("trailing backslash\\")
+        assertTitleSurvives("mixed \"quote\" and \\back\\slash")
+        assertTitleSurvives("\\\"not an escape\\\"")
     }
 
     /// The one value that deliberately does NOT round-trip: an empty title is

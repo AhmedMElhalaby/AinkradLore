@@ -30,7 +30,7 @@ public enum Frontmatter {
 
     public static func parse(_ text: String, path: URL) -> Note {
         let layout = splitLines(text)
-        guard let split = splitBlock(layout) else { return fallback(text, path: path, layout: layout) }
+        guard let split = splitBlock(layout) else { return fallback(path: path, layout: layout) }
         let entries = scan(split.headerLines)
         func entry(_ key: String) -> Entry? { entries.last { $0.key == key } }
 
@@ -59,33 +59,56 @@ public enum Frontmatter {
             body: body,
             extra: extra,
             rawFrontmatter: split.header,
-            lineEnding: layout.ending
+            lineEnding: layout.ending,
+            hasByteOrderMark: layout.bom
         )
     }
 
-    /// Splits text into lines and reports the document's line ending.
+    /// Splits text into lines, reporting the document's line ending and whether
+    /// it carried a byte order mark.
     ///
-    /// CRLF documents are real — Windows-authored vaults, sync clients and git
-    /// checkouts with `core.autocrlf` all produce them. Splitting on `"\n"`
-    /// alone leaves a trailing `"\r"` on every line, so the opening fence reads
-    /// as `"---\r"`, no frontmatter is recognised at all, and `serialize` then
-    /// PREPENDS a second Lore-invented block: every property lost from
-    /// Obsidian's view. The `"\r"` is therefore stripped here and the SAME
-    /// ending is put back by `serialize` — never normalised, since silently
-    /// rewriting a whole file's line endings is its own corruption.
+    /// Both are stripped here and put back verbatim by `serialize`. Both exist
+    /// for the same reason: a document whose FIRST line does not compare equal
+    /// to `"---"` has no frontmatter as far as `splitBlock` is concerned, so the
+    /// whole file becomes `body` and `serialize` PREPENDS a second
+    /// Lore-invented block above the user's real one — every property lost from
+    /// Obsidian's view, on a file Obsidian renders perfectly.
+    ///
+    /// - CRLF documents come from Windows-authored vaults, sync clients and git
+    ///   checkouts with `core.autocrlf`; splitting on `"\n"` alone leaves the
+    ///   fence reading as `"---\r"`.
+    /// - A leading U+FEFF comes from PowerShell redirects, older Notepad and
+    ///   several exporters; it leaves the fence reading as `"\u{FEFF}---"`.
+    ///
+    /// LINE ENDINGS, PRECISELY: any `"\r\n"` anywhere in the document wins for
+    /// the WHOLE document. A file with consistent endings — every real-world
+    /// case — round-trips byte-exact. A file with MIXED endings is emitted
+    /// entirely as CRLF. That is a deliberate, defensible simplification, not a
+    /// promise to leave each line as it was found; do not build on a per-line
+    /// guarantee, because there is none.
     static func splitLines(_ text: String) -> Layout {
+        var text = text
+        let bom = text.hasPrefix("\u{FEFF}")
+        if bom { text.removeFirst() }
+
         guard text.contains("\r\n") else {
-            return Layout(lines: text.components(separatedBy: "\n"), ending: "\n")
+            return Layout(lines: text.components(separatedBy: "\n"), ending: "\n", bom: bom)
         }
         let lines = text.components(separatedBy: "\n").map {
             $0.hasSuffix("\r") ? String($0.dropLast()) : $0
         }
-        return Layout(lines: lines, ending: "\r\n")
+        return Layout(lines: lines, ending: "\r\n", bom: bom)
     }
 
     struct Layout {
         let lines: [String]
         let ending: String
+        let bom: Bool
+
+        /// The document with its BOM removed and its line endings intact — what
+        /// `body` must be when there is no frontmatter, since `serialize` puts
+        /// the mark back itself.
+        var strippedText: String { lines.joined(separator: ending) }
     }
 
     /// Finds the `---` fenced block. Line-based rather than substring-based so
@@ -126,7 +149,8 @@ public enum Frontmatter {
             lines.replaceSubrange(edit.range, with: [edit.replacement])
         }
         lines.append(contentsOf: appended)
-        return "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
+        return note.leadingMark
+            + "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
     }
 
     private enum Patch {
@@ -192,17 +216,27 @@ public enum Frontmatter {
     /// Emission for a note that never had a frontmatter block (a brand new note
     /// or a plain markdown file). Nothing to preserve, so the model is the
     /// whole truth.
+    ///
+    /// `extra` is deliberately NOT emitted here. It is a DERIVED, lossy,
+    /// index-only rendering — a block sequence flattens to `[one, two]` and
+    /// quoted scalars are unquoted — so re-emitting it would write back
+    /// something that is not what the file said. `rawFrontmatter` is the sole
+    /// source of truth for serialization, and by construction a note that
+    /// reaches this path has no `rawFrontmatter` and therefore no `extra`
+    /// either. The old `"\(key): \(rawValue)"` line was both dead and
+    /// unescaped: one caller away from re-introducing the property-injection
+    /// bug the `yamlScalar` writer exists to prevent.
     private static func serializeFromModel(_ note: Note) -> String {
         let le = note.lineEnding
-        var lines = [
+        let lines = [
             "id: \(yamlScalar(note.id))",
             "title: \(yamlScalar(note.title))",
             "tags: \(inline(note.tags))",
             "created: \(dayFormatter.string(from: note.created))",
             "updated: \(dayFormatter.string(from: note.updated))",
         ]
-        lines += note.extra.map { "\($0.key): \($0.rawValue)" }
-        return "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
+        return note.leadingMark
+            + "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
     }
 
     // MARK: - scanner
@@ -427,11 +461,12 @@ public enum Frontmatter {
 
     // MARK: - no frontmatter
 
-    private static func fallback(_ text: String, path: URL, layout: Layout) -> Note {
+    private static func fallback(path: URL, layout: Layout) -> Note {
         let now = Date()
+        let text = layout.strippedText
         return Note(path: path, id: UUID().uuidString, title: deriveTitle(text, path: path),
                     tags: [], created: now, updated: now, body: text, extra: [],
-                    rawFrontmatter: nil, lineEnding: layout.ending)
+                    rawFrontmatter: nil, lineEnding: layout.ending, hasByteOrderMark: layout.bom)
     }
 
     private static func deriveTitle(_ body: String, path: URL) -> String {
