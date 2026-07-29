@@ -191,7 +191,20 @@ public final class VaultIndexCoordinator {
             entries.append(IndexEntry(url: url, type: engineType.identifier,
                                       payload: payload, updated: updated))
         }
-        return entries
+        // Resolution is a second pass because a link can point at any document
+        // in the vault, including one the enumerator has not reached yet.
+        let resolver = LinkResolver(documents: entries.map {
+            (url: $0.url, title: $0.payload.title, aliases: $0.payload.aliases)
+        })
+        return entries.map { entry in
+            IndexEntry(url: entry.url, type: entry.type, payload: entry.payload,
+                       updated: entry.updated,
+                       resolvedLinks: entry.payload.links.map {
+                           ResolvedLink(rawTarget: $0.rawTarget,
+                                        targetPath: resolver.resolve($0.rawTarget),
+                                        isEmbed: $0.isEmbed)
+                       })
+        }
     }
 
     /// Upper bound on the indexed text of a single document.
@@ -237,11 +250,26 @@ public final class VaultIndexCoordinator {
     }
 
     /// Index one document after a save, without a whole-vault rescan.
+    ///
+    /// Resolves this document's own outbound links immediately, against the
+    /// current `rows` plus the document being indexed — so a note saved with
+    /// a new link shows that link's backlink without waiting for a full
+    /// rescan. Built from `rows` rather than a fresh scan, so it does not pay
+    /// for a whole-vault walk on every save.
     func indexDocument(_ engine: any DocumentEngine, at url: URL) throws {
         guard let index else { throw LoreError.noVault }
         let type = type(of: engine).identifier
-        try index.upsert(IndexEntry(url: url, type: type,
-                                    payload: engine.indexPayload, updated: Date()))
+        let payload = engine.indexPayload
+        var documents = rows.map { (url: $0.path, title: $0.title, aliases: $0.aliases) }
+        documents.append((url: url, title: payload.title, aliases: payload.aliases))
+        let resolver = LinkResolver(documents: documents)
+        let resolvedLinks = payload.links.map {
+            ResolvedLink(rawTarget: $0.rawTarget,
+                         targetPath: resolver.resolve($0.rawTarget),
+                         isEmbed: $0.isEmbed)
+        }
+        try index.upsert(IndexEntry(url: url, type: type, payload: payload,
+                                    updated: Date(), resolvedLinks: resolvedLinks))
         rows = try index.all()
     }
 

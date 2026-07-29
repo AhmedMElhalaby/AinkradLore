@@ -292,4 +292,26 @@ final class LoreStoreTests: XCTestCase {
         try "changed".write(to: note.path, atomically: true, encoding: .utf8)
         XCTAssertTrue(s.externalChangeDetected(for: note))
     }
+
+    func test_scanVault_resolvesLinksBetweenDocuments() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\nlinks to [[Beta]]"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        try "---\nid: b\ntitle: Beta\n---\nno links"
+            .write(to: root.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        let alpha = entries.first { $0.url.lastPathComponent == "alpha.md" }
+        XCTAssertEqual(alpha?.resolvedLinks.first?.rawTarget, "Beta")
+        XCTAssertEqual(alpha?.resolvedLinks.first?.targetPath?.lastPathComponent, "beta.md")
+    }
+
+    func test_scanVault_leavesUnknownTargetsUnresolved() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\n[[Nowhere]]"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertNil(entries.first?.resolvedLinks.first?.targetPath)
+        XCTAssertEqual(entries.first?.resolvedLinks.first?.rawTarget, "Nowhere")
+    }
 }
