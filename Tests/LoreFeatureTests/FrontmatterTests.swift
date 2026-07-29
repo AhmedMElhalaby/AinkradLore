@@ -331,14 +331,6 @@ final class FrontmatterTests: XCTestCase {
         XCTAssertEqual(note.extra.first?.rawValue, "[one, two]")
     }
 
-    private static func day(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        return f.string(from: date)
-    }
-
     func test_roundTrip_isStableAcrossTwoPasses() {
         let text = """
         ---

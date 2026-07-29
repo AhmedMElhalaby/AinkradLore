@@ -17,22 +17,20 @@ import Foundation
 /// replaces only the lines whose modelled value actually changed. Comments,
 /// blank lines, key order, indentation, quoting, block sequences and block
 /// scalars are copied through byte for byte because nothing ever rewrites them.
+///
+/// Values that ARE rewritten go out through `yamlScalar`, because a title is
+/// arbitrary user (or agent) text: `Meeting: Q3` emitted raw produces invalid
+/// YAML and Obsidian then shows NO properties at all for the note, and a title
+/// containing a newline would inject a whole new top-level property.
 public enum Frontmatter {
     /// Keys `Note` models. Everything else is preserved but never interpreted.
     static let modelledKeys = ["id", "title", "tags", "created", "updated"]
 
-    private static let dayFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        return f
-    }()
-
     // MARK: - parse
 
     public static func parse(_ text: String, path: URL) -> Note {
-        guard let split = splitBlock(text) else { return fallback(text, path: path) }
+        let layout = splitLines(text)
+        guard let split = splitBlock(layout) else { return fallback(text, path: path, layout: layout) }
         let entries = scan(split.headerLines)
         func entry(_ key: String) -> Entry? { entries.last { $0.key == key } }
 
@@ -42,31 +40,63 @@ public enum Frontmatter {
             .filter { !modelledKeys.contains($0.key) }
             .map { FrontmatterPair(key: $0.key, rawValue: $0.flattenedValue) }
 
+        /// Scalars are unquoted on read for EVERY modelled key, not just tags
+        /// and dates. Otherwise `title: "Quoted"` shows literal quotes in the
+        /// UI, the index and MCP `read_note`.
+        func scalar(_ key: String) -> String? {
+            guard let raw = entry(key)?.inlineValue else { return nil }
+            let value = unquoted(raw)
+            return value.isEmpty ? nil : value
+        }
+
         return Note(
             path: path,
-            id: entry("id").map(\.inlineValue).flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString,
-            title: entry("title").map(\.inlineValue).flatMap { $0.isEmpty ? nil : $0 }
-                ?? deriveTitle(body, path: path),
+            id: scalar("id") ?? UUID().uuidString,
+            title: scalar("title") ?? deriveTitle(body, path: path),
             tags: entry("tags").map(list(of:)) ?? [],
-            created: entry("created").flatMap { date(from: $0.inlineValue) } ?? now,
-            updated: entry("updated").flatMap { date(from: $0.inlineValue) } ?? now,
+            created: entry("created").flatMap { date(from: $0.inlineValue)?.date } ?? now,
+            updated: entry("updated").flatMap { date(from: $0.inlineValue)?.date } ?? now,
             body: body,
             extra: extra,
-            rawFrontmatter: split.header
+            rawFrontmatter: split.header,
+            lineEnding: layout.ending
         )
     }
 
-    /// Splits `---` fenced frontmatter off the front of a document.
+    /// Splits text into lines and reports the document's line ending.
     ///
-    /// Line-based rather than substring-based so that an EMPTY block
-    /// (`---\n---\n`) is still recognised as frontmatter.
-    private static func splitBlock(_ text: String) -> (header: String, headerLines: [String], body: String)? {
-        let lines = text.components(separatedBy: "\n")
+    /// CRLF documents are real — Windows-authored vaults, sync clients and git
+    /// checkouts with `core.autocrlf` all produce them. Splitting on `"\n"`
+    /// alone leaves a trailing `"\r"` on every line, so the opening fence reads
+    /// as `"---\r"`, no frontmatter is recognised at all, and `serialize` then
+    /// PREPENDS a second Lore-invented block: every property lost from
+    /// Obsidian's view. The `"\r"` is therefore stripped here and the SAME
+    /// ending is put back by `serialize` — never normalised, since silently
+    /// rewriting a whole file's line endings is its own corruption.
+    static func splitLines(_ text: String) -> Layout {
+        guard text.contains("\r\n") else {
+            return Layout(lines: text.components(separatedBy: "\n"), ending: "\n")
+        }
+        let lines = text.components(separatedBy: "\n").map {
+            $0.hasSuffix("\r") ? String($0.dropLast()) : $0
+        }
+        return Layout(lines: lines, ending: "\r\n")
+    }
+
+    struct Layout {
+        let lines: [String]
+        let ending: String
+    }
+
+    /// Finds the `---` fenced block. Line-based rather than substring-based so
+    /// that an EMPTY block (`---\n---\n`) is still recognised as frontmatter.
+    private static func splitBlock(_ layout: Layout) -> (header: String, headerLines: [String], body: String)? {
+        let lines = layout.lines
         guard lines.first == "---" else { return nil }
         guard let close = lines.dropFirst().firstIndex(of: "---") else { return nil }
         let headerLines = Array(lines[1..<close])
-        let body = lines[(close + 1)...].joined(separator: "\n")
-        return (headerLines.joined(separator: "\n"), headerLines, body)
+        let body = lines[(close + 1)...].joined(separator: layout.ending)
+        return (headerLines.joined(separator: layout.ending), headerLines, body)
     }
 
     // MARK: - serialize
@@ -74,7 +104,8 @@ public enum Frontmatter {
     public static func serialize(_ note: Note) -> String {
         guard let raw = note.rawFrontmatter else { return serializeFromModel(note) }
 
-        var lines = raw.isEmpty ? [] : raw.components(separatedBy: "\n")
+        let le = note.lineEnding
+        var lines = raw.isEmpty ? [] : splitLines(raw).lines
         let entries = scan(lines)
         var edits: [(range: ClosedRange<Int>, replacement: String)] = []
         var appended: [String] = []
@@ -95,7 +126,7 @@ public enum Frontmatter {
             lines.replaceSubrange(edit.range, with: [edit.replacement])
         }
         lines.append(contentsOf: appended)
-        return "---\n" + lines.joined(separator: "\n") + "\n---\n" + note.body
+        return "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
     }
 
     private enum Patch {
@@ -120,14 +151,20 @@ public enum Frontmatter {
     private static func patch(key: String, note: Note, entry: Entry?) -> Patch {
         switch key {
         case "id":
-            guard entry?.inlineValue != note.id else { return .leave }
-            return .replace(note.id)
+            guard let entry else { return .replace(yamlScalar(note.id)) }
+            return unquoted(entry.inlineValue) == note.id ? .leave : .replace(yamlScalar(note.id))
         case "title":
+            // An empty title is not a value, it is the ABSENCE of one: `parse`
+            // always derives a title from the body heading or the filename, so
+            // `title: ""` could never survive a reload anyway. Writing it would
+            // just put a meaningless key in the user's vault.
+            guard !note.title.isEmpty else { return .leave }
             guard let entry else {
                 return note.title == deriveTitle(note.body, path: note.path)
-                    ? .leave : .replace(note.title)
+                    ? .leave : .replace(yamlScalar(note.title))
             }
-            return entry.inlineValue == note.title ? .leave : .replace(note.title)
+            return unquoted(entry.inlineValue) == note.title
+                ? .leave : .replace(yamlScalar(note.title))
         case "tags":
             guard let entry else { return note.tags.isEmpty ? .leave : .replace(inline(note.tags)) }
             return list(of: entry) == note.tags ? .leave : .replace(inline(note.tags))
@@ -137,33 +174,35 @@ public enum Frontmatter {
             // timestamp it merely failed to understand.
             guard let onDisk = date(from: entry.inlineValue) else { return .leave }
             let model = key == "created" ? note.created : note.updated
-            return onDisk == model ? .leave : .replace(dayFormatter.string(from: model))
+            guard onDisk.date != model else { return .leave }
+            // Re-emit in the format the file already used. Downgrading an
+            // ISO-8601 `updated:` to `yyyy-MM-dd` would truncate it to UTC
+            // midnight on every save, permanently degrading any external tool
+            // that sorts on it to day granularity.
+            return .replace(onDisk.formatter.string(from: model))
         default:
             return .leave
         }
     }
 
     private static func inline(_ values: [String]) -> String {
-        "[" + values.joined(separator: ", ") + "]"
+        "[" + values.map(yamlScalar).joined(separator: ", ") + "]"
     }
 
     /// Emission for a note that never had a frontmatter block (a brand new note
     /// or a plain markdown file). Nothing to preserve, so the model is the
     /// whole truth.
     private static func serializeFromModel(_ note: Note) -> String {
-        let tags = "[" + note.tags.joined(separator: ", ") + "]"
-        let extra = note.extra.map { "\($0.key): \($0.rawValue)" }.joined(separator: "\n")
-        let extraBlock = extra.isEmpty ? "" : extra + "\n"
-        return """
-        ---
-        id: \(note.id)
-        title: \(note.title)
-        tags: \(tags)
-        created: \(dayFormatter.string(from: note.created))
-        updated: \(dayFormatter.string(from: note.updated))
-        \(extraBlock)---
-        \(note.body)
-        """
+        let le = note.lineEnding
+        var lines = [
+            "id: \(yamlScalar(note.id))",
+            "title: \(yamlScalar(note.title))",
+            "tags: \(inline(note.tags))",
+            "created: \(dayFormatter.string(from: note.created))",
+            "updated: \(dayFormatter.string(from: note.updated))",
+        ]
+        lines += note.extra.map { "\($0.key): \($0.rawValue)" }
+        return "---" + le + lines.joined(separator: le) + le + "---" + le + note.body
     }
 
     // MARK: - scanner
@@ -183,25 +222,42 @@ public enum Frontmatter {
         /// A single-line rendering for the index's `properties` column. Never
         /// used for serialization.
         var flattenedValue: String {
-            guard inlineValue.isEmpty, !continuation.isEmpty else { return inlineValue }
+            guard inlineValue.isEmpty, !continuation.isEmpty else { return Frontmatter.unquoted(inlineValue) }
             return "[" + Frontmatter.sequenceItems(continuation).joined(separator: ", ") + "]"
         }
     }
 
-    /// Scans header lines into top-level entries. Comments, blank lines and
-    /// anything unrecognised are simply not owned by any entry, which is why
-    /// they survive: `serialize` only ever touches lines an entry owns.
+    /// Scans header lines into top-level entries. Lines no entry owns —
+    /// comments and blanks outside any block, and anything unrecognised — are
+    /// never touched by `serialize`, which is why they survive.
+    ///
+    /// An entry's extent runs to its LAST continuation line, and interior
+    /// comments and blank lines are swallowed along the way. Ending the extent
+    /// at the first comment instead would leave the tail of a block sequence
+    /// orphaned behind a replaced key — `tags:\n  - one\n# c\n  - two` patched
+    /// to `[z]` would emit `tags: [z]` followed by a stray `  - two`: invalid
+    /// YAML plus phantom data. Trailing comments after the last item are NOT
+    /// swallowed, because nothing follows them to prove they are interior.
     static func scan(_ lines: [String]) -> [Entry] {
         var entries: [Entry] = []
         var i = 0
         while i < lines.count {
             guard let (key, value) = keyValue(lines[i]) else { i += 1; continue }
             var j = i + 1
-            while j < lines.count, isContinuation(lines[j]) { j += 1 }
+            var last = i
+            while j < lines.count {
+                let line = lines[j]
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty || trimmed.hasPrefix("#") { j += 1; continue }  // provisional
+                guard line.hasPrefix(" ") || line.hasPrefix("\t")
+                        || trimmed.hasPrefix("- ") || trimmed == "-" else { break }
+                last = j
+                j += 1
+            }
             entries.append(Entry(key: key, inlineValue: value,
-                                 continuation: Array(lines[(i + 1)..<j]),
-                                 start: i, end: j - 1))
-            i = j
+                                 continuation: last > i ? Array(lines[(i + 1)...last]) : [],
+                                 start: i, end: last))
+            i = last + 1
         }
         return entries
     }
@@ -226,14 +282,68 @@ public enum Frontmatter {
         return (key, String(chars[(c + 1)...]).trimmingCharacters(in: .whitespaces))
     }
 
-    private static func isContinuation(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return false }   // a blank line ends the entry
-        if trimmed.hasPrefix("#") { return false }     // a comment belongs to nobody
-        return line.hasPrefix(" ") || line.hasPrefix("\t") || trimmed.hasPrefix("- ") || trimmed == "-"
+    // MARK: - scalars
+
+    /// Characters that, leading a plain scalar, change how YAML reads it.
+    private static let unsafeLeading = Set("-?:[]{}&*!|>%@`,\"'#")
+    /// Characters that make a plain scalar ambiguous anywhere in the value.
+    private static let unsafeAnywhere = Set(":#,[]{}\n\r\t")
+    private static let yamlKeywords: Set<String> = ["true", "false", "null", "yes", "no", "on", "off", "~"]
+
+    /// Renders a value so that `parse(serialize(x)) == x` for ARBITRARY text.
+    ///
+    /// Reachable with zero validation from `LoreNoteOperations.saveNote`
+    /// (`object["title"] as? String`) and from `LoreStore.create`, so this must
+    /// hold for hostile input, not just tidy input. `Meeting: Q3` is an
+    /// entirely ordinary title.
+    static func yamlScalar(_ value: String) -> String {
+        var needsQuotes = value.isEmpty
+            || yamlKeywords.contains(value.lowercased())
+            || value != value.trimmingCharacters(in: .whitespaces)
+            || value.contains(where: unsafeAnywhere.contains)
+        if let first = value.first, unsafeLeading.contains(first) { needsQuotes = true }
+        guard needsQuotes else { return value }
+
+        var out = "\""
+        for ch in value {
+            switch ch {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default: out.append(ch)
+            }
+        }
+        return out + "\""
     }
 
-    // MARK: - values
+    /// The inverse of `yamlScalar` for the two quoting styles YAML defines.
+    static func unquoted(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard s.count >= 2, let fence = s.first, s.last == fence else { return s }
+        let inner = s.dropFirst().dropLast()
+        if fence == "'" { return inner.replacingOccurrences(of: "''", with: "'") }
+        guard fence == "\"" else { return s }
+        var out = ""
+        var escaped = false
+        for ch in inner {
+            guard escaped else {
+                if ch == "\\" { escaped = true } else { out.append(ch) }
+                continue
+            }
+            switch ch {
+            case "n": out.append("\n")
+            case "r": out.append("\r")
+            case "t": out.append("\t")
+            default: out.append(ch)
+            }
+            escaped = false
+        }
+        return out
+    }
+
+    // MARK: - lists
 
     /// A list value in either shape: inline `[a, b]` or a block sequence.
     private static func list(of entry: Entry) -> [String] {
@@ -249,30 +359,59 @@ public enum Frontmatter {
         }
     }
 
+    /// Splits `[a, "b, c"]` on commas OUTSIDE quotes, so an item that legally
+    /// contains a comma is not torn in half.
     private static func inlineList(_ raw: String) -> [String] {
         var s = raw.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("["), s.hasSuffix("]") { s = String(s.dropFirst().dropLast()) }
-        s = s.trimmingCharacters(in: .whitespaces)
-        guard !s.isEmpty else { return [] }
-        return s.split(separator: ",")
-            .map { unquoted($0.trimmingCharacters(in: .whitespaces)) }
-            .filter { !$0.isEmpty }
+        guard !s.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+
+        var items: [String] = []
+        var current = ""
+        var fence: Character?
+        var escaped = false
+        for ch in s {
+            if escaped { current.append(ch); escaped = false; continue }
+            if fence == "\"", ch == "\\" { current.append(ch); escaped = true; continue }
+            if let f = fence {
+                current.append(ch)
+                if ch == f { fence = nil }
+            } else if ch == "\"" || ch == "'" {
+                fence = ch; current.append(ch)
+            } else if ch == "," {
+                items.append(current); current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        items.append(current)
+        return items.map { unquoted($0) }.filter { !$0.isEmpty }
     }
 
-    private static func unquoted(_ s: String) -> String {
-        guard s.count >= 2, let f = s.first, f == "\"" || f == "'", s.last == f else { return s }
-        return String(s.dropFirst().dropLast())
+    // MARK: - dates
+
+    private static let dayFormatter = formatter("yyyy-MM-dd")
+
+    private static func formatter(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = format
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
     }
 
     /// Lenient date parsing. `yyyy-MM-dd` is what Lore writes; ISO-8601 (with
     /// or without fractional seconds, with or without a zone) is what sync
     /// tools, templater plugins and generators write. Anything else returns nil
     /// and is then left untouched on disk rather than overwritten with today.
-    static func date(from raw: String) -> Date? {
-        let value = unquoted(raw.trimmingCharacters(in: .whitespaces))
+    ///
+    /// The matching formatter is returned as well so a value that DOES change
+    /// can be re-emitted in the format the file already used.
+    static func date(from raw: String) -> (date: Date, formatter: DateFormatter)? {
+        let value = unquoted(raw)
         guard !value.isEmpty else { return nil }
-        for formatter in dateFormatters {
-            if let d = formatter.date(from: value) { return d }
+        for f in dateFormatters {
+            if let d = f.date(from: value) { return (d, f) }
         }
         return nil
     }
@@ -284,26 +423,20 @@ public enum Frontmatter {
         "yyyy-MM-dd'T'HH:mm:ss",
         "yyyy-MM-dd HH:mm:ss",
         "yyyy-MM-dd HH:mm",
-    ].map { format in
-        let f = DateFormatter()
-        f.dateFormat = format
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        return f
-    }
+    ].map(formatter)
 
     // MARK: - no frontmatter
 
-    private static func fallback(_ text: String, path: URL) -> Note {
+    private static func fallback(_ text: String, path: URL, layout: Layout) -> Note {
         let now = Date()
         return Note(path: path, id: UUID().uuidString, title: deriveTitle(text, path: path),
                     tags: [], created: now, updated: now, body: text, extra: [],
-                    rawFrontmatter: nil)
+                    rawFrontmatter: nil, lineEnding: layout.ending)
     }
 
     private static func deriveTitle(_ body: String, path: URL) -> String {
-        for line in body.split(separator: "\n") where line.hasPrefix("# ") {
-            return String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        for line in body.split(whereSeparator: \.isNewline) where line.hasPrefix("# ") {
+            return String(line.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return path.deletingPathExtension().lastPathComponent
     }

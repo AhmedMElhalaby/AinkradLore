@@ -29,11 +29,20 @@ public struct Note: Identifiable, Equatable, Sendable {
     /// the model, so everything Lore does not model survives a save intact.
     public var rawFrontmatter: String?
 
+    /// The line ending the file was written with, `"\n"` or `"\r\n"`.
+    ///
+    /// Carried so a CRLF document — Windows-authored vaults, sync clients, git
+    /// checkouts with `core.autocrlf` — is re-emitted with the endings it
+    /// arrived with. Normalising them would rewrite every line of the file,
+    /// which is its own kind of corruption.
+    public var lineEnding: String
+
     public init(path: URL, id: String, title: String, tags: [String],
                 created: Date, updated: Date, body: String, extra: [FrontmatterPair] = [],
-                rawFrontmatter: String? = nil) {
+                rawFrontmatter: String? = nil, lineEnding: String = "\n") {
         self.path = path; self.id = id; self.title = title; self.tags = tags
         self.created = created; self.updated = updated; self.body = body
         self.extra = extra; self.rawFrontmatter = rawFrontmatter
+        self.lineEnding = lineEnding
     }
 }
