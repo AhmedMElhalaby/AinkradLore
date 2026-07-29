@@ -108,12 +108,48 @@ struct LoreNoteOperationsTests {
         #expect(outcome.text.contains("Browseable"))
     }
 
+    /// `IndexRow.type` now spans markdown notes AND plaintext/source files
+    /// (Task 5's generalized index). `search_notes` is documented as
+    /// searching notes; silently surfacing a `.txt` match would be the tool
+    /// lying about its own contract.
+    @Test func searchOnlyReturnsMarkdownNotes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "A")
+        note.body = "needle"
+        try store.save(note)
+        try "needle in plain text".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "search", "query": "needle"])
+        #expect(outcome.isError == false)
+        #expect(outcome.text.contains(note.id))
+        #expect(outcome.text.contains("b.txt") == false,
+                "note tools must not claim plain-text files are notes")
+    }
+
     @Test func searchReportsNoMatchesWithoutErroring() async throws {
         let (root, operations, _) = try await makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
         let outcome = await run(operations, ["operation": "search", "query": "nothingatall"])
         #expect(outcome.isError == false)
         #expect(outcome.text.contains("No notes match"))
+    }
+
+    /// `resolve` backs `read_note`/`save_note`/`delete_note`; it must not
+    /// resolve a non-markdown row even when the caller's identifier happens to
+    /// match one exactly (its path, here).
+    @Test func readCannotResolveANonMarkdownFile() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let textURL = root.appendingPathComponent("notes.txt")
+        try "plain text, not a note".write(to: textURL, atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "read", "note": textURL.path])
+        #expect(outcome.isError)
+        #expect(outcome.text.contains("search_notes"))
     }
 
     @Test func readReturnsTitleTagsAndBody() async throws {
