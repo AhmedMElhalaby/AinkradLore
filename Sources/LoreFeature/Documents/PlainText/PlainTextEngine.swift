@@ -11,10 +11,15 @@ public final class PlainTextEngine: DocumentEngine {
     public static let identifier = "plaintext"
 
     public var text: String
+    /// True when `load` could not decode the file's bytes as strict UTF-8 and
+    /// fell back to a lossy decode (invalid sequences replaced with U+FFFD).
+    /// A lossily-decoded document's in-memory `text` no longer matches the
+    /// file's original bytes, so `save` refuses to write it — see `save(to:)`.
+    public private(set) var isLossilyDecoded: Bool
     private let sourceURL: URL
 
-    private init(text: String, sourceURL: URL) {
-        self.text = text; self.sourceURL = sourceURL
+    private init(text: String, isLossilyDecoded: Bool, sourceURL: URL) {
+        self.text = text; self.isLossilyDecoded = isLossilyDecoded; self.sourceURL = sourceURL
     }
 
     public static let extensions: Set<String> = [
@@ -29,14 +34,24 @@ public final class PlainTextEngine: DocumentEngine {
     public static func load(_ url: URL) throws -> PlainTextEngine {
         // Not every file with a text extension is valid UTF-8. Falling back to
         // a lossy decode keeps a mis-encoded log openable and searchable rather
-        // than making it an error state the user cannot act on.
+        // than making it an error state the user cannot act on. The fallback is
+        // recorded in `isLossilyDecoded` so `save` can refuse to overwrite the
+        // original bytes with a reconstruction it cannot represent faithfully.
         let data = try Data(contentsOf: url)
-        let text = String(data: data, encoding: .utf8)
-            ?? String(decoding: data, as: UTF8.self)
-        return PlainTextEngine(text: text, sourceURL: url)
+        if let strict = String(data: data, encoding: .utf8) {
+            return PlainTextEngine(text: strict, isLossilyDecoded: false, sourceURL: url)
+        }
+        let lossy = String(decoding: data, as: UTF8.self)
+        return PlainTextEngine(text: lossy, isLossilyDecoded: true, sourceURL: url)
     }
 
     public func save(to url: URL) throws {
+        // A lossily-decoded document's `text` cannot reproduce the file's
+        // original bytes (invalid sequences were replaced with U+FFFD).
+        // Writing it would silently destroy data the user never asked to
+        // change, so we refuse rather than degrade further. The content stays
+        // visible and searchable via `indexPayload` — only saving is blocked.
+        guard !isLossilyDecoded else { throw EngineError.notRoundTrippable(url) }
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 

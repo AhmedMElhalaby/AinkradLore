@@ -25,4 +25,9 @@ public enum EngineRegistry {
 
 public enum EngineError: Error, Equatable {
     case unsupported(URL)
+    /// The in-memory document cannot reproduce the file's original bytes
+    /// (e.g. a non-UTF-8 file was opened via a lossy decode), so writing it
+    /// would destroy data rather than represent it. Thrown by `save` instead
+    /// of overwriting the file.
+    case notRoundTrippable(URL)
 }

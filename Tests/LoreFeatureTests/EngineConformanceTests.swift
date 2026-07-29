@@ -115,8 +115,13 @@ final class EngineConformanceTests: XCTestCase {
     /// A minimal valid document each engine can load, keyed by identifier.
     /// A new engine must add its sample here, which is the forcing function
     /// that keeps this suite honest.
+    /// Each sample must be byte-identical to what its engine's own `save`
+    /// re-emits after a no-op load, since `test_loadSaveLoad_isByteStable`
+    /// asserts against the ORIGINAL contents, not just idempotency. The
+    /// markdown sample therefore matches `Frontmatter.serialize`'s exact
+    /// output (empty tags list, no extra properties, no trailing newline).
     private static let samples: [String: (name: String, contents: String)] = [
-        "markdown": ("c.md", "---\nid: a\ntitle: T\n---\nbody"),
+        "markdown": ("c.md", "---\nid: a\ntitle: T\ntags: []\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\nbody"),
         "plaintext": ("c.txt", "plain body text"),
     ]
 
@@ -143,6 +148,13 @@ final class EngineConformanceTests: XCTestCase {
             let loaded = try engine.load(url)
             try loaded.save(to: url)
             let after = try String(contentsOf: url, encoding: .utf8)
+            // The load-then-save-with-no-mutation round trip must reproduce
+            // the ORIGINAL bytes. Comparing only two successive saves (as an
+            // earlier version of this test did) would pass even for an engine
+            // that strips data on every save — it only proves idempotency,
+            // not fidelity.
+            XCTAssertEqual(after, sample.contents,
+                           "\(engine.identifier): save does not round-trip the original bytes")
             try loaded.save(to: url)
             let afterTwice = try String(contentsOf: url, encoding: .utf8)
             XCTAssertEqual(after, afterTwice,
@@ -181,5 +193,47 @@ final class EngineConformanceTests: XCTestCase {
 
     func test_registryHasAtLeastTwoEngines() {
         XCTAssertGreaterThanOrEqual(EngineRegistry.engines.count, 2)
+    }
+}
+
+/// PlainTextEngine's lossy-decode / refuse-to-save contract. A lossily-decoded
+/// document is legitimately unsaveable, so it is deliberately kept out of
+/// `EngineConformanceTests.samples` rather than added as a case there.
+final class PlainTextEngineTests: XCTestCase {
+    private func write(_ name: String, _ data: Data) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-plaintext-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        try data.write(to: url)
+        return url
+    }
+
+    func test_load_ofInvalidUTF8_succeedsAndFlagsLossyDecode() throws {
+        // 0xFF is not a valid UTF-8 lead byte in any position.
+        let data = Data([0x48, 0x69, 0xFF, 0x21])
+        let url = try write("bad.txt", data)
+        let engine = try PlainTextEngine.load(url)
+        XCTAssertTrue(engine.isLossilyDecoded)
+        XCTAssertFalse(engine.indexPayload.plaintext.isEmpty)
+    }
+
+    func test_save_ofLossilyDecodedDocument_throwsNotRoundTrippable() throws {
+        let data = Data([0x48, 0x69, 0xFF, 0x21])
+        let url = try write("bad.txt", data)
+        let engine = try PlainTextEngine.load(url)
+        XCTAssertThrowsError(try engine.save(to: url)) { error in
+            XCTAssertEqual(error as? EngineError, .notRoundTrippable(url))
+        }
+    }
+
+    func test_load_ofValidUTF8_isNotLossyAndSavesFine() throws {
+        let data = Data("hello world".utf8)
+        let url = try write("good.txt", data)
+        let engine = try PlainTextEngine.load(url)
+        XCTAssertFalse(engine.isLossilyDecoded)
+        XCTAssertNoThrow(try engine.save(to: url))
+        let after = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertEqual(after, "hello world")
     }
 }
