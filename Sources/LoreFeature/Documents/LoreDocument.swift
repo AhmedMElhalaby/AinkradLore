@@ -15,6 +15,11 @@ public struct OutlineEntry: Sendable, Equatable {
 /// what lets a PDF or a `.lore` package contribute searchable text it does not
 /// literally contain as bytes.
 public struct IndexPayload: Sendable {
+    /// Stable document identity, when the format has one of its own (markdown's
+    /// `id:` frontmatter key). `nil` means "no intrinsic identity" and the
+    /// index falls back to the file path — which is what a plain text file has.
+    /// Callers that resolve a document by name (the MCP layer) match on this.
+    public var id: String?
     public var title: String
     public var plaintext: String
     public var tags: [String]
@@ -25,7 +30,8 @@ public struct IndexPayload: Sendable {
 
     public init(title: String, plaintext: String, tags: [String] = [],
                 properties: [FrontmatterPair] = [], outline: [OutlineEntry] = [],
-                links: [String] = []) {
+                links: [String] = [], id: String? = nil) {
+        self.id = id
         self.title = title; self.plaintext = plaintext; self.tags = tags
         self.properties = properties; self.outline = outline; self.links = links
     }

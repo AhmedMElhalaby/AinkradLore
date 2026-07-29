@@ -32,7 +32,8 @@ public final class MarkdownEngine: DocumentEngine {
                      plaintext: note.body,
                      tags: note.tags,
                      properties: note.extra,
-                     outline: Self.outline(of: note.body))
+                     outline: Self.outline(of: note.body),
+                     id: note.id)
     }
 
     /// ATX headings only (`# ` … `###### `). Setext headings are rare in
