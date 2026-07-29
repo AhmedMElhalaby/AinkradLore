@@ -144,7 +144,11 @@ public final class VaultIndexCoordinator {
         // no error to explain it.
         let rootDepth = root.standardizedFileURL.pathComponents.count
         let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey])
+            at: root,
+            includingPropertiesForKeys: [
+                .contentModificationDateKey, .isDirectoryKey, .isPackageKey,
+            ],
+            options: [.skipsPackageDescendants])
         while let url = enumerator?.nextObject() as? URL {
             // Skip package internals and tool directories: `.obsidian`,
             // `.git`, `.trash`, and (later) `.lore` package contents are not
@@ -153,10 +157,15 @@ public final class VaultIndexCoordinator {
             if relative.contains(where: { $0.hasPrefix(".") }) { continue }
             // Directories are not documents. They were filtered out for free
             // while unclaimed files were skipped; now that those are indexed,
-            // every folder would otherwise become a row.
+            // every folder would otherwise become a row. A PACKAGE is also a
+            // directory, but `.skipsPackageDescendants` above means its
+            // internals are never walked — so unlike a plain directory, the
+            // package itself must be indexed as a single unclaimed row, or it
+            // (and everything a user would recognize as "the document")
+            // disappears from the vault entirely.
             let values = try? url.resourceValues(
-                forKeys: [.isDirectoryKey, .contentModificationDateKey])
-            if values?.isDirectory == true { continue }
+                forKeys: [.isDirectoryKey, .isPackageKey, .contentModificationDateKey])
+            if values?.isDirectory == true && values?.isPackage != true { continue }
             // File mtime is DELIBERATELY authoritative for `updated`, and
             // supersedes markdown's frontmatter `updated:` value, which the
             // pre-M0 scan used. Two reasons: it is uniform across document

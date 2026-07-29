@@ -248,6 +248,42 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
+    func test_scanVault_indexesAPackageAsOneUnclaimedRowNotItsInternals() throws {
+        let root = tempDir()
+        let pkg = root.appendingPathComponent("Report.pages", isDirectory: true)
+        let contents = pkg.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        try "<xml/>".write(
+            to: contents.appendingPathComponent("index.xml"), atomically: true, encoding: .utf8)
+        try "jpegbytes".write(
+            to: pkg.appendingPathComponent("preview.jpg"), atomically: true, encoding: .utf8)
+
+        // Confirm the fixture is actually treated as a package on this
+        // system before trusting the assertions below — package-ness comes
+        // from UTI registration, not the `.pages` name alone, and a false
+        // negative here would make the test pass for the wrong reason.
+        let isPackage = try pkg.resourceValues(forKeys: [.isPackageKey]).isPackage
+        XCTAssertEqual(isPackage, true, "fixture is not recognized as a package on this system")
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(entries.first?.payload.title, "Report.pages")
+    }
+
+    func test_scanVault_plainSubdirectoryYieldsNoRowButItsFilesAreStillIndexed() throws {
+        let root = tempDir()
+        let folder = root.appendingPathComponent("Projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "log line".write(
+            to: folder.appendingPathComponent("run.log"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.url.lastPathComponent, "run.log")
+        XCTAssertFalse(entries.contains { $0.url.lastPathComponent == "Projects" })
+    }
+
     func test_externalChange_flagsOpenNote() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Open")
