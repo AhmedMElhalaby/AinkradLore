@@ -256,7 +256,20 @@ public final class VaultIndexCoordinator {
     /// matching that resolution here, a caller-constructed URL under either
     /// path (any vault under `/tmp`, and every test vault) would never match
     /// a stored row and silently return no backlinks.
-    private static func canonical(_ url: URL) -> URL {
+    ///
+    /// Internal (not private) since Task 7: `LoreStore`'s rename planner must
+    /// source the vault root, the rename source AND the destination through
+    /// THIS function. `LinkRewriter` computes vault-relative targets by
+    /// comparing path COMPONENTS, so mixing a canonical root
+    /// (`/private/tmp/v`) with a raw destination (`/tmp/v/x.md`) fails the
+    /// prefix match and drops every edit silently — a clean-looking rename
+    /// that breaks every inbound link.
+    ///
+    /// `realpath(3)` fails on a path that does not exist yet, in which case it
+    /// returns `url` untouched — so a caller canonicalizing a rename
+    /// DESTINATION must canonicalize its existing parent directory and
+    /// re-append the last component (see `LoreStore.canonicalizingDestination`).
+    static func canonical(_ url: URL) -> URL {
         var buffer = [Int8](repeating: 0, count: Int(PATH_MAX))
         guard realpath(url.path, &buffer) != nil else { return url }
         return URL(fileURLWithPath: String(cString: buffer))
@@ -264,6 +277,12 @@ public final class VaultIndexCoordinator {
 
     func backlinkRows(to url: URL) -> [IndexRow] {
         (try? index?.backlinks(to: Self.canonical(url))) ?? []
+    }
+
+    /// Every (file, rawTarget) pair pointing at `url` — the raw material for a
+    /// rename's change set. Canonicalized like every other index lookup.
+    func inboundLinks(to url: URL) -> [(sourceFile: URL, rawTarget: String)] {
+        (try? index?.inboundLinks(to: Self.canonical(url))) ?? []
     }
     func unresolvedLinks(from url: URL) -> [String] {
         (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []

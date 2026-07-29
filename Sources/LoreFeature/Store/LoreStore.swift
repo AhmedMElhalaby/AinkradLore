@@ -10,7 +10,10 @@ public final class LoreStore {
     public private(set) var defaultNoteFolder: String = ""
 
     private let documents: PluginDocumentStore
-    private let coordinator: VaultIndexCoordinator
+    /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
+    /// The rename applier lives in its own file to keep this one under the
+    /// 500-line ceiling.
+    let coordinator: VaultIndexCoordinator
     private var openMTimes: [URL: Date] = [:]
 
     private static let defaultFolderKey = "defaultNoteFolder"

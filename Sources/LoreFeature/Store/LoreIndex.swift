@@ -303,6 +303,25 @@ public final class LoreIndex: @unchecked Sendable {
         }
     }
 
+    /// Every (file, rawTarget) pair pointing at `target`.
+    ///
+    /// Distinct from `backlinks(to:)`, which returns one row per SOURCE
+    /// DOCUMENT: a rename must rewrite every individual link, so a document
+    /// linking twice with two different spellings (`[[Design]]` and
+    /// `[[Projects/Design.md]]`) has to yield two rows here, not one.
+    public func inboundLinks(to target: URL) throws -> [(sourceFile: URL, rawTarget: String)] {
+        try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT DISTINCT source_path, raw_target FROM links
+                WHERE target_path = ?;
+            """, arguments: [target.path]).map { r -> (sourceFile: URL, rawTarget: String) in
+                let source: String = r["source_path"]
+                let raw: String = r["raw_target"]
+                return (sourceFile: URL(fileURLWithPath: source), rawTarget: raw)
+            }
+        }
+    }
+
     /// This document's outbound links that resolve to nothing. A normal state:
     /// it is how a link to a not-yet-written note behaves.
     public func unresolvedLinks(from source: URL) throws -> [String] {

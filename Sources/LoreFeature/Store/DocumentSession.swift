@@ -199,6 +199,24 @@ public final class DocumentSession: Identifiable {
         return candidate
     }
 
+    /// The document this session edits was renamed or moved on disk. Follow it.
+    ///
+    /// `url` is already mutable (`resolveBySavingCopy` adoption); this is the
+    /// same move for a different reason. The baseline MUST be refreshed too:
+    /// it describes the old file, and left stale the session's next save either
+    /// sees a "newer" file and raises a phantom conflict, or — worse — sees an
+    /// older one and writes over the move. `conflict` is cleared for the same
+    /// reason: a banner about a file that no longer exists is not actionable.
+    ///
+    /// `isDirty` is deliberately NOT cleared: unsaved edits are still unsaved,
+    /// they just belong to a file with a new name now.
+    public func adoptRenamed(_ newURL: URL) {
+        url = newURL
+        baseline = Self.mtime(of: newURL) ?? .distantPast
+        conflict = false
+        lastSaveError = nil
+    }
+
     private func write() throws {
         coordinator.suppressWatcher(for: Self.selfWriteSuppressionWindow)
         do {
