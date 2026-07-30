@@ -83,6 +83,86 @@ final class SidebarOperations {
 
     func cancelName() { nameTarget = nil }
 
+    // MARK: - Vault selection
+
+    /// Asks for a vault folder, then opens it.
+    ///
+    /// Lore's only vault picker used to live in `makeSettingsView`. The Dev
+    /// Host renders `makeRootView` and nothing else, so under it there was no
+    /// reachable way to select a vault — and every affordance that needs one
+    /// (create, search, the whole sidebar) was permanently inert with no
+    /// explanation. A first-run action belongs on the surface the user is
+    /// actually looking at.
+    func beginChooseVault() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open vault"
+        panel.message = "Choose the folder that holds your notes."
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        selectVault(folder)
+    }
+
+    /// The testable half: open `folder` as the vault, reporting any failure.
+    ///
+    /// `LoreSettingsView.pickFolder` did this as `try? store.setVaultRoot(url)`
+    /// — so a vault that could not be bookmarked or indexed left the user
+    /// looking at an unchanged, empty window with nothing said. Same class of
+    /// defect as the swallowed create below, on the step immediately before it.
+    func selectVault(_ folder: URL) {
+        do {
+            try store.setVaultRoot(folder)
+            message = nil
+        } catch {
+            message = "“\(folder.lastPathComponent)” could not be opened as a vault: "
+                + error.localizedDescription
+        }
+    }
+
+    // MARK: - Create
+
+    /// Creates an untitled document and returns its URL, or nil having set
+    /// `message` to the reason it could not.
+    ///
+    /// The reported bug: `LoreRootView.quickCapture` was
+    /// `guard let note = try? store.create(title: "") else { return }`. With no
+    /// vault open `create` throws `.noVault`, `try?` discarded it, and the
+    /// button did nothing — indistinguishable from a dead button, which is
+    /// precisely how it was reported. This is the same fix, and the same
+    /// reasoning, already written down for delete in `deleteDocument`.
+    @discardableResult
+    func createDocument() -> URL? {
+        do {
+            let note = try store.create(title: "")
+            message = nil
+            return note.path
+        } catch let error as LoreError {
+            message = Self.describeCreate(error)
+            return nil
+        } catch {
+            message = "The document could not be created: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// `describe(_:row:)` phrases everything as a failed DELETE and needs a row
+    /// that does not exist yet, so create gets its own sentences.
+    static func describeCreate(_ error: LoreError) -> String {
+        switch error {
+        case .noVault:
+            return "No vault is open, so there is nowhere to put a new document. "
+                + "Choose a vault folder first."
+        case .outsideVault(let url):
+            return "A new document would have been written outside the vault "
+                + "(“\(url.lastPathComponent)”), so nothing was created."
+        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
+            return "The document could not be created: \(reason)"
+        case .externalChange(let url):
+            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
+        }
+    }
+
     // MARK: - Move
 
     /// Asks for a destination folder, then previews the move. The panel opens

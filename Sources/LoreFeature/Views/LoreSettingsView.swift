@@ -6,6 +6,8 @@ struct LoreSettingsView: View {
     @Bindable var store: LoreStore
     let theme: HostTheme
     @Environment(\.ainkradTypography) private var typo
+    /// Why the last vault choice did not take. Nil when nothing has failed.
+    @State private var failure: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.lg) {
@@ -19,6 +21,12 @@ struct LoreSettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     AinkradButton(title: "Choose…", style: .secondary, action: pickFolder)
                 }
+            }
+
+            if let failure {
+                Text(failure)
+                    .foregroundStyle(theme.tokens.accentPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if !store.subfolders.isEmpty {
@@ -45,11 +53,14 @@ struct LoreSettingsView: View {
                 set: { store.setDefaultNoteFolder($0) })
     }
 
+    /// Shares `SidebarOperations`' picker so settings and the first-run empty
+    /// state cannot drift apart, and so a failure here is reported rather than
+    /// swallowed. This was `try? store.setVaultRoot(url)`: a vault that could
+    /// not be bookmarked or indexed left the row still reading "None selected"
+    /// with nothing said about why.
     private func pickFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { try? store.setVaultRoot(url) }
+        let ops = SidebarOperations(store: store)
+        ops.beginChooseVault()
+        failure = ops.message
     }
 }

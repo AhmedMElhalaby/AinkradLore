@@ -101,13 +101,39 @@ struct LoreRootView: View {
             DocumentPane(store: store, session: session, theme: theme)
                 .id(session.id)
         } else {
-            AinkradEmptyState(
-                icon: "book.closed",
-                title: "No document open",
-                message: "Select a document from the list, or press ⌘N to capture a new one.",
-                actionTitle: "New note",
-                action: quickCapture)
+            switch Self.emptyState(for: store) {
+            case .noVault:
+                // Offering "New note" here was the whole bug: with no vault the
+                // click could not succeed, and the copy told the user to press
+                // ⌘N — advice guaranteed to do nothing. The first-run state has
+                // exactly one useful action, so it is the only one offered.
+                AinkradEmptyState(
+                    icon: "folder.badge.questionmark",
+                    title: "No vault open",
+                    message: "Lore keeps your notes in a folder on disk. "
+                        + "Choose the folder that holds them to get started.",
+                    actionTitle: "Choose vault…",
+                    action: ops.beginChooseVault)
+            case .noDocument:
+                AinkradEmptyState(
+                    icon: "book.closed",
+                    title: "No document open",
+                    message: "Select a document from the list, or press ⌘N to capture a new one.",
+                    actionTitle: "New note",
+                    action: quickCapture)
+            }
         }
+    }
+
+    /// Which empty state the pane is in.
+    ///
+    /// A `static` on the view, not a computed property, because SwiftUI views
+    /// are only smoke-testable in this project — this is the value the branch
+    /// above is built from, and `NoVaultTests` asserts it directly.
+    enum EmptyState: Equatable { case noVault, noDocument }
+
+    static func emptyState(for store: LoreStore) -> EmptyState {
+        store.vaultRoot == nil ? .noVault : .noDocument
     }
 
     private func openRow(_ row: IndexRow) {
@@ -116,11 +142,14 @@ struct LoreRootView: View {
         store.open(row)
     }
 
+    /// Create-and-open. The failure path goes through `ops.message` rather than
+    /// `try?` — see `SidebarOperations.createDocument`, which is where the
+    /// reason for the failure is turned into a sentence.
     private func quickCapture() {
-        guard let note = try? store.create(title: "") else { return }
-        attempted = note.path
-        store.open(url: note.path)
-        selected = store.rows.first { $0.path == note.path }
+        guard let path = ops.createDocument() else { return }
+        attempted = path
+        store.open(url: path)
+        selected = store.rows.first { $0.path == path }
     }
 }
 
