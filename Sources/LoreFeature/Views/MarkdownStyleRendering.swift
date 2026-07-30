@@ -166,19 +166,24 @@ enum MarkdownStyleRenderer {
     /// over the full range collapses the storage to one run, so the clear is
     /// cheap regardless of how much was styled before.
     static func apply(_ spans: [StyleSpan], to storage: NSTextStorage,
-                      tokens: HostThemeTokens, limitedTo window: NSRange?) {
+                      tokens: HostThemeTokens, theme: MarkdownTheme,
+                      limitedTo window: NSRange?) {
         let full = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.setAttributes([
             .font: baseFont,
-            .foregroundColor: NSColor(tokens.foreground)
+            .foregroundColor: NSColor(tokens.foreground),
+            // Body rhythm as the FLOOR, so line height and paragraph spacing
+            // exist for ordinary prose — which is most of a note — and each
+            // block kind then overrides only what it needs.
+            .paragraphStyle: MarkdownParagraphStyles.style(for: .body, theme: theme)
         ], range: full)
 
         for span in spans {
             let r = NSRange(location: span.range.lowerBound, length: span.range.count)
             guard r.length > 0, NSMaxRange(r) <= full.length else { continue }
             if let window, NSIntersectionRange(r, window).length == 0 { continue }
-            add(span.kind, in: r, to: storage, tokens: tokens)
+            add(span.kind, in: r, to: storage, tokens: tokens, theme: theme)
         }
         storage.endEditing()
     }
@@ -239,15 +244,22 @@ enum MarkdownStyleRenderer {
     /// Syntax markers stay VISIBLE — this is Live Preview, not WYSIWYG — so
     /// every case styles the span's whole source range, markers included.
     private static func add(_ kind: StyleSpan.Kind, in r: NSRange,
-                            to storage: NSTextStorage, tokens: HostThemeTokens) {
+                            to storage: NSTextStorage, tokens: HostThemeTokens,
+                            theme: MarkdownTheme) {
         switch kind {
         case .heading(let level):
-            let size = max(baseSize, 26 - CGFloat(level) * 2)
+            // Foreground, not accentPrimary. Size and weight carry hierarchy;
+            // colour is reserved for what is clickable. Reversing M2a here is
+            // deliberate: a note should read as text, not as coloured bands.
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
-                              to: .systemFont(ofSize: size))
+                              to: .systemFont(ofSize: theme.headingSize(level)))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.foreground), range: r)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .heading(level),
+                                                                      theme: theme),
+                                 range: r)
 
         case .strong:
             composeFont(in: r, storage: storage) { current in
@@ -267,30 +279,31 @@ enum MarkdownStyleRenderer {
                               to: .monospacedSystemFont(ofSize: current.pointSize,
                                                         weight: .regular))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
+            // No accent tint. Mono plus a background already says "code", and
+            // the tint is what made every `code` span read as a coloured word
+            // in the middle of a sentence.
             storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
+                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.6),
                                  range: r)
 
         case .codeBlock(let language):
-            // Task 9's scope: monospace, a background, a language label. NO
-            // per-token colouring — that would reintroduce exactly the
-            // hand-rolled scanning this milestone removed. The uniform
-            // `accentSecondary` tint over the WHOLE block (kept from Task 6)
-            // is not that: it is one colour for one span, same as
-            // `.inlineCode`, and it is what makes a fence read as code at a
-            // glance rather than as indented prose. Removing it would leave
-            // code visually identical to a blockquote save for the
-            // background, which is a worse outcome than the tint's own
-            // "changes every existing note" cost — so it stays.
+            // REVISITED, not ignored. M2a defended an `accentSecondary` tint
+            // over the whole block on the grounds that without it a fence would
+            // read as a blockquote. `MarkdownBlockBackgrounds` now draws a
+            // full-width panel for code and a bar for quotes, so the two are
+            // unmistakable by shape and that argument no longer holds — and the
+            // tint's own cost (it repainted every note into coloured bands) is
+            // exactly what this milestone exists to undo. A per-glyph
+            // `.backgroundColor` is not used here either: it stops at the end of
+            // each line, giving a ragged staircase instead of a panel.
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),
                               to: .monospacedSystemFont(ofSize: current.pointSize,
                                                         weight: .regular))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
-            storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .codeBlock,
+                                                                      theme: theme),
                                  range: r)
             if let language, !language.isEmpty {
                 styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
@@ -311,9 +324,12 @@ enum MarkdownStyleRenderer {
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.foreground).withAlphaComponent(0.65),
                                  range: r)
-            let style = NSMutableParagraphStyle()
-            style.headIndent = 16
-            storage.addAttribute(.paragraphStyle, value: style, range: r)
+            // The indent leaves room for the bar `MarkdownBlockBackgrounds`
+            // draws in the margin; the bar is what says "quote".
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .blockQuote,
+                                                                      theme: theme),
+                                 range: r)
 
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)

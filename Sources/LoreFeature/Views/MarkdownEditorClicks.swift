@@ -35,6 +35,27 @@ final class LinkTextView: NSTextView {
     /// produce a `textDidEndEditing`.
     var onResignFirstResponder: (@MainActor () -> Void)?
 
+    /// Code panels and blockquote bars to paint BEHIND the text. Set by the
+    /// coordinator whenever styles are applied; see `MarkdownBlockBackgrounds`
+    /// for why these are drawn rather than attributed.
+    var blockBackgrounds: [MarkdownBlockBackgrounds.Region] = [] {
+        didSet { if blockBackgrounds != oldValue { needsDisplay = true } }
+    }
+    /// The colours those regions are painted in, from the host theme.
+    var blockBackgroundPalette: MarkdownBlockBackgrounds.Palette? {
+        didSet { if blockBackgroundPalette != oldValue { needsDisplay = true } }
+    }
+
+    /// The one drawing hook. `super` first, so the view's own background is
+    /// down before the block decoration goes on top of it and the text on top
+    /// of that.
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let palette = blockBackgroundPalette else { return }
+        MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
+                                      in: self, dirtyRect: rect)
+    }
+
     /// Modifiers that mean the user is doing something other than "activate
     /// what is under the pointer": extending a selection, opening a context
     /// menu, or whatever the host binds Option-click to.

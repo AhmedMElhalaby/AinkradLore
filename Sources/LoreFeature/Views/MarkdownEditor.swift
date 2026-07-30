@@ -393,7 +393,18 @@ public struct MarkdownEditor: NSViewRepresentable {
                 ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
             lastViewportWindow = window
             MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
-                                        tokens: tokens, limitedTo: window)
+                                        tokens: tokens, theme: MarkdownTheme(tokens: tokens),
+                                        limitedTo: window)
+            // Code panels and quote bars are DRAWN, not attributed — see
+            // `MarkdownBlockBackgrounds`. Refreshed from the same spans in the
+            // same pass, so the decoration can never describe older text than
+            // the attributes do.
+            if let linkView = tv as? LinkTextView {
+                linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
+                linkView.blockBackgrounds =
+                    MarkdownBlockBackgrounds.regions(for: styleCache.spans,
+                                                     length: storage.length)
+            }
             stylingNotice?.isHidden = !styleCache.isOverHardCap
             stylingNotice?.textColor = NSColor(tokens.accentSecondary)
         }
