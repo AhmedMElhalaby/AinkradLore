@@ -191,6 +191,10 @@ final class MarkdownStyleSpanTests: XCTestCase {
         XCTAssertTrue(k.contains(.codeBlock(language: "swift")))
     }
 
+    // See CodeBlockLanguageTests.swift for the info-string / fence-range tests
+    // added by Task 9 — kept out of this file, which is near the repo's
+    // 500-line-per-file ceiling.
+
     func test_nothingInsideAFenceIsStyledAsProse() {
         // The bug this milestone exists to fix: the regex styler bolded this.
         let spans = MarkdownDocumentModel(fullText: "```\n**not bold** # not heading\n```\n").styleSpans

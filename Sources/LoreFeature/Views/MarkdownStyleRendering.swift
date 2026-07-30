@@ -200,12 +200,32 @@ enum MarkdownStyleRenderer {
             storage.addAttribute(.font, value: NSFontManager.shared.convert(
                 .systemFont(ofSize: baseSize), toHaveTrait: .italicFontMask), range: r)
 
-        case .inlineCode, .codeBlock:
+        case .inlineCode:
             storage.addAttribute(.font, value: baseFont, range: r)
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
             storage.addAttribute(.backgroundColor,
                                  value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
                                  range: r)
+
+        case .codeBlock(let language):
+            // Task 9's scope: monospace, a background, a language label. NO
+            // per-token colouring — that would reintroduce exactly the
+            // hand-rolled scanning this milestone removed. The uniform
+            // `accentSecondary` tint over the WHOLE block (kept from Task 6)
+            // is not that: it is one colour for one span, same as
+            // `.inlineCode`, and it is what makes a fence read as code at a
+            // glance rather than as indented prose. Removing it would leave
+            // code visually identical to a blockquote save for the
+            // background, which is a worse outcome than the tint's own
+            // "changes every existing note" cost — so it stays.
+            storage.addAttribute(.font, value: baseFont, range: r)
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
+            storage.addAttribute(.backgroundColor,
+                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
+                                 range: r)
+            if let language, !language.isEmpty {
+                styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
+            }
 
         case .link:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
@@ -234,6 +254,34 @@ enum MarkdownStyleRenderer {
             // tinting it would tint the note. Its children still style.
             break
         }
+    }
+
+    /// Styles the info string (`swift` in an opening ```` ```swift ```` line)
+    /// as a trailing label on that line, distinct from the block's body.
+    ///
+    /// `CodeBlock.range` covers the opening fence line itself (verified in
+    /// `test_codeBlockSpanRangeIncludesTheOpeningFence`), so the language text
+    /// is real characters already inside `r` — no attachment, no overlay
+    /// drawing, no second pass over the layout manager. The label is found by
+    /// locating the block's first line and searching it for `language`, which
+    /// is safe because CommonMark's info string is exactly that word (an
+    /// identifier, no spaces) immediately after the fence run.
+    private static func styleLanguageLabel(_ language: String, in r: NSRange,
+                                           storage: NSTextStorage, tokens: HostThemeTokens) {
+        let full = storage.string as NSString
+        let limit = NSMaxRange(r)
+        var lineEnd = r.location
+        while lineEnd < limit, full.character(at: lineEnd) != 0x0A { lineEnd += 1 }
+        let fenceLine = NSRange(location: r.location, length: lineEnd - r.location)
+        guard fenceLine.length > 0 else { return }
+        let lineText = full.substring(with: fenceLine)
+        guard let langRange = lineText.range(of: language, options: .backwards) else { return }
+        let nsLangRange = NSRange(langRange, in: lineText)
+        let labelRange = NSRange(location: fenceLine.location + nsLangRange.location,
+                                 length: nsLangRange.length)
+        guard NSMaxRange(labelRange) <= full.length else { return }
+        storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
+        storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
     }
 
     /// The visible character range plus a margin.
