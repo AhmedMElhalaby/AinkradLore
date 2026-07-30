@@ -8,9 +8,41 @@ import Markdown
 /// were blind to code fences, so a `#` comment in a code block became a heading
 /// in the index and `**bold**` inside a fence was styled. Every feature that
 /// reads document structure now derives from this single parse.
+/// What kind of raw-text region a `CodeRegion` came from.
+///
+/// Kinds exist because "is this code?" has two different right answers depending
+/// on who is asking. A styler wants every raw-text region. The LINK GRAPH wants
+/// only the regions the old hand-written scanner recognised — fenced and inline
+/// code — because widening it silently deletes links from real notes: a
+/// CommonMark type-6 HTML block runs to the next BLANK line, so `[[R]]` in an
+/// ordinary prose line after a `</div>` would stop being a link at all.
+public enum CodeRegionKind: Sendable, Equatable, Hashable {
+    case fencedCodeBlock
+    case indentedCodeBlock
+    case inlineCode
+    case htmlBlock
+}
+
+public struct CodeRegion: Sendable, Equatable {
+    public let range: NSRange
+    public let kind: CodeRegionKind
+}
+
 public struct MarkdownDocumentModel: Sendable {
     public let offsetMap: SourceOffsetMap
-    public let codeRangesUTF16: [NSRange]
+
+    /// Every raw-text region, tagged. Ordered as the walk found them.
+    public let codeRegions: [CodeRegion]
+
+    /// Every code region's range, kind discarded. Unchanged in meaning from
+    /// before kinds existed: fenced, indented, HTML block, and inline code.
+    public var codeRangesUTF16: [NSRange] { codeRegions.map(\.range) }
+
+    /// The kinds the LINK GRAPH suppresses on. Deliberately NOT every kind —
+    /// see `CodeRegionKind`.
+    public static let linkSuppressingKinds: Set<CodeRegionKind> = [
+        .fencedCodeBlock, .inlineCode,
+    ]
 
     public init(fullText: String) {
         let bodyStart = Frontmatter.bodyOffset(in: fullText)
@@ -21,18 +53,22 @@ public struct MarkdownDocumentModel: Sendable {
         let doc = Document(parsing: body)
 
         self.offsetMap = map
-        self.codeRangesUTF16 = Self.codeRanges(in: doc, map: map)
+        var collector = CodeRangeCollector(map: map, text: fullText as NSString)
+        collector.visit(doc)
+        self.codeRegions = collector.regions
     }
 
+    /// True if `offset` is inside ANY code region. Semantics unchanged: callers
+    /// that genuinely want every raw-text region keep using this.
     public func isInsideCode(utf16Offset offset: Int) -> Bool {
-        codeRangesUTF16.contains { NSLocationInRange(offset, $0) }
+        codeRegions.contains { NSLocationInRange(offset, $0.range) }
     }
 
-    /// Every fenced block, indented block, HTML block, and inline code span.
-    private static func codeRanges(in document: Document, map: SourceOffsetMap) -> [NSRange] {
-        var collector = CodeRangeCollector(map: map)
-        collector.visit(document)
-        return collector.ranges
+    /// True if `offset` is inside a code region of one of `kinds`.
+    public func isInsideCode(utf16Offset offset: Int, kinds: Set<CodeRegionKind>) -> Bool {
+        codeRegions.contains {
+            kinds.contains($0.kind) && NSLocationInRange(offset, $0.range)
+        }
     }
 }
 
@@ -50,26 +86,47 @@ public struct MarkdownDocumentModel: Sendable {
 /// exclusive. Adding a further +1 here would overrun every node by one unit.
 struct CodeRangeCollector: MarkupWalker {
     let map: SourceOffsetMap
-    var ranges: [NSRange] = []
+    /// The FULL text, used only to tell a fenced code block from an indented
+    /// one. swift-markdown models both as `CodeBlock`, and `fenceInfo` is nil
+    /// for a bare ``` opener as well as for indented code, so it cannot
+    /// discriminate. The source text can: a fenced block's range starts at its
+    /// own fence marker.
+    let text: NSString
+    var regions: [CodeRegion] = []
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
-        append(codeBlock.range)
+        guard let ns = resolve(codeBlock.range) else { return }
+        regions.append(CodeRegion(range: ns,
+                                  kind: isFenced(at: ns) ? .fencedCodeBlock
+                                                         : .indentedCodeBlock))
     }
 
     mutating func visitInlineCode(_ inlineCode: InlineCode) {
-        append(inlineCode.range)
+        guard let ns = resolve(inlineCode.range) else { return }
+        regions.append(CodeRegion(range: ns, kind: .inlineCode))
     }
 
     mutating func visitHTMLBlock(_ html: HTMLBlock) {
-        append(html.range)
+        guard let ns = resolve(html.range) else { return }
+        regions.append(CodeRegion(range: ns, kind: .htmlBlock))
     }
 
-    private mutating func append(_ sourceRange: SourceRange?) {
-        guard let r = sourceRange,
-              let ns = map.utf16Range(fromLine: r.lowerBound.line,
-                                      fromColumn: r.lowerBound.column,
-                                      toLine: r.upperBound.line,
-                                      toColumn: r.upperBound.column) else { return }
-        ranges.append(ns)
+    private func isFenced(at range: NSRange) -> Bool {
+        // Up to 3 leading spaces are permitted before a fence, so 6 units is
+        // enough to see a full 3-character marker in the worst case.
+        let probeLength = min(6, text.length - range.location)
+        guard probeLength > 0 else { return false }
+        let head = text.substring(with: NSRange(location: range.location,
+                                                length: probeLength))
+        let marker = head.drop { $0 == " " }
+        return marker.hasPrefix("```") || marker.hasPrefix("~~~")
+    }
+
+    private func resolve(_ sourceRange: SourceRange?) -> NSRange? {
+        guard let r = sourceRange else { return nil }
+        return map.utf16Range(fromLine: r.lowerBound.line,
+                              fromColumn: r.lowerBound.column,
+                              toLine: r.upperBound.line,
+                              toColumn: r.upperBound.column)
     }
 }

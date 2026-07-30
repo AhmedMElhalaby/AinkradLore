@@ -225,6 +225,20 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(targets("a <span>[[B]]</span> b"), ["B"])
     }
 
+    /// The REAL pin for "HTML never suppresses a link".
+    ///
+    /// The behavioural test above does not enforce it: review showed that
+    /// adding `visitInlineHTML` to the collector leaves it green, because
+    /// `InlineHTML` nodes cover only `<span>` / `</span>` and the `[[B]]` is a
+    /// sibling `Text` node outside both ranges. What actually guarantees it is
+    /// the KIND SET the parser suppresses on. Widening that set is the only way
+    /// HTML — inline or block — could ever start eating links, and it fails
+    /// here.
+    func test_onlyFencedAndInlineCodeSuppressLinks() {
+        XCTAssertEqual(MarkdownDocumentModel.linkSuppressingKinds,
+                       [.fencedCodeBlock, .inlineCode])
+    }
+
     /// A `[[` opened INSIDE inline code can find its `]]` in a real link later
     /// on the line. Suppressing the bogus candidate must therefore resume the
     /// scan one character on, not jump past the borrowed `]]` — doing the
@@ -233,26 +247,100 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(targets("`[[x` [[Real]]"), ["Real"])
     }
 
-    // MARK: - M2a behaviour changes (AST-sourced code regions)
+    // MARK: - Kinds that must NOT suppress
     //
-    // These two cases are the ONLY places routing code detection through
-    // `MarkdownDocumentModel` changed the link graph. Both changes SUPPRESS a
-    // link the old hand-written scanner extracted; neither adds one. Both match
-    // how CommonMark — and Obsidian — actually render the text, and the risk
-    // direction is link rot (a rename misses it) rather than the M1 hazard of
-    // rewriting a file the user never opened.
+    // The AST reports indented code, HTML blocks and HTML comments as raw-text
+    // regions, and an earlier draft of this parser suppressed on all of them.
+    // That deleted links the old hand-written scanner extracted — including
+    // links in ordinary PROSE, because a CommonMark type-6 HTML block runs to
+    // the next blank line. Suppression is restricted to fenced and inline code.
 
-    /// An indented (4-space) code block is code. The old scanner tracked only
-    /// ``` / ~~~ fences and extracted `[[Indented]]` as a real link.
-    func test_indentedCodeBlocksSuppressLinks() {
-        XCTAssertEqual(targets("para\n\n    [[Indented]]\n\nafter [[Real]]\n"), ["Real"])
+    /// An indented (4-space) code block must NOT suppress: the old scanner
+    /// tracked only ``` / ~~~ fences, and this keeps the vault's graph stable.
+    func test_indentedCodeBlocksDoNotSuppressLinks() {
+        XCTAssertEqual(targets("para\n\n    [[Indented]]\n\nafter [[Real]]\n"),
+                       ["Indented", "Real"])
     }
 
-    /// A block-level HTML region is code to the AST. The old scanner extracted
-    /// `[[InHTMLBlock]]`. Inline HTML (above) is deliberately NOT affected.
-    func test_htmlBlocksSuppressLinks() {
+    /// Tab-indented code is the same case by another spelling.
+    func test_tabIndentedCodeDoesNotSuppressLinks() {
+        XCTAssertEqual(targets("para\n\n\t[[Tabbed]]\n\nafter [[Real]]\n"),
+                       ["Tabbed", "Real"])
+    }
+
+    func test_htmlBlocksDoNotSuppressLinks() {
         XCTAssertEqual(targets("<div>\n[[InHTMLBlock]]\n</div>\n\nafter [[Real]]\n"),
+                       ["InHTMLBlock", "Real"])
+    }
+
+    /// The worst case the kind restriction exists to prevent: a type-6 HTML
+    /// block swallows every line up to the next BLANK one, so `[[R]]` sits in
+    /// plain prose and must survive.
+    func test_proseAfterAnHTMLBlockKeepsItsLinks() {
+        XCTAssertEqual(targets("text\n<div>\n[[A]]\n</div>\ntext [[R]]"), ["A", "R"])
+    }
+
+    func test_htmlCommentsDoNotSuppressLinks() {
+        XCTAssertEqual(targets("<!--\n[[Commented]]\n-->\n\nafter [[Real]]\n"),
+                       ["Commented", "Real"])
+    }
+
+    /// Markdown links, not just wikilinks, must follow the same rule.
+    func test_markdownLinksInIndentedAndHTMLBlocksAreKept() {
+        XCTAssertEqual(targets("para\n\n    [t](Indented.md)\n"), ["Indented.md"])
+        XCTAssertEqual(targets("<div>\n[t](InHTML.md)\n</div>\n"), ["InHTML.md"])
+    }
+
+    /// An indented fence is still a fence (up to 3 spaces), and still suppresses.
+    func test_indentedFenceStillSuppresses() {
+        XCTAssertEqual(targets("para\n\n   ```\n   [[Fenced]]\n   ```\n\n[[Real]]\n"),
                        ["Real"])
+    }
+
+    /// Fenced code inside a list item is still fenced code.
+    func test_fenceInsideAListItemSuppresses() {
+        XCTAssertEqual(targets("- item\n\n  ```\n  [[Fenced]]\n  ```\n\n[[Real]]\n"),
+                       ["Real"])
+    }
+
+    /// Indented code inside a blockquote must NOT suppress — same rule as any
+    /// other indented code.
+    func test_indentedCodeInsideABlockquoteDoesNotSuppress() {
+        XCTAssertEqual(targets("> para\n>\n>     [[Quoted]]\n\nafter [[Real]]\n"),
+                       ["Quoted", "Real"])
+    }
+
+    // MARK: - Inline-code shapes the old scanner got wrong
+
+    /// ESCAPED backticks are literal text, so `[[X]]` between them is a REAL
+    /// link. The old scanner counted any backtick pair as inline code and
+    /// dropped it. This is the one direction that ADDS links to the graph; it
+    /// adds only links that genuinely render as links.
+    func test_escapedBacktickIsNotInlineCode() {
+        XCTAssertEqual(targets(#"\`[[X]]\`"#), ["X"])
+    }
+
+    /// CommonMark does not require word boundaries around a code span, so the
+    /// backticks in `a`b` and `c`d` DO pair and `[[X]]` is inside code. Old and
+    /// new agree here — measured, not assumed.
+    func test_backticksInSeparateWordsDoFormACodeSpan() {
+        XCTAssertEqual(targets("a`b [[X]] c`d"), [])
+    }
+
+    /// A run of one backtick cannot be closed by a run of two.
+    func test_unmatchedBacktickRunsAreNotACodeSpan() {
+        XCTAssertEqual(targets("`[[A]]``"), ["A"])
+    }
+
+    /// A double-backtick span IS code, and the old scanner also treated it so.
+    func test_doubleBacktickSpanSuppresses() {
+        XCTAssertEqual(targets("``[[NotALink]]`` and [[Real]]"), ["Real"])
+    }
+
+    /// An inline code span may wrap across a line break. The old scanner reset
+    /// its backtick state per line and extracted the link.
+    func test_multiLineInlineCodeSuppresses() {
+        XCTAssertEqual(targets("a `code\n[[NotALink]]` b\n\n[[Real]]\n"), ["Real"])
     }
 
     /// The Character↔UTF-16 boundary: a span must still cover its target

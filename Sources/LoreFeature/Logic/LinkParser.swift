@@ -101,11 +101,20 @@ public enum LinkParser {
         // place the two units meet.
         let model = MarkdownDocumentModel(fullText: text)
         let utf16OffsetForCharacterOffset = utf16Offsets(for: text)
+        //
+        // FENCED and INLINE code only. Indented code blocks, HTML blocks and
+        // HTML comments deliberately do NOT suppress: the old hand-written
+        // scanner recognised only ``` / ~~~ fences and inline spans, and
+        // widening the net deletes links from the graph. A CommonMark type-6
+        // HTML block runs to the next BLANK line, so `text\n<div>\n[[A]]\n
+        // </div>\ntext [[R]]` swallows `[[R]]` — a link in an ordinary prose
+        // line — which a rename would then silently stop rewriting.
         let isInsideCode: (Int) -> Bool = { characterOffset in
             guard characterOffset >= 0,
                   characterOffset < utf16OffsetForCharacterOffset.count else { return false }
             return model.isInsideCode(
-                utf16Offset: utf16OffsetForCharacterOffset[characterOffset])
+                utf16Offset: utf16OffsetForCharacterOffset[characterOffset],
+                kinds: MarkdownDocumentModel.linkSuppressingKinds)
         }
 
         var found: [LinkSpan] = []
@@ -135,7 +144,7 @@ public enum LinkParser {
         var running = 0
         for character in text {
             offsets.append(running)
-            running += String(character).utf16.count
+            running += character.utf16.count
         }
         offsets.append(running)
         return offsets

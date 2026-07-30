@@ -96,4 +96,45 @@ final class MarkdownDocumentModelTests: XCTestCase {
         let covered = (text as NSString).substring(with: model.codeRangesUTF16[0])
         XCTAssertEqual(covered, "`code`")
     }
+
+    // MARK: - Region kinds
+    //
+    // swift-markdown models fenced and indented code as the same `CodeBlock`
+    // node, and `fenceInfo` is nil for a bare ``` opener as well as for
+    // indented code, so the kind is derived from the source text at the
+    // region's start. The link graph depends on this discrimination.
+
+    func test_tagsFencedAndIndentedCodeBlocksDifferently() {
+        let model = MarkdownDocumentModel(
+            fullText: "```\nfenced\n```\n\npara\n\n    indented\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind),
+                       [.fencedCodeBlock, .indentedCodeBlock])
+    }
+
+    /// Up to three leading spaces still make a fence.
+    func test_tagsAnIndentedFenceAsFenced() {
+        let model = MarkdownDocumentModel(fullText: "para\n\n   ```\n   x\n   ```\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
+    }
+
+    func test_tagsTildeFencesAsFenced() {
+        let model = MarkdownDocumentModel(fullText: "~~~\nx\n~~~\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
+    }
+
+    func test_tagsInlineCodeAndHTMLBlocks() {
+        let model = MarkdownDocumentModel(fullText: "a `c` b\n\n<div>\nx\n</div>\n")
+        XCTAssertEqual(Set(model.codeRegions.map(\.kind)), [.inlineCode, .htmlBlock])
+    }
+
+    /// The kind-filtered query must ignore regions of other kinds, while the
+    /// unfiltered one keeps its original all-kinds meaning.
+    func test_kindFilteredQueryIgnoresOtherKinds() {
+        let text = "para\n\n    indented\n"
+        let model = MarkdownDocumentModel(fullText: text)
+        let offset = (text as NSString).range(of: "indented").location
+        XCTAssertTrue(model.isInsideCode(utf16Offset: offset))
+        XCTAssertFalse(model.isInsideCode(utf16Offset: offset,
+                                          kinds: MarkdownDocumentModel.linkSuppressingKinds))
+    }
 }
