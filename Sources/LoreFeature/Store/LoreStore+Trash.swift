@@ -43,7 +43,9 @@ extension LoreStore {
     /// is recoverable by doing nothing.
     ///
     /// Every check runs BEFORE any tab is closed and before the file is
-    /// touched, so a refusal leaves the store exactly as it found it.
+    /// touched, and the tabs close only AFTER `trashItem` actually succeeds —
+    /// so any refusal, at either stage, leaves the store exactly as it found
+    /// it: file present, tab open.
     @discardableResult
     public func trash(_ row: IndexRow) throws -> Int {
         guard coordinator.hasIndex else { throw LoreError.noVault }
@@ -69,13 +71,12 @@ extension LoreStore {
             }
         }
 
-        for session in sessions {
-            // Unconditional: a debounced autosave firing after the file is
-            // trashed would recreate the very file the user just deleted — the
-            // exact defect Task 7 found and fixed for rename.
-            session.cancelPendingSave()
-            _ = closeTab(session, force: true)
-        }
+        // Disarming pending saves happens BEFORE the trash: a debounced
+        // autosave firing after the file is trashed would recreate the very
+        // file the user just deleted — the exact defect Task 7 found and fixed
+        // for rename. It is also harmless if the trash then fails; the session
+        // is still open and still holds its (clean) text.
+        for session in sessions { session.cancelPendingSave() }
 
         // Our own mutation. Without this the watcher wakes and queues a
         // whole-vault rescan on top of the targeted `removeFromIndex` below.
@@ -85,6 +86,14 @@ extension LoreStore {
         } catch {
             throw LoreError.trashFailed(row.path, error.localizedDescription)
         }
+
+        // Tabs close only once the file is REALLY gone. Closing them first
+        // meant a `trashItem` failure — a network volume with no `.Trashes`, a
+        // permissions refusal — left the user reading "nothing was deleted"
+        // while the tab they had open had vanished. No text was lost (a dirty
+        // session is refused or flushed above), but a UI that lies about what
+        // happened is how a user stops trusting the ones that don't.
+        for session in sessions { _ = closeTab(session, force: true) }
         // One spelling is enough, and it must be THIS one — `path`, canonicalized
         // at the top of this function, BEFORE `trashItem` moved the file.
         //

@@ -145,4 +145,54 @@ final class LinkParserTests: XCTestCase {
     func test_linkFullyInsideInlineCodeIsStillIgnored() {
         XCTAssertEqual(targets("`[[NotALink]]`"), [])
     }
+
+    // MARK: - Spans
+
+    /// The ranges the rewriter replaces by. They must cover the TARGET only —
+    /// not the brackets, not the `|display` half — or a rewrite reflows text
+    /// nobody asked it to touch.
+    func test_spansCoverTheTargetTextExactly() {
+        let body = "x [[Design|why]] y"
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design")
+    }
+
+    /// Offsets are absolute in the scanned string, across lines — the rewriter
+    /// indexes the whole document with them.
+    func test_spanOffsetsAreAbsoluteAcrossLines() {
+        let body = "first line\nthen [[Design]] here"
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design")
+        XCTAssertEqual(span.targetRange.lowerBound, 18)
+    }
+
+    /// Whitespace inside the brackets is trimmed off the target, so the span
+    /// must not include it.
+    func test_spanExcludesPaddingInsideTheBrackets() {
+        let body = "[[  Design  ]]"
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design")
+    }
+
+    func test_spansAreNotProducedForCodeRegions() {
+        XCTAssertTrue(LinkParser.spans(in: "`[[NotALink]]`").isEmpty)
+        XCTAssertTrue(LinkParser.spans(in: "```\n[[NotALink]]\n```").isEmpty)
+    }
+
+    /// A CRLF document must scan as lines, not as one giant line — otherwise
+    /// no fence is ever detected in a Windows-authored vault, and the offsets
+    /// must still index the ORIGINAL string.
+    func test_crlfDocumentsAreScannedLineByLine() {
+        let body = "real [[Design]]\r\n\r\n```\r\n[[NotALink]]\r\n```\r\n"
+        XCTAssertEqual(LinkParser.links(in: body).map(\.rawTarget), ["Design"])
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design")
+    }
+
+    func test_markdownLinkSpanCoversTheTargetNotTheText() {
+        let body = "see [the doc](Design%20Doc.md)!"
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design%20Doc.md")
+        XCTAssertEqual(span.link.syntax, .markdown)
+    }
 }

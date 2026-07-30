@@ -3,11 +3,23 @@ import Foundation
 // Renaming and moving a document: the first operation in Lore that writes to
 // files the user never opened. Four properties are load-bearing, in order:
 //
-//  1. ORDERING. Inbound links are rewritten BEFORE the file moves. Reversed,
-//     a crash mid-operation leaves a renamed file with every inbound link
-//     dangling. In this order, a crash leaves links pointing at a
-//     not-yet-renamed file — still resolvable, and re-running the rename
-//     fixes it. This is not a preference.
+//  1. ORDERING. Inbound links are rewritten BEFORE the file moves.
+//
+//     Not because a crash in the middle leaves a better graph — it does not.
+//     Half-rewritten links point at a name that does not exist yet, and they
+//     are broken until the move happens. The real justification is RECOVERY:
+//     the file move is a single atomic `moveItem`, so putting it LAST means the
+//     only step that can leave the vault in a state no re-run can describe is
+//     also the last thing that can fail. Every earlier step is idempotent —
+//     re-running the same rename rewrites already-rewritten links to the same
+//     text (no edit is produced when the target is already correct) and then
+//     performs the move. So the recovery for a crash at any point is: run it
+//     again.
+//
+//     The realistic failures — the destination already exists, the name is
+//     invalid, the source is gone, the destination folder is missing or not
+//     writable — are caught by the pre-flight guards at the top of `apply`,
+//     before the first link is written at all.
 //  2. NEVER OVERWRITE AN EXTERNAL EDIT. Every file is checked against the
 //     mtime captured at PLAN time; one that moved is skipped and reported.
 //     With Obsidian open on the same vault this is not hypothetical.

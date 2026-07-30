@@ -7,7 +7,52 @@ import Foundation
 // Both are here rather than in the views because both need the resolver or the
 // vault root, and neither is a rendering concern. Extracted from `LoreStore.swift`
 // to keep that file under the project's 500-line ceiling.
+/// Why a link target could not name a note to create. Its own error type
+/// rather than a `LoreError` case because it never crosses the MCP boundary —
+/// it is reachable only from a "Create note" affordance in the UI.
+public struct UncreatableLinkTarget: LocalizedError, Equatable {
+    public let target: String
+    public var errorDescription: String? { "“\(target)” doesn’t name a note." }
+}
+
 extension LoreStore {
+    /// Creates the note a dead link names, and opens it.
+    ///
+    /// THE SINGLE create-from-a-link path. Both callers — the "Create" prompt
+    /// on a Cmd-clicked dead link (`DocumentPane`) and the "Create note" button
+    /// in the unresolved-links list (`BacklinksPanel`) — go through here.
+    ///
+    /// They used to have separate implementations, and the second one was still
+    /// carrying the bug the first one had already been fixed for: it passed
+    /// `LinkResolver.basename(of:)` straight to `create(title:)`, which keeps
+    /// both the `/` and the `|alias`. So `[[Projects/Design]]` asked for a note
+    /// titled `Projects/Design`, whose slug is a path into a folder that does
+    /// not exist — the write threw, the `try?` swallowed it, and the button did
+    /// nothing at all. `[[Design|why]]` produced a file called `design|why.md`,
+    /// which does not resolve the link it was created for. Two implementations
+    /// of one rule is how that survived, so there is now one.
+    ///
+    /// Two things it must do, in this order:
+    ///  - `documentName(of:)`, which strips the `|alias` AND the `#fragment`;
+    ///    `LinkResolver.basename` strips only the fragment.
+    ///  - split the remaining `/`, because a target with a folder is a PATH
+    ///    SUFFIX to `LinkResolver`: a note flattened into the default folder
+    ///    would leave the very link the user clicked still unresolved.
+    ///
+    /// Throws rather than returning an optional: a create that fails must reach
+    /// the user, and the caller's job is only to show it.
+    @discardableResult
+    public func createAndOpenNote(forLinkTarget target: String) throws -> Note {
+        var parts = LinkCompletionContext.documentName(of: target)
+            .split(separator: "/").map(String.init)
+        guard let title = parts.popLast(), !title.isEmpty else {
+            throw UncreatableLinkTarget(target: target)
+        }
+        let note = try create(title: title, in: parts.joined(separator: "/"))
+        open(url: note.path)
+        return note
+    }
+
     /// The wikilink target to write for `row`, guaranteed — where the vault
     /// makes it possible at all — to resolve back to `row` and not to some
     /// other document that happens to share its title.

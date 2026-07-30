@@ -340,7 +340,7 @@ struct LoreNoteOperations {
         case .unsavedEdits(let url, let reason):
             return "Lore declined to delete \(relative(url)): \(reason)"
         case .outsideVault(let url):
-            return "Lore declined to write \(url.path) because it is outside the vault."
+            return "Lore declined to write \(relative(url)) because it is outside the vault."
         }
     }
 

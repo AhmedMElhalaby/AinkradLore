@@ -117,12 +117,23 @@ public enum LinkRewriter {
                                                      rawTarget: link.rawTarget))
                 continue
             }
-            guard newTarget != link.rawTarget else { continue }
+            // Compared DECODED on both sides: `rewritten` returns a decoded
+            // target, so a percent-encoded link that needs no change
+            // (`Design%20Doc.md` → `Design Doc.md`) would otherwise look like
+            // an edit and be written back unencoded.
+            guard newTarget != decodedTarget(link.rawTarget) else { continue }
             edits.append(LinkEdit(file: link.sourceFile, oldTarget: link.rawTarget,
                                   newTarget: newTarget))
         }
         return RenamePlan(source: source, destination: destination,
                           edits: edits, unrewritable: unrewritable)
+    }
+
+    /// A raw target with its path part percent-decoded and its fragment left
+    /// alone — the form `rewritten` both analyses and returns.
+    static func decodedTarget(_ rawTarget: String) -> String {
+        let split = splitFragment(rawTarget)
+        return (split.body.removingPercentEncoding ?? split.body) + split.fragment
     }
 
     /// Rewrites a single raw link target to reflect `destination`, or returns
@@ -135,12 +146,16 @@ public enum LinkRewriter {
     static func rewritten(_ rawTarget: String, to destination: URL,
                           vaultRoot: URL) -> String? {
         // Split off the fragment; it is carried through untouched.
-        var body = rawTarget
-        var fragment = ""
-        if let hash = rawTarget.firstIndex(of: "#") {
-            body = String(rawTarget[..<hash])
-            fragment = String(rawTarget[hash...])
-        }
+        let split = splitFragment(rawTarget)
+        let fragment = split.fragment
+        // Percent-DECODED for analysis and for the value returned: a markdown
+        // link written `Design%20Doc.md` names a file called `Design Doc.md`,
+        // and the style questions below ("does it carry an extension?", "does
+        // it name a folder?") are about the real name, not the escaping. The
+        // result is handed back decoded; `written(_:like:)` re-encodes it at
+        // write time, where the link's SYNTAX is known and a wikilink can be
+        // excluded from encoding.
+        let body = split.body.removingPercentEncoding ?? split.body
         let hadExtension = body.lowercased().hasSuffix(".md")
         let withoutExtension = hadExtension ? String(body.dropLast(3)) : body
         let hadPath = withoutExtension.contains("/")
@@ -306,10 +321,7 @@ extension LinkRewriter {
         else { return .skipped(.unverifiable) }
         guard disk <= baseline else { return .skipped(.changedOnDisk) }
         let text = try String(contentsOf: file, encoding: .utf8)
-        var out = text
-        for edit in edits {
-            out = replacingLinkTargets(in: out, from: edit.oldTarget, to: edit.newTarget)
-        }
+        let out = replacingLinkTargets(in: text, edits: edits)
         // Rewriting identical bytes would only bump the mtime and make every
         // OTHER open editor think the file changed underneath it.
         guard out != text else { return .unchanged }
@@ -317,21 +329,74 @@ extension LinkRewriter {
         return .written
     }
 
-    /// Replaces `[[old]]`, `[[old|display]]`, `![[old]]` and `[t](old)` while
-    /// leaving the display text and the surrounding document untouched.
+    /// Rewrites the targets of REAL links only — `[[old]]`, `[[old|display]]`,
+    /// `![[old]]` and `[t](old)` — leaving display text, surrounding prose and
+    /// every non-link region of the document untouched.
     ///
-    /// Delimiter-anchored on BOTH sides on purpose: an unanchored replacement
-    /// of `Design` would also hit `[[Design Notes]]`, the word "design" in a
-    /// sentence, and the frontmatter. `![[x]]` needs no separate case — its
-    /// `[[x]]` suffix is matched by the wikilink case.
-    static func replacingLinkTargets(in text: String, from old: String,
-                                     to new: String) -> String {
-        var out = text
-        for close in ["]]", "|", "#"] {
-            out = out.replacingOccurrences(of: "[[\(old)\(close)",
-                                           with: "[[\(new)\(close)")
+    /// ## Why by range, and not by string
+    ///
+    /// This used to be a whole-document `replacingOccurrences` anchored on the
+    /// link delimiters. Anchoring stopped it hitting the word "design" in a
+    /// sentence, but it could not stop it hitting a `[[Design]]` written INSIDE
+    /// a fenced code block, inside inline code, or in the frontmatter — all
+    /// three of which `LinkParser` deliberately excludes from the link graph.
+    /// So one real link anywhere in a file caused documentation ABOUT a link,
+    /// in a file the user never opened, to be silently edited. There is no undo.
+    ///
+    /// The fix asks `LinkParser` — the ONE scanner that already knows where
+    /// code regions are — for the spans it found, and replaces those spans by
+    /// range. A second scanner living here would only have to agree with the
+    /// first one forever, and the whole class of bug is two scanners drifting.
+    /// Spans are applied BACK TO FRONT so that an earlier replacement of a
+    /// different length cannot invalidate a later span's offsets.
+    ///
+    /// Frontmatter is excluded by starting the scan at `Frontmatter.bodyOffset`
+    /// — the parser never sees frontmatter either, because it is fed
+    /// `Note.body`.
+    static func replacingLinkTargets(in text: String, edits: [LinkEdit]) -> String {
+        guard !edits.isEmpty else { return text }
+        let offset = Frontmatter.bodyOffset(in: text)
+        let body = String(text.dropFirst(offset))
+        var chars = Array(text)
+        for span in LinkParser.spans(in: body).reversed() {
+            // Matched on the RAW target: that is the spelling the index stored
+            // and therefore the spelling `LinkEdit.oldTarget` carries.
+            guard let edit = edits.first(where: { $0.oldTarget == span.link.rawTarget })
+            else { continue }
+            let start = offset + span.targetRange.lowerBound
+            let end = offset + span.targetRange.upperBound
+            guard start <= end, end <= chars.count else { continue }
+            chars.replaceSubrange(start..<end,
+                                  with: written(edit.newTarget, like: span.link))
         }
-        out = out.replacingOccurrences(of: "](\(old))", with: "](\(new))")
-        return out
+        return String(chars)
+    }
+
+    /// The new target spelled in the AUTHOR'S encoding style.
+    ///
+    /// `newTarget` arrives percent-DECODED (see `rewritten`). A markdown link
+    /// whose original target was percent-encoded gets the new one encoded to
+    /// match — `[text](Design%20Doc.md)` renamed becomes
+    /// `[text](New%20Doc.md)`, not `[text](New Doc.md)`. One the author wrote
+    /// unencoded stays unencoded, and a wikilink is NEVER encoded, because
+    /// Obsidian does not encode those and an encoded one would stop resolving.
+    private static func written(_ newTarget: String, like link: DocumentLink) -> String {
+        guard link.syntax == .markdown, link.rawTarget != link.resolutionTarget
+        else { return newTarget }
+        // The `#` fragment is a DELIMITER, not part of the path: encoding it to
+        // `%23` would fold the heading into the filename. Split first, encode
+        // only the path, put the fragment back as it came.
+        let (body, fragment) = splitFragment(newTarget)
+        guard let encoded = body
+                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        else { return newTarget }
+        return encoded + fragment
+    }
+
+    /// Splits a raw target into its path part and its `#…` fragment (empty
+    /// when there is none). Both halves are returned verbatim.
+    private static func splitFragment(_ rawTarget: String) -> (body: String, fragment: String) {
+        guard let hash = rawTarget.firstIndex(of: "#") else { return (rawTarget, "") }
+        return (String(rawTarget[..<hash]), String(rawTarget[hash...]))
     }
 }

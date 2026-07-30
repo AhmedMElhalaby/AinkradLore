@@ -222,8 +222,13 @@ public final class VaultIndexCoordinator {
             IndexEntry(url: entry.url, type: entry.type, payload: entry.payload,
                        updated: entry.updated,
                        resolvedLinks: entry.payload.links.map {
+                           // RAW for rewriting, DECODED for resolution: a
+                           // markdown link written `[t](Design%20Doc.md)` must
+                           // be stored exactly as authored (the rewriter has to
+                           // find that text in the file) while resolving as
+                           // `Design Doc.md`. See `DocumentLink.resolutionTarget`.
                            ResolvedLink(rawTarget: $0.rawTarget,
-                                        targetPath: resolver.resolve($0.rawTarget),
+                                        targetPath: resolver.resolve($0.resolutionTarget),
                                         isEmbed: $0.isEmbed)
                        })
         }
@@ -363,8 +368,9 @@ public final class VaultIndexCoordinator {
         documents.append((url: url, title: payload.title, aliases: payload.aliases))
         let resolver = LinkResolver(documents: documents)
         let resolvedLinks = payload.links.map {
+            // Raw for rewriting, decoded for resolution — as in `resolve(_:)`.
             ResolvedLink(rawTarget: $0.rawTarget,
-                         targetPath: resolver.resolve($0.rawTarget),
+                         targetPath: resolver.resolve($0.resolutionTarget),
                          isEmbed: $0.isEmbed)
         }
         try index.upsert(IndexEntry(url: url, type: type, payload: payload,

@@ -21,6 +21,8 @@ struct BacklinksPanel: View {
 
     @State private var backlinks: [LoreStore.Backlink] = []
     @State private var unresolved: [String] = []
+    /// Why creating a note for an unresolved link failed, when it did.
+    @State private var createFailure: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.xs) {
@@ -63,14 +65,7 @@ struct BacklinksPanel: View {
                                     Text(target).lineLimit(1)
                                     Spacer()
                                     AinkradButton(title: "Create note", style: .ghost) {
-                                        if let note = try? store.create(
-                                            title: LinkResolver.basename(of: target)) {
-                                            store.open(url: note.path)
-                                            // The target that was just created is no
-                                            // longer unresolved: re-querying is what
-                                            // keeps this list honest.
-                                            refresh()
-                                        }
+                                        create(target)
                                     }
                                 }
                             }
@@ -82,8 +77,29 @@ struct BacklinksPanel: View {
         }
         .padding(AinkradSpacing.sm)
         .background(theme.tokens.background)
+        // The same "Not done" sheet `DocumentPane` shows for a refused create.
+        // This button used to swallow every failure in a `try?` and do nothing
+        // visible at all.
+        .sheet(isPresented: Binding(get: { createFailure != nil },
+                                    set: { if !$0 { createFailure = nil } })) {
+            MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
+        }
         .onAppear { refresh() }
         .onChange(of: url) { refresh() }
+    }
+
+    /// Creates the note an unresolved link names, through the store's single
+    /// create-from-a-link path — the same one `DocumentPane` uses, so the two
+    /// buttons cannot drift into behaving differently again.
+    private func create(_ target: String) {
+        do {
+            try store.createAndOpenNote(forLinkTarget: target)
+            // The target that was just created is no longer unresolved:
+            // re-querying is what keeps this list honest.
+            refresh()
+        } catch {
+            createFailure = "Couldn't create \"\(target)\": \(error.localizedDescription)"
+        }
     }
 
     private func refresh() {

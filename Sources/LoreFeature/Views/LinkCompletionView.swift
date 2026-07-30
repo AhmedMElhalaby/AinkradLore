@@ -154,9 +154,30 @@ public enum LinkCompletionContext {
         where resolves(candidate)?.standardizedFileURL.path == wanted {
             return candidate
         }
-        // Nothing verified: the document is unreachable by any spelling we can
-        // write (an unindexed row, or a filename containing link punctuation).
-        // Prefer the most specific candidate over the prettiest one.
+
+        // Nothing round-trips: the document is unreachable by any spelling we
+        // can write (an unindexed row, or a filename carrying link
+        // punctuation). The fallback used to be `candidates.last` returned
+        // UNVERIFIED — the most specific candidate, but with no check that it
+        // does not resolve to some OTHER document. That is the precise failure
+        // the verification above exists to prevent, reintroduced one line below
+        // it.
+        //
+        // So the fallback is verified too, against a weaker bar: a candidate
+        // that resolves to NOTHING. A dead link is visibly dead — it shows as
+        // unresolved, the backlinks panel lists it, and "Create note" fixes it.
+        // A link that silently opens a different note is a wrong answer wearing
+        // a right answer's clothes, and nothing in the UI ever flags it. Most
+        // specific first, because a path target is the one the resolver
+        // disambiguates by suffix and so the one most likely to be dead for the
+        // right reason.
+        for candidate in candidates.reversed() where resolves(candidate) == nil {
+            return candidate
+        }
+        // Every spelling resolves, and every one resolves elsewhere. There is
+        // no honest answer left to write, so this returns the most specific
+        // candidate: a path target survives ambiguity by construction and is
+        // the likeliest to become correct once the vault changes.
         return candidates.last ?? filename
     }
 

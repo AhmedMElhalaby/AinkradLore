@@ -135,4 +135,38 @@ final class TrashTests: XCTestCase {
             XCTAssertEqual(failedURL.lastPathComponent, "gone.md")
         }
     }
+
+    /// A failed trash must leave the TAB open too. Tabs used to be force-closed
+    /// before `trashItem` ran, so a failure told the user "nothing was deleted"
+    /// while the document they had open had vanished from the tab bar. No text
+    /// was lost — a dirty session is refused or flushed first — but the UI lied
+    /// about what had happened.
+    func test_aFailedTrashLeavesTheOpenTabAlone() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("gone.md")
+        try "---\nid: g\ntitle: Gone\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "gone.md" })
+        s.open(url: url)
+        XCTAssertEqual(s.tabs.count, 1, "premise: the document is open")
+        try FileManager.default.removeItem(at: url)
+
+        XCTAssertThrowsError(try s.trash(row))
+        XCTAssertEqual(s.tabs.count, 1, "the tab was closed for a delete that never happened")
+        XCTAssertEqual(s.tabs.first?.url.lastPathComponent, "gone.md")
+    }
+
+    /// The other side of the same ordering: on SUCCESS the tab still closes.
+    func test_aSuccessfulTrashStillClosesTheTab() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("bye.md")
+        try "---\nid: b\ntitle: Bye\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        s.open(url: url)
+        XCTAssertEqual(s.tabs.count, 1)
+
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "bye.md" }))
+        XCTAssertTrue(s.tabs.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
 }

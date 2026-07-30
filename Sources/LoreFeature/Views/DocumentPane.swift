@@ -74,28 +74,15 @@ struct DocumentPane: View {
         }
     }
 
-    /// Splits the link into the folder it names and the note it names.
-    ///
-    /// A target with a `/` means a SUBFOLDER, and it is created: `[[Projects/
-    /// Design]]` is a path suffix to `LinkResolver`, so a note flattened into
-    /// the default folder would leave the very link the user just clicked
-    /// still unresolved — the one outcome "Create" must not produce.
-    ///
-    /// The alias and fragment are already gone by here (`documentName` runs at
-    /// the click site), but stripping again is free and keeps this correct if
-    /// it is ever called with a raw target.
+    /// Creates the note this dead link names, via the store's single
+    /// create-from-a-link path — see `LoreStore.createAndOpenNote(forLinkTarget:)`,
+    /// which owns the alias/fragment stripping and the folder split. The view's
+    /// only job is to show a failure instead of swallowing it.
     private func createUnresolved(_ target: String) {
-        var parts = LinkCompletionContext.documentName(of: target)
-            .split(separator: "/").map(String.init)
-        guard let title = parts.popLast(), !title.isEmpty else {
-            createFailure = "\"\(target)\" doesn't name a note."
-            return
-        }
         do {
-            let note = try store.create(title: title, in: parts.joined(separator: "/"))
-            store.open(url: note.path)
+            try store.createAndOpenNote(forLinkTarget: target)
         } catch {
-            createFailure = "Couldn't create \"\(title)\": \(error.localizedDescription)"
+            createFailure = "Couldn't create \"\(target)\": \(error.localizedDescription)"
         }
     }
 
