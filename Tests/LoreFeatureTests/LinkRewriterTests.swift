@@ -456,6 +456,61 @@ final class RenameApplicationHardeningTests: XCTestCase {
         }
     }
 
+    /// The other half of the same root cause: an edit's file comes from the
+    /// index, whose spelling need not match the canonical session URL the
+    /// exclude-dirty-tabs check compares against. Keyed raw, the check never
+    /// fires and the file is rewritten out from under a tab holding unsaved
+    /// edits — defeating the protection entirely.
+    func test_dirtyTabBlocksTheRewriteEvenWhenTheIndexSpellsTheFileDifferently() async throws {
+        let (root, s) = try vault()
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Design]]")
+        let design = try write(root, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+
+        let canonicalA = VaultIndexCoordinator.canonical(a)
+        try XCTSkipIf(canonicalA.path == a.path,
+                      "this machine's temp root is already canonical; nothing to mix")
+
+        // Re-index a.md under the RAW spelling, so the outbound link row the
+        // rename turns into an edit carries a non-canonical source_path.
+        try s.coordinator.removeFromIndex(canonicalA)
+        try s.coordinator.indexDocument(MarkdownEngine.load(a), at: a)
+
+        // The tab is opened under the CANONICAL spelling, so its session path and
+        // the indexed edit-file path disagree. It is left DIRTY but not
+        // conflicted, so the flush inside `apply` succeeds — which is what makes
+        // this test discriminating. A conflicted session would land in `skipped`
+        // either way (a mismatched key also means a missing baseline, and
+        // `applyEdits` fails closed on that), so the outcome would look correct
+        // while the exclude-dirty-tabs machinery never ran at all.
+        //
+        // With the session correctly matched, `apply` flushes it first, so the
+        // unsaved text reaches disk and the rewrite is applied ON TOP of it.
+        // With the paths compared raw, the session is never seen: not flushed,
+        // not disarmed, and its unsaved text is absent from the rewritten file
+        // while an armed autosave still holds pre-rewrite content.
+        s.open(url: canonicalA)
+        let session = try XCTUnwrap(s.selectedTab)
+        let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
+        engine.note.body = "unsaved edit, see [[Design]]"
+        session.markChanged()
+        session.cancelPendingSave()
+        XCTAssertTrue(session.isDirty)
+
+        let report = s.apply(s.plan(rename: design, to: "Architecture"))
+
+        XCTAssertFalse(session.isDirty,
+                       "the session was never seen by apply, so it was never flushed")
+        XCTAssertEqual(report.rewritten.map(\.lastPathComponent), ["a.md"])
+        let onDisk = try String(contentsOf: a, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("unsaved edit"),
+                      "the tab's unsaved text was not flushed before the rewrite")
+        XCTAssertTrue(onDisk.contains("[[Architecture]]"), onDisk)
+        XCTAssertFalse(onDisk.contains("[[Design]]"), onDisk)
+        // The session was reloaded, so its next save cannot revert the rewrite.
+        XCTAssertTrue(engine.note.body.contains("[[Architecture]]"), engine.note.body)
+    }
+
     // MARK: - name validation
     //
     // `newName` is a basename, never a path. Unvalidated it builds a
@@ -645,6 +700,80 @@ final class FolderRenameTests: XCTestCase {
         XCTAssertEqual(report.movedTo?.lastPathComponent, "projects")
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: root.appendingPathComponent("projects/Design.md").path))
+    }
+
+    /// The third appearance of M1's recurring failure mode: index rows are NOT
+    /// guaranteed canonical (`indexDocument` upserts the caller's URL), and a
+    /// raw-versus-canonical prefix comparison drops such a row from
+    /// `documentMoves` — no rewrite plan, the file still travels with the
+    /// directory, its inbound links break, and nothing is reported.
+    func test_documentIndexedUnderANonCanonicalSpellingIsStillPlannedAndRewritten() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let design = try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\n[[Projects/Design]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        let canonicalDesign = VaultIndexCoordinator.canonical(design)
+        try XCTSkipIf(canonicalDesign.path == design.path,
+                      "this machine's temp root is already canonical; nothing to mix")
+
+        // Re-index `Design.md` under the RAW spelling, exactly as
+        // `indexDocument` does for any document written outside a full rescan.
+        // `removeFromIndex` drops the canonical row and the links it is the
+        // SOURCE of, so a.md's inbound link (whose target_path is canonical)
+        // survives untouched — this mixes ONLY the row spelling.
+        try s.coordinator.removeFromIndex(canonicalDesign)
+        try s.coordinator.indexDocument(MarkdownEngine.load(design), at: design)
+        XCTAssertTrue(s.rows.contains { $0.path.path == design.path },
+                      "setup failed: no non-canonically-spelled row exists")
+        XCTAssertFalse(s.rows.contains { $0.path.path == canonicalDesign.path })
+
+        let plan = s.plan(renameFolder: folder, to: "Work")
+        XCTAssertEqual(plan.documentMoves.count, 1,
+                       "a non-canonically indexed row fell silently out of the plan")
+        let report = s.apply(plan)
+
+        XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+        XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("[[Work/Design]]"),
+                      "the inbound link broke silently")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Work/Design.md").path))
+    }
+
+    /// The case-only skip must be conditioned on the volume ACTUALLY being
+    /// case-insensitive. Whichever kind of volume the tests run on, one of these
+    /// two branches is the real one; both are asserted rather than assumed.
+    func test_caseOnlySkipIsConditionedOnTheVolumeNotAssumed() async throws {
+        let (root, s) = try vault()
+        let upper = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: upper, withIntermediateDirectories: true)
+        try write(upper, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+
+        // Empirical probe: on a case-insensitive volume the lowercase spelling
+        // already "exists", because it is the same directory.
+        let caseInsensitive = FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("projects").path)
+
+        if caseInsensitive {
+            // The skip must apply: this is one directory, not a collision.
+            let report = s.apply(s.plan(renameFolder: upper, to: "projects"))
+            XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+            XCTAssertEqual(report.movedTo?.lastPathComponent, "projects")
+        } else {
+            // Case-sensitive volume: `projects` is a genuinely different
+            // directory, so an existing one IS a collision and must be refused
+            // before any link is rewritten.
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent("projects"),
+                withIntermediateDirectories: true)
+            let report = s.apply(s.plan(renameFolder: upper, to: "projects"))
+            XCTAssertNil(report.movedTo, "a real collision was waved through")
+            XCTAssertEqual(report.failed.count, 1)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: upper.path))
+        }
     }
 
     /// Task 7's protection, inherited: a tab holding unsaved edits to a file the

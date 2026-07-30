@@ -281,8 +281,20 @@ public final class VaultIndexCoordinator {
 
     /// Every (file, rawTarget) pair pointing at `url` — the raw material for a
     /// rename's change set. Canonicalized like every other index lookup.
+    ///
+    /// The RESULT is canonicalized too, not just the lookup argument.
+    /// `links.source_path` is stored with whatever spelling the row carried when
+    /// it was written, and `indexDocument` writes the caller's URL verbatim — so
+    /// a document indexed outside a full rescan can be stored `/var/...` while
+    /// everything downstream of a rename compares against `/private/var/...`.
+    /// Every consumer of this function keys dictionaries and sets by these
+    /// paths and matches them against canonical session URLs; handing back two
+    /// spellings makes those lookups miss, which in this codebase has meant an
+    /// edit silently dropped or a dirty tab's file written anyway. One spelling
+    /// out of here is what stops that at the source.
     func inboundLinks(to url: URL) -> [(sourceFile: URL, rawTarget: String)] {
-        (try? index?.inboundLinks(to: Self.canonical(url))) ?? []
+        let links = (try? index?.inboundLinks(to: Self.canonical(url))) ?? []
+        return links.map { (sourceFile: Self.canonical($0.sourceFile), rawTarget: $0.rawTarget) }
     }
     func unresolvedLinks(from url: URL) -> [String] {
         (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []

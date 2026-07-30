@@ -129,11 +129,27 @@ extension LoreStore {
         VaultIndexCoordinator.canonical(vaultRoot ?? fallback)
     }
 
+    /// THE key for every path-keyed dictionary and set in the rename paths.
+    ///
+    /// Nothing may key off a raw `url.path`. Index rows are not guaranteed
+    /// canonical — `VaultIndexCoordinator.indexDocument` upserts the URL its
+    /// caller supplied, and `activate` stores `vaultRoot` as given — while
+    /// session URLs, plan sources and destinations all arrive canonicalized.
+    /// Mixing the two spellings has produced the same failure three times in
+    /// this milestone: a set membership test misses, and the consequence is
+    /// silent (an edit dropped from the plan, a dirty tab's file written
+    /// anyway) because a missing key looks exactly like "nothing to do".
+    /// Routing both sides of every comparison through this function is what
+    /// makes that unrepresentable rather than merely fixed.
+    static func pathKey(_ url: URL) -> String {
+        VaultIndexCoordinator.canonical(url).path
+    }
+
     /// Plan-time mtimes for every file an operation will write. Shared by
     /// single-document and folder planning so both get requirement 2.
     static func baselines(for files: [URL]) -> [String: Date] {
         var baselines: [String: Date] = [:]
-        for file in files { baselines[file.path] = mtimeOnDisk(file) }
+        for file in files { baselines[pathKey(file)] = mtimeOnDisk(file) }
         return baselines
     }
 
@@ -203,7 +219,13 @@ extension LoreStore {
                              movingPaths: Set<String>) -> LinkRewritePass {
         var pass = LinkRewritePass()
         var baselines = baselines
-        let editedByFile = Dictionary(grouping: edits, by: { $0.file.path })
+        // Keyed by `pathKey`, NOT by `edit.file.path`: an edit's file comes from
+        // the index, whose spelling is not guaranteed to match the canonical
+        // session URLs this loop compares against. Keyed raw, a
+        // non-canonically-spelled edit file never matches its own open tab, so
+        // `blockedByUnsavedEdits` below never fires and the exclude-dirty-tabs
+        // protection quietly does nothing.
+        let editedByFile = Dictionary(grouping: edits, by: { Self.pathKey($0.file) })
 
         // Disarm every debounced autosave that could land on top of a rewrite,
         // INCLUDING a moving document's own. A session holding unsaved text is
@@ -222,7 +244,7 @@ extension LoreStore {
         // Files a tab still holds unsaved edits to are NOT written at all.
         var blockedByUnsavedEdits: Set<String> = []
         for session in tabs {
-            let path = VaultIndexCoordinator.canonical(session.url).path
+            let path = Self.pathKey(session.url)
             let isMoving = movingPaths.contains(path)
             let isEdited = editedByFile[path] != nil
             if isMoving { pass.movingSessions.append((session, path)) }
@@ -348,7 +370,7 @@ extension LoreStore {
 
         // Links FIRST, then the move.
         let pass = rewriteInboundLinks(edits: plan.edits, baselines: plan.baselines,
-                                       movingPaths: isMove ? [plan.source.path] : [])
+                                       movingPaths: isMove ? [Self.pathKey(plan.source)] : [])
         failed += pass.failed
 
         var moved: URL?

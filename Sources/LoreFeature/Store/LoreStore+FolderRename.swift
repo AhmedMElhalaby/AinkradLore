@@ -75,13 +75,24 @@ extension LoreStore {
         let destination = Self.canonicalizingDestination(
             parent.appendingPathComponent(newName))
 
+        // Row paths are canonicalized BEFORE the prefix comparison. They are not
+        // canonical by construction: `VaultIndexCoordinator.indexDocument`
+        // upserts the URL its caller supplied, so any document indexed outside a
+        // full rescan can be stored `/var/...` while `source` here is
+        // `/private/var/...`. Compared raw, such a row silently falls out of
+        // `moves` — no rewrite plan is produced for it, its file still travels
+        // with the directory, its inbound links break, and NOTHING lands in
+        // `failed`, `skipped` or `unchanged`, because an empty edit list is
+        // indistinguishable from having no work to do. That is the third
+        // appearance of this exact failure mode in M1.
         let prefix = source.path + "/"
         let moves: [(from: URL, to: URL)] = rows
-            .filter { $0.path.path.hasPrefix(prefix) }
-            .map { row in
-                (from: row.path,
+            .map { VaultIndexCoordinator.canonical($0.path) }
+            .filter { $0.path.hasPrefix(prefix) }
+            .map { path in
+                (from: path,
                  to: destination.appendingPathComponent(
-                        String(row.path.path.dropFirst(prefix.count))))
+                        String(path.path.dropFirst(prefix.count))))
             }
 
         // One rewrite plan per moving document, merged into one edit list. A
@@ -140,8 +151,17 @@ extension LoreStore {
         // rename in place, so this is safe to let through. Compared on the
         // canonical paths so it cannot be spoofed by a differently-spelled
         // ancestor.
+        //
+        // The volume's case-sensitivity is CHECKED, not assumed. On a
+        // case-SENSITIVE volume `Projects` and `projects` are two distinct
+        // directories, so an existing `projects` is a genuine collision; waving
+        // it through would rewrite every inbound link, then fail the `moveItem`,
+        // leaving the vault with every link repointed at a folder nothing ever
+        // arrives in. `volumeIsCaseInsensitive` fails CLOSED — an unavailable or
+        // ambiguous resource value keeps the guard.
         let isCaseOnlyRename =
             plan.destination.path.caseInsensitiveCompare(plan.source.path) == .orderedSame
+            && Self.volumeIsCaseInsensitive(plan.source)
         if !isCaseOnlyRename,
            FileManager.default.fileExists(atPath: plan.destination.path) {
             failed.append((plan.destination, "A folder with that name already exists."))
@@ -171,7 +191,7 @@ extension LoreStore {
         let prefix = plan.source.path + "/"
         var following: [(session: DocumentSession, from: URL, to: URL)] = []
         for session in tabs {
-            let path = VaultIndexCoordinator.canonical(session.url).path
+            let path = Self.pathKey(session.url)
             guard path.hasPrefix(prefix) else { continue }
             let relative = String(path.dropFirst(prefix.count))
             following.append((session, URL(fileURLWithPath: path),
@@ -182,10 +202,8 @@ extension LoreStore {
         // that is about to relocate — indexed documents AND any open tab under
         // the folder — so each such session is flushed and its debounced
         // autosave disarmed before the ground moves under it.
-        var movingPaths = Set(plan.documentMoves.map {
-            VaultIndexCoordinator.canonical($0.from).path
-        })
-        movingPaths.formUnion(following.map { $0.from.path })
+        var movingPaths = Set(plan.documentMoves.map { Self.pathKey($0.from) })
+        movingPaths.formUnion(following.map { Self.pathKey($0.from) })
         let pass = rewriteInboundLinks(edits: plan.edits, baselines: plan.baselines,
                                        movingPaths: movingPaths)
         failed += pass.failed
@@ -222,7 +240,34 @@ extension LoreStore {
     }
 
     private static func relocating(_ url: URL, from prefix: String, to destination: URL?) -> URL {
-        guard let destination, url.path.hasPrefix(prefix) else { return url }
-        return destination.appendingPathComponent(String(url.path.dropFirst(prefix.count)))
+        // Canonicalized before the prefix test for the same reason
+        // `documentMoves` is: a report entry sourced from a non-canonically
+        // spelled index row would otherwise fail to match and be reported at a
+        // path that no longer exists.
+        let canonical = VaultIndexCoordinator.canonical(url)
+        guard let destination, canonical.path.hasPrefix(prefix) else { return url }
+        return destination.appendingPathComponent(String(canonical.path.dropFirst(prefix.count)))
+    }
+
+    /// True only when the volume holding `url` is demonstrably case-INSENSITIVE.
+    ///
+    /// Returns false — the safe answer, which KEEPS the destination-exists guard
+    /// — whenever the volume genuinely is case-sensitive, and equally whenever
+    /// the resource value is unavailable, unreadable, or nil. A wrong "true"
+    /// waves a real collision through; a wrong "false" only refuses a case-only
+    /// rename with an accurate message the user can act on.
+    ///
+    /// Probed on the nearest existing path: the resource value is a property of
+    /// the VOLUME, and a URL that does not exist has no volume to ask.
+    private static func volumeIsCaseInsensitive(_ url: URL) -> Bool {
+        var probe = url
+        while !FileManager.default.fileExists(atPath: probe.path),
+              probe.pathComponents.count > 1 {
+            probe.deleteLastPathComponent()
+        }
+        guard let values = try? probe.resourceValues(
+                forKeys: [.volumeSupportsCaseSensitiveNamesKey]),
+              let sensitive = values.volumeSupportsCaseSensitiveNames else { return false }
+        return !sensitive
     }
 }
