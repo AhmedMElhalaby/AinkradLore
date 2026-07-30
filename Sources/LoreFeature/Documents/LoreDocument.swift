@@ -46,8 +46,18 @@ public struct EditorContext {
     /// Called by the editor after every user mutation. The session debounces
     /// and saves; the editor never writes files itself.
     public let onChange: @MainActor () -> Void
+    /// Candidate documents for a `[[` prefix. Defaulted to "no candidates" so
+    /// widening this struct cannot break an engine or a call site that has no
+    /// link layer to offer — an engine that ignores it behaves exactly as
+    /// before.
+    public let completions: @MainActor (String) -> [IndexRow]
+    /// Open a wikilink target the user activated in the editor.
+    public let openLink: @MainActor (String) -> Void
 
-    public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void) {
+    public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
+                completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
+                openLink: @escaping @MainActor (String) -> Void = { _ in }) {
         self.theme = theme; self.onChange = onChange
+        self.completions = completions; self.openLink = openLink
     }
 }

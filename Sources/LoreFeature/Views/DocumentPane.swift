@@ -7,6 +7,10 @@ struct DocumentPane: View {
     @Bindable var store: LoreStore
     let session: DocumentSession
     let theme: HostTheme
+    /// The raw target of a Cmd-clicked link that resolved to nothing. Non-nil
+    /// only while the "create it?" prompt is up — clicking a dead link must
+    /// never create a file silently.
+    @State private var unresolved: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +22,12 @@ struct DocumentPane: View {
             if let error = session.lastSaveError, !session.conflict { saveErrorBanner(error) }
 
             session.engine.makeEditor(
-                EditorContext(theme: theme, onChange: { session.markChanged() }))
+                EditorContext(theme: theme,
+                              onChange: { session.markChanged() },
+                              completions: { store.linkCompletions(matching: $0) },
+                              openLink: { target in
+                                  if !store.openLink(target) { unresolved = target }
+                              }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
                 // without the generation in the identity the user clicks
@@ -36,6 +45,27 @@ struct DocumentPane: View {
             }
         }
         .background(theme.tokens.background)
+        .alert("Create this note?",
+               isPresented: Binding(get: { unresolved != nil },
+                                    set: { if !$0 { unresolved = nil } })) {
+            Button("Cancel", role: .cancel) { unresolved = nil }
+            Button("Create") {
+                if let target = unresolved { createUnresolved(target) }
+                unresolved = nil
+            }
+        } message: {
+            Text("\"\(LinkResolver.basename(of: unresolved ?? ""))\" doesn't exist in this "
+                 + "vault yet.")
+        }
+    }
+
+    /// The link's basename becomes the new note's title — the alias/heading
+    /// syntax in the raw target names a place INSIDE a document, not the
+    /// document, so it must not end up in the filename.
+    private func createUnresolved(_ target: String) {
+        let title = LinkResolver.basename(of: target)
+        guard !title.isEmpty, let note = try? store.create(title: title) else { return }
+        store.open(url: note.path)
     }
 
     /// Persistent and non-alarming: this file is open, readable and searchable,

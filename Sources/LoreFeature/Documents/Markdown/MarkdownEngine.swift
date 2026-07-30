@@ -71,7 +71,11 @@ private struct MarkdownDocumentEditor: View {
                 .padding(AinkradSpacing.md)
                 .onChange(of: title) { engine.note.title = title; ctx.onChange() }
 
-            MarkdownEditor(text: $body_, tokens: ctx.theme.tokens)
+            // Only markdown gets the link affordances: wikilinks are markdown
+            // syntax, and offering completion inside a plain-text file would
+            // insert brackets that mean nothing there.
+            MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
+                           completions: ctx.completions, onOpenLink: ctx.openLink)
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
         }
         .background(ctx.theme.tokens.background)
