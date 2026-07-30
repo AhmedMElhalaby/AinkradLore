@@ -110,13 +110,27 @@ final class MarkdownMarkerTests: XCTestCase {
                        ["[[", "]]"])
     }
 
-    /// A marker must never overlap another marker.
-    func test_noMarkerOverlapsAContentSpanOfADifferentKind() {
+    /// Markers of UNNESTED constructs do not overlap each other.
+    ///
+    /// Renamed from `test_noMarkerOverlapsAContentSpanOfADifferentKind`, whose
+    /// name promised an invariant it never checked (it compared markers only
+    /// against other markers) and which is FALSE in general: a nested
+    /// blockquote `>> a` emits an outer `">> "` marker and an inner `"> "`
+    /// marker that overlap — see
+    /// `test_nestedBlockQuoteMarkersOverlap`. Consumers must
+    /// coalesce; `MarkdownStyleRenderer.collapse` does.
+    ///
+    /// The `where other != m` skip is kept deliberately: two markers of the
+    /// same construct legitimately share a range (e.g. a construct emitting
+    /// one marker span consumed twice), and identical ranges are not the
+    /// overlap this test is about.
+    func test_markersOfUnnestedConstructsDoNotOverlapEachOther() {
         let model = MarkdownDocumentModel(body: "# H\n\n**b** `c` [[W]]\n\n> q\n\n- i")
         let markerRanges = model.styleSpans.compactMap { span -> Range<Int>? in
             if case .marker = span.kind { return span.range }
             return nil
         }
+        XCTAssertFalse(markerRanges.isEmpty)
         for m in markerRanges {
             for other in markerRanges where other != m {
                 XCTAssertTrue(m.upperBound <= other.lowerBound || other.upperBound <= m.lowerBound,
@@ -129,6 +143,24 @@ final class MarkdownMarkerTests: XCTestCase {
     /// and must not sprout bracket markers either.
     func test_wikilinkInsideAFenceHasNoMarkers() {
         XCTAssertEqual(markers("```\n[[Target]]\n```").filter { $0.1 == .wikilink }.count, 0)
+    }
+
+    /// A nested blockquote DOES emit overlapping markers — the outer `">> "`
+    /// and the inner `"> "` both start at the same offset. This is documented,
+    /// not deplored: every consumer of marker ranges must coalesce.
+    func test_nestedBlockQuoteMarkersOverlap() {
+        let model = MarkdownDocumentModel(body: ">> quoted")
+        let markerRanges = model.styleSpans.compactMap { span -> Range<Int>? in
+            if case .marker = span.kind { return span.range }
+            return nil
+        }
+        let overlapping = markerRanges.contains { a in
+            markerRanges.contains { b in
+                a != b && a.lowerBound < b.upperBound && b.lowerBound < a.upperBound
+            }
+        }
+        XCTAssertTrue(overlapping,
+                      "nested blockquote markers overlap: \(markerRanges)")
     }
 
     /// Marker spans are ADDITIVE: every content span keeps the range it had.

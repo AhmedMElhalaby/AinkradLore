@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import LoreFeature
 
@@ -86,5 +87,92 @@ final class MarkdownRevealTests: XCTestCase {
         // Caret on the FIRST line of the span; the marker on the SECOND line
         // must reveal too, because CRLF must not fracture the block.
         XCTAssertTrue(hidden(body, selection: NSRange(location: 2, length: 0)).isEmpty)
+    }
+}
+
+@MainActor
+extension MarkdownRevealTests {
+
+    /// THE constraint of this milestone: collapsing changes attributes only.
+    /// If this ever fails, a display concern has reached the document — and
+    /// after fourteen data-loss defects in M0/M1, that is not a trade we make.
+    func test_collapsingNeverChangesTheDocumentText() {
+        let body = "**bold** and *italic*"
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.collapse([0..<2, 6..<8], in: storage)
+        XCTAssertEqual(storage.string, body)
+    }
+
+    /// Collapsed markers must take no width.
+    func test_collapsedMarkersHaveEffectivelyZeroWidth() throws {
+        let storage = NSTextStorage(string: "**bold**")
+        MarkdownStyleRenderer.collapse([0..<2], in: storage)
+        let font = storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertLessThan(try XCTUnwrap(font).pointSize, 0.1)
+        let kern = storage.attribute(.kern, at: 0, effectiveRange: nil) as? CGFloat
+        XCTAssertEqual(try XCTUnwrap(kern), 0, accuracy: 0.001)
+    }
+
+    /// Uncollapsed text is untouched — collapse must be surgical.
+    func test_collapseLeavesNeighbouringTextAlone() throws {
+        let storage = NSTextStorage(string: "**bold**")
+        storage.addAttribute(.font, value: NSFont.systemFont(ofSize: 15),
+                             range: NSRange(location: 0, length: 8))
+        MarkdownStyleRenderer.collapse([0..<2], in: storage)
+        let font = storage.attribute(.font, at: 3, effectiveRange: nil) as? NSFont
+        XCTAssertEqual(try XCTUnwrap(font).pointSize, 15, accuracy: 0.01)
+    }
+
+    /// Marker ranges are NOT disjoint — a nested blockquote emits an outer and
+    /// an inner marker that overlap — so `collapse` coalesces before applying.
+    func test_overlappingAndAdjacentRangesCoalesce() {
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([0..<3, 0..<2]), [0..<3])
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([2..<4, 0..<2]), [0..<4])
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([5..<7, 0..<2]), [0..<2, 5..<7])
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([1..<4, 2..<3]), [1..<4])
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([3..<3, 1..<2]), [1..<2])
+        XCTAssertEqual(MarkdownStyleRenderer.coalesce([]), [])
+    }
+
+    /// A nested blockquote really does produce overlapping markers; collapsing
+    /// them must still hide exactly the syntax and leave the text alone.
+    func test_nestedBlockQuoteMarkersOverlapAndStillCollapse() throws {
+        let body = ">> quoted"
+        let model = MarkdownDocumentModel(body: body)
+        let markers = model.styleSpans.compactMap { span -> Range<Int>? in
+            if case .marker = span.kind { return span.range }
+            return nil
+        }
+        XCTAssertFalse(markers.isEmpty)
+        let storage = NSTextStorage(string: body)
+        storage.addAttribute(.font, value: NSFont.systemFont(ofSize: 15),
+                             range: NSRange(location: 0, length: (body as NSString).length))
+        MarkdownStyleRenderer.collapse(markers, in: storage)
+        XCTAssertEqual(storage.string, body)
+        let head = storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertLessThan(try XCTUnwrap(head).pointSize, 0.1)
+        let tail = storage.attribute(.font, at: (body as NSString).length - 1,
+                                     effectiveRange: nil) as? NSFont
+        XCTAssertEqual(try XCTUnwrap(tail).pointSize, 15, accuracy: 0.01)
+    }
+
+    /// Out-of-bounds ranges are skipped, not trapped, and never touch the text.
+    func test_collapseIgnoresOutOfBoundsRanges() {
+        let body = "abc"
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.collapse([2..<99, -4 ..< -1], in: storage)
+        XCTAssertEqual(storage.string, body)
+    }
+
+    /// End to end: what `hiddenMarkers` reports, `collapse` hides — and the
+    /// document text is identical afterwards.
+    func test_hiddenMarkersCollapseWithoutTouchingTheDocument() {
+        let body = "**bold**\n\nplain paragraph"
+        let caret = NSRange(location: (body as NSString).length - 1, length: 0)
+        let ranges = hidden(body, selection: caret)
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.collapse(ranges, in: storage)
+        XCTAssertEqual(storage.string, body)
+        XCTAssertEqual((storage.string as NSString).length, (body as NSString).length)
     }
 }
