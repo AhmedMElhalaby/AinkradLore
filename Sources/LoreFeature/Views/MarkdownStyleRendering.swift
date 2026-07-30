@@ -322,6 +322,14 @@ enum MarkdownStyleRenderer {
             // Foreground unchanged by design: a list item is most of a note, and
             // tinting it would tint the note. Its children still style.
             break
+
+        case .marker:
+            // Deliberately inert HERE. Marker spans exist so a later task can
+            // dim or collapse syntax characters; giving them an appearance now
+            // would change every note's look ahead of that decision, and the
+            // rendering above already styles the whole source range including
+            // its markers.
+            break
         }
     }
 

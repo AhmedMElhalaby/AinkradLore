@@ -14,6 +14,10 @@ public struct StyleSpan: Equatable, Sendable {
         case listItem
         case blockQuote
         case checkbox(Bool)
+        /// The syntax characters of `owner`, and NOTHING else. Emitted
+        /// separately from the content span so Live Preview can collapse the
+        /// markers without touching the text they delimit.
+        case marker(of: MarkerOwner)
     }
     /// UTF-16 offsets into the EDITOR's full string, frontmatter included.
     /// Not Character offsets — `LinkSpan.targetRange` uses those, and mixing
@@ -54,27 +58,44 @@ extension MarkdownASTCollector {
             styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .heading(heading.level)))
             outline.append(OutlineEntry(level: heading.level, text: heading.plainText,
                                         utf16Offset: ns.location))
+            // A SETEXT heading has no `#` run, so `linePrefix` yields nothing
+            // and no marker is emitted — the right answer, not a fallback.
+            appendMarkers(MarkdownMarkers.linePrefix("#", in: ns, text: text), .heading)
         }
         descendInto(heading)
     }
 
     mutating func visitStrong(_ strong: Strong) {
-        append(strong.range, .strong)
+        if let ns = resolve(strong.range) {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .strong))
+            appendMarkers(MarkdownMarkers.paired(anyOf: ["**", "__"], in: ns, text: text),
+                          .strong)
+        }
         descendInto(strong)
     }
 
     mutating func visitEmphasis(_ emphasis: Emphasis) {
-        append(emphasis.range, .emphasis)
+        if let ns = resolve(emphasis.range) {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .emphasis))
+            appendMarkers(MarkdownMarkers.paired(anyOf: ["*", "_"], in: ns, text: text),
+                          .emphasis)
+        }
         descendInto(emphasis)
     }
 
     mutating func visitLink(_ link: Link) {
-        append(link.range, .link)
+        if let ns = resolve(link.range) {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .link))
+            appendMarkers(MarkdownMarkers.inlineLink(in: ns, text: text), .link)
+        }
         descendInto(link)
     }
 
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
-        append(blockQuote.range, .blockQuote)
+        if let ns = resolve(blockQuote.range) {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .blockQuote))
+            appendMarkers(MarkdownMarkers.linePrefix(">", in: ns, text: text), .blockQuote)
+        }
         descendInto(blockQuote)
     }
 
@@ -86,6 +107,7 @@ extension MarkdownASTCollector {
     mutating func visitListItem(_ listItem: ListItem) {
         if let itemRange = resolve(listItem.range) {
             styleSpans.append(StyleSpan(range: swiftRange(itemRange), kind: .listItem))
+            appendMarkers(MarkdownMarkers.listBullet(in: itemRange, text: text), .listBullet)
             if let checkbox = listItem.checkbox,
                let markerRange = checkboxMarkerRange(in: itemRange) {
                 styleSpans.append(StyleSpan(range: swiftRange(markerRange),
@@ -114,6 +136,15 @@ extension MarkdownASTCollector {
             .map { text.range(of: $0, options: [], range: line) }
             .filter { $0.location != NSNotFound }
             .min { $0.location < $1.location }
+    }
+
+    /// Marker spans are ADDITIVE — the content span keeps the range it always
+    /// had, and these sit alongside it. An empty `ranges` (the "we are not sure
+    /// what this looks like" answer from `MarkdownMarkers`) appends nothing.
+    mutating func appendMarkers(_ ranges: [NSRange], _ owner: MarkerOwner) {
+        for ns in ranges where ns.length > 0 {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .marker(of: owner)))
+        }
     }
 
     mutating func append(_ sourceRange: SourceRange?, _ kind: StyleSpan.Kind) {
@@ -158,12 +189,23 @@ enum WikilinkSpanBuilder {
         let utf16Offsets = scan.normalised
             ? CharacterOffsetMap.make(for: fullText) : scan.offsets
 
-        return linkSpans.compactMap { span in
+        let ns = fullText as NSString
+        return linkSpans.flatMap { span -> [StyleSpan] in
             guard span.targetRange.lowerBound >= 0,
-                  span.targetRange.upperBound < utf16Offsets.count else { return nil }
+                  span.targetRange.upperBound < utf16Offsets.count else { return [] }
             let lower = utf16Offsets[span.targetRange.lowerBound]
             let upper = utf16Offsets[span.targetRange.upperBound]
-            return StyleSpan(range: lower..<upper, kind: .wikilink)
+            // The CONTENT span covers the target only — the brackets sit
+            // outside it, and for `[[Target|Display]]` the closer is past the
+            // display text — so the markers are found in the source rather
+            // than derived from this range's ends.
+            let target = NSRange(location: lower, length: upper - lower)
+            let brackets = MarkdownMarkers.wikilinkBrackets(around: target, text: ns)
+            return [StyleSpan(range: lower..<upper, kind: .wikilink)]
+                + brackets.map {
+                    StyleSpan(range: $0.location..<($0.location + $0.length),
+                              kind: .marker(of: .wikilink))
+                }
         }
     }
 }
