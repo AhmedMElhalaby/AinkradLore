@@ -39,11 +39,33 @@ extension LoreStore {
     ///    SUFFIX to `LinkResolver`: a note flattened into the default folder
     ///    would leave the very link the user clicked still unresolved.
     ///
+    ///  - percent-DECODE the target first, for a `.markdown`-syntax link only.
+    ///    Clicking "Create note" on a dead `[t](Design%20Doc.md)` used to create
+    ///    a junk file literally named `design%20doc.md`, which then did not
+    ///    resolve the link it was created for — the same class of bug as the
+    ///    two above. The decode is not open-coded here: it goes through
+    ///    `DocumentLink.resolutionTarget`, the ONE rule that decides what a
+    ///    target names, so the created note is by construction the note the
+    ///    resolver will look for.
+    ///
+    /// ## Why `syntax` is a required parameter
+    ///
+    /// It has no default. A default is what lets a new call site inherit a
+    /// decoding rule it never thought about — and every bug in this method's
+    /// history is a call site that skipped a step. Both existing callers now
+    /// have to state where the syntax came from, and neither has to guess:
+    /// `DocumentPane`'s Cmd-click path can only fire on a `[[…]]` span (see
+    /// `LinkCompletionContext.target(in:at:)`, which scans for `[[`/`]]` and
+    /// nothing else), and `BacklinksPanel` reads it off the `UnresolvedLink`
+    /// row the index stored when it parsed the link.
+    ///
     /// Throws rather than returning an optional: a create that fails must reach
     /// the user, and the caller's job is only to show it.
     @discardableResult
-    public func createAndOpenNote(forLinkTarget target: String) throws -> Note {
-        var parts = LinkCompletionContext.documentName(of: target)
+    public func createAndOpenNote(forLinkTarget target: String,
+                                  syntax: LinkSyntax) throws -> Note {
+        let decoded = DocumentLink(rawTarget: target, syntax: syntax).resolutionTarget
+        var parts = LinkCompletionContext.documentName(of: decoded)
             .split(separator: "/").map(String.init)
         guard let title = parts.popLast(), !title.isEmpty else {
             throw UncreatableLinkTarget(target: target)

@@ -339,7 +339,8 @@ final class LoreStoreTests: XCTestCase {
         let s = try makeStore(root)
         await s.settleForTesting()
         try s.rebuild()
-        XCTAssertEqual(s.unresolvedLinks(from: root.appendingPathComponent("alpha.md")), ["Nowhere"])
+        XCTAssertEqual(s.unresolvedLinks(from: root.appendingPathComponent("alpha.md")),
+                       [UnresolvedLink(rawTarget: "Nowhere", syntax: .wikilink)])
     }
 
     func test_openLinkOpensResolvedTargetInATab() async throws {

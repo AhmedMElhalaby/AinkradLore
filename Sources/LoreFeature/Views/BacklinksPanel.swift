@@ -20,7 +20,7 @@ struct BacklinksPanel: View {
     let theme: HostTheme
 
     @State private var backlinks: [LoreStore.Backlink] = []
-    @State private var unresolved: [String] = []
+    @State private var unresolved: [UnresolvedLink] = []
     /// Why creating a note for an unresolved link failed, when it did.
     @State private var createFailure: String?
 
@@ -60,12 +60,12 @@ struct BacklinksPanel: View {
                         if !unresolved.isEmpty {
                             Text("Unresolved links").font(.caption)
                                 .padding(.top, AinkradSpacing.xs)
-                            ForEach(unresolved, id: \.self) { target in
+                            ForEach(unresolved) { link in
                                 HStack {
-                                    Text(target).lineLimit(1)
+                                    Text(link.rawTarget).lineLimit(1)
                                     Spacer()
                                     AinkradButton(title: "Create note", style: .ghost) {
-                                        create(target)
+                                        create(link)
                                     }
                                 }
                             }
@@ -91,9 +91,15 @@ struct BacklinksPanel: View {
     /// Creates the note an unresolved link names, through the store's single
     /// create-from-a-link path — the same one `DocumentPane` uses, so the two
     /// buttons cannot drift into behaving differently again.
-    private func create(_ target: String) {
+    ///
+    /// The syntax travels WITH the target, on the `UnresolvedLink` the index
+    /// stored when it parsed the link — so a dead `[t](Design%20Doc.md)`
+    /// creates `Design Doc.md` (which resolves it) rather than a junk file
+    /// literally named `design%20doc.md` (which does not).
+    private func create(_ link: UnresolvedLink) {
+        let target = link.rawTarget
         do {
-            try store.createAndOpenNote(forLinkTarget: target)
+            try store.createAndOpenNote(forLinkTarget: target, syntax: link.syntax)
             // The target that was just created is no longer unresolved:
             // re-querying is what keeps this list honest.
             refresh()

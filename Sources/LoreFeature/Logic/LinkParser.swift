@@ -4,7 +4,7 @@ import Foundation
 /// that must not be guessed from the target text alone: whether the target is
 /// percent-ENCODED (markdown links are, wikilinks never are), and therefore
 /// whether a rewritten target must be re-encoded on the way back out.
-public enum LinkSyntax: Equatable, Sendable {
+public enum LinkSyntax: String, Equatable, Hashable, Sendable {
     case wikilink
     case markdown
 }

@@ -11,8 +11,30 @@ public struct ResolvedLink: Sendable, Equatable {
     public let rawTarget: String
     public let targetPath: URL?
     public let isEmbed: Bool
-    public init(rawTarget: String, targetPath: URL?, isEmbed: Bool) {
+    /// Which syntax the link was written in. Stored, not inferred: every
+    /// percent-encoding decision downstream (resolution, rename rewriting, and
+    /// "create the note this dead link names") is conditional on it, and the
+    /// raw target alone cannot tell you — `100%20off` is an encoded space in a
+    /// markdown link and a literal `%20` in a wikilink. Inferring it separately
+    /// at each consumer is exactly the drift that produced these bugs.
+    public let syntax: LinkSyntax
+    public init(rawTarget: String, targetPath: URL?, isEmbed: Bool,
+                syntax: LinkSyntax = .wikilink) {
         self.rawTarget = rawTarget; self.targetPath = targetPath; self.isEmbed = isEmbed
+        self.syntax = syntax
+    }
+}
+
+/// One outbound link that resolved to nothing, with the syntax it was written
+/// in. A bare `String` was not enough for the "Create note" affordance: the
+/// name to create is the percent-DECODED target for a markdown link and the
+/// verbatim one for a wikilink.
+public struct UnresolvedLink: Sendable, Equatable, Hashable, Identifiable {
+    public let rawTarget: String
+    public let syntax: LinkSyntax
+    public var id: String { "\(syntax == .markdown ? "m" : "w"):\(rawTarget)" }
+    public init(rawTarget: String, syntax: LinkSyntax) {
+        self.rawTarget = rawTarget; self.syntax = syntax
     }
 }
 
@@ -56,7 +78,12 @@ public final class LoreIndex: @unchecked Sendable {
     /// index may hold rows written under a non-canonical spelling; there is no
     /// migration to write, because the whole file is discarded and rebuilt
     /// canonically on the next `activate`.
-    static let schemaVersion: Int32 = 4
+    ///
+    /// 5: `links.syntax`. A version-4 index cannot supply it, and defaulting
+    /// every existing row to `wikilink` would silently mis-handle every
+    /// percent-encoded markdown link until the next full rescan — so the file
+    /// is discarded and rebuilt, which is what a version bump already does.
+    static let schemaVersion: Int32 = 5
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -104,7 +131,8 @@ public final class LoreIndex: @unchecked Sendable {
                     source_path TEXT NOT NULL,
                     raw_target  TEXT NOT NULL,
                     target_path TEXT,
-                    is_embed    INTEGER NOT NULL DEFAULT 0);
+                    is_embed    INTEGER NOT NULL DEFAULT 0,
+                    syntax      TEXT NOT NULL DEFAULT 'wikilink');
             """)
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS links_by_target ON links(target_path);
@@ -245,10 +273,11 @@ public final class LoreIndex: @unchecked Sendable {
                        arguments: [path])
         for link in entry.resolvedLinks {
             try db.execute(sql: """
-                INSERT INTO links(source_path, raw_target, target_path, is_embed)
-                VALUES(?,?,?,?);
+                INSERT INTO links(source_path, raw_target, target_path, is_embed, syntax)
+                VALUES(?,?,?,?,?);
             """, arguments: [path, link.rawTarget,
-                             link.targetPath.map(canonical), link.isEmbed ? 1 : 0])
+                             link.targetPath.map(canonical), link.isEmbed ? 1 : 0,
+                             link.syntax.rawValue])
         }
     }
 
@@ -379,41 +408,53 @@ public final class LoreIndex: @unchecked Sendable {
     /// DOCUMENT: a rename must rewrite every individual link, so a document
     /// linking twice with two different spellings (`[[Design]]` and
     /// `[[Projects/Design.md]]`) has to yield two rows here, not one.
-    public func inboundLinks(to target: URL) throws -> [(sourceFile: URL, rawTarget: String)] {
+    public func inboundLinks(to target: URL) throws
+        -> [(sourceFile: URL, rawTarget: String, syntax: LinkSyntax)] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT DISTINCT source_path, raw_target FROM links
+                SELECT DISTINCT source_path, raw_target, syntax FROM links
                 WHERE target_path = ?;
-            """, arguments: [Self.canonical(target)]).map { r -> (sourceFile: URL, rawTarget: String) in
+            """, arguments: [Self.canonical(target)]).map { r in
                 let source: String = r["source_path"]
                 let raw: String = r["raw_target"]
-                return (sourceFile: URL(fileURLWithPath: source), rawTarget: raw)
+                return (sourceFile: URL(fileURLWithPath: source), rawTarget: raw,
+                        syntax: Self.syntax(r["syntax"]))
             }
         }
     }
 
+    /// A stored `links.syntax` value. Anything unrecognised reads as
+    /// `.wikilink`, the syntax that applies NO percent-decoding — the choice
+    /// that treats a target verbatim rather than transforming it on a guess.
+    private static func syntax(_ raw: String?) -> LinkSyntax {
+        raw.flatMap(LinkSyntax.init(rawValue:)) ?? .wikilink
+    }
+
     /// This document's outbound links that resolve to nothing. A normal state:
     /// it is how a link to a not-yet-written note behaves.
-    public func unresolvedLinks(from source: URL) throws -> [String] {
+    public func unresolvedLinks(from source: URL) throws -> [UnresolvedLink] {
         try dbQueue.read { db in
-            try String.fetchAll(db, sql: """
-                SELECT raw_target FROM links
+            try Row.fetchAll(db, sql: """
+                SELECT raw_target, syntax FROM links
                 WHERE source_path = ? AND target_path IS NULL;
-            """, arguments: [Self.canonical(source)])
+            """, arguments: [Self.canonical(source)]).map { r in
+                UnresolvedLink(rawTarget: r["raw_target"], syntax: Self.syntax(r["syntax"]))
+            }
         }
     }
 
     public func outgoingLinks(from source: URL) throws -> [ResolvedLink] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT raw_target, target_path, is_embed FROM links
+                SELECT raw_target, target_path, is_embed, syntax FROM links
                 WHERE source_path = ?;
             """, arguments: [Self.canonical(source)]).map { r in
                 ResolvedLink(rawTarget: r["raw_target"],
                              targetPath: (r["target_path"] as String?).map {
                                  URL(fileURLWithPath: $0)
                              },
-                             isEmbed: (r["is_embed"] as Int) == 1)
+                             isEmbed: (r["is_embed"] as Int) == 1,
+                             syntax: Self.syntax(r["syntax"]))
             }
         }
     }

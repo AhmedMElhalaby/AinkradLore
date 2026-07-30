@@ -175,8 +175,12 @@ final class LinkRewriteRegionTests: XCTestCase {
                        "---\nid: a\ntitle: A\n---\nsee [the doc](Spec%20Sheet.md)")
     }
 
-    /// The other direction: an author who wrote the space raw keeps it raw.
-    func test_anUnencodedMarkdownLinkIsNotEncodedByARewrite() throws {
+    /// SUPERSEDES an earlier assertion that a raw space stayed raw. It did, and
+    /// that was the interop break: CommonMark and Obsidian both END a link
+    /// destination at an unencoded space, so `[t](Spec Sheet.md)` is not a link
+    /// to `Spec Sheet.md` anywhere except inside Lore. Encoding is now driven by
+    /// what the NEW target needs, not by how the old one was spelled.
+    func test_aRewriteEncodesASpaceEvenWhenTheOriginalWasUnencoded() throws {
         let root = tempDir()
         let file = root.appendingPathComponent("e.md")
         try "[t](Design Doc.md)".write(to: file, atomically: true, encoding: .utf8)
@@ -185,7 +189,7 @@ final class LinkRewriteRegionTests: XCTestCase {
             [LinkEdit(file: file, oldTarget: "Design Doc.md", newTarget: "Spec Sheet.md")],
             to: file, baseline: try mtime(of: file))
 
-        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "[t](Spec Sheet.md)")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "[t](Spec%20Sheet.md)")
     }
 
     /// An encoded link that needs no change must not be "normalised" to its
@@ -194,7 +198,7 @@ final class LinkRewriteRegionTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design Doc.md"),
             to: URL(fileURLWithPath: "/v/Projects/Design Doc.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/a.md"), "Design%20Doc")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/a.md"), "Design%20Doc", .markdown)],
             vaultRoot: URL(fileURLWithPath: "/v"))
         // Bare target, no extension: a move leaves it resolving by basename.
         XCTAssertTrue(plan.edits.isEmpty)

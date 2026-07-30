@@ -123,7 +123,7 @@ public final class LoreStore {
         return ""
     }
 
-    public func unresolvedLinks(from url: URL) -> [String] {
+    public func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
         coordinator.unresolvedLinks(from: url)
     }
 

@@ -229,7 +229,8 @@ public final class VaultIndexCoordinator {
                            // `Design Doc.md`. See `DocumentLink.resolutionTarget`.
                            ResolvedLink(rawTarget: $0.rawTarget,
                                         targetPath: resolver.resolve($0.resolutionTarget),
-                                        isEmbed: $0.isEmbed)
+                                        isEmbed: $0.isEmbed,
+                                        syntax: $0.syntax)
                        })
         }
     }
@@ -322,11 +323,13 @@ public final class VaultIndexCoordinator {
     /// spellings makes those lookups miss, which in this codebase has meant an
     /// edit silently dropped or a dirty tab's file written anyway. One spelling
     /// out of here is what stops that at the source.
-    func inboundLinks(to url: URL) -> [(sourceFile: URL, rawTarget: String)] {
+    func inboundLinks(to url: URL) -> [(sourceFile: URL, rawTarget: String,
+                                        syntax: LinkSyntax)] {
         let links = (try? index?.inboundLinks(to: Self.canonical(url))) ?? []
-        return links.map { (sourceFile: Self.canonical($0.sourceFile), rawTarget: $0.rawTarget) }
+        return links.map { (sourceFile: Self.canonical($0.sourceFile),
+                            rawTarget: $0.rawTarget, syntax: $0.syntax) }
     }
-    func unresolvedLinks(from url: URL) -> [String] {
+    func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
         (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []
     }
     /// A resolver over the CURRENT index rows, for link clicks and completion.
@@ -371,7 +374,8 @@ public final class VaultIndexCoordinator {
             // Raw for rewriting, decoded for resolution — as in `resolve(_:)`.
             ResolvedLink(rawTarget: $0.rawTarget,
                          targetPath: resolver.resolve($0.resolutionTarget),
-                         isEmbed: $0.isEmbed)
+                         isEmbed: $0.isEmbed,
+                         syntax: $0.syntax)
         }
         try index.upsert(IndexEntry(url: url, type: type, payload: payload,
                                     updated: Date(), resolvedLinks: resolvedLinks))

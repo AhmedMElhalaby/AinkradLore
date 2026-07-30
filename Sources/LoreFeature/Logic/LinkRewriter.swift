@@ -103,12 +103,14 @@ public enum LinkRewriter {
     /// link resolves by basename, so it still resolves after the move.
     public static func plan(renaming source: URL,
                             to destination: URL,
-                            inboundLinks: [(sourceFile: URL, rawTarget: String)],
+                            inboundLinks: [(sourceFile: URL, rawTarget: String,
+                                            syntax: LinkSyntax)],
                             vaultRoot: URL) -> RenamePlan {
         var edits: [LinkEdit] = []
         var unrewritable: [UnrewritableLink] = []
         for link in inboundLinks {
-            guard let newTarget = rewritten(link.rawTarget, to: destination,
+            guard let newTarget = rewritten(link.rawTarget, syntax: link.syntax,
+                                            to: destination,
                                             vaultRoot: vaultRoot) else {
                 // Not "no change needed" — no rewrite EXISTS. Recorded so the
                 // rename reports a link it cannot keep working, instead of
@@ -121,7 +123,8 @@ public enum LinkRewriter {
             // target, so a percent-encoded link that needs no change
             // (`Design%20Doc.md` → `Design Doc.md`) would otherwise look like
             // an edit and be written back unencoded.
-            guard newTarget != decodedTarget(link.rawTarget) else { continue }
+            guard newTarget != decodedTarget(link.rawTarget, syntax: link.syntax)
+            else { continue }
             edits.append(LinkEdit(file: link.sourceFile, oldTarget: link.rawTarget,
                                   newTarget: newTarget))
         }
@@ -131,7 +134,18 @@ public enum LinkRewriter {
 
     /// A raw target with its path part percent-decoded and its fragment left
     /// alone — the form `rewritten` both analyses and returns.
-    static func decodedTarget(_ rawTarget: String) -> String {
+    ///
+    /// Decoding is conditional on `syntax`, for exactly the reason
+    /// `DocumentLink.resolutionTarget` makes it conditional: Obsidian never
+    /// percent-encodes a WIKILINK target, so a `%` inside one is a literal `%`
+    /// in a filename. Decoding it unconditionally (as this used to) produced
+    /// two silent faults — `[[C%2FD]]` turned into `C/D`, so the planner
+    /// treated a bare target as a vault-relative PATH it never was; and
+    /// renaming `100%20off.md` to `100 off` made the "decoded" old target equal
+    /// the new one, so the equality guard below skipped the edit and left the
+    /// wikilink dangling. One decoding rule, keyed on syntax, everywhere.
+    static func decodedTarget(_ rawTarget: String, syntax: LinkSyntax) -> String {
+        guard syntax == .markdown else { return rawTarget }
         let split = splitFragment(rawTarget)
         return (split.body.removingPercentEncoding ?? split.body) + split.fragment
     }
@@ -143,19 +157,22 @@ public enum LinkRewriter {
     /// vault-relative path to produce, and inventing one (e.g. an absolute
     /// filesystem path) would hand the confirmation UI a corrupted-looking
     /// target that is worse than simply omitting the edit.
-    static func rewritten(_ rawTarget: String, to destination: URL,
+    static func rewritten(_ rawTarget: String, syntax: LinkSyntax,
+                          to destination: URL,
                           vaultRoot: URL) -> String? {
         // Split off the fragment; it is carried through untouched.
         let split = splitFragment(rawTarget)
         let fragment = split.fragment
-        // Percent-DECODED for analysis and for the value returned: a markdown
-        // link written `Design%20Doc.md` names a file called `Design Doc.md`,
-        // and the style questions below ("does it carry an extension?", "does
-        // it name a folder?") are about the real name, not the escaping. The
-        // result is handed back decoded; `written(_:like:)` re-encodes it at
-        // write time, where the link's SYNTAX is known and a wikilink can be
-        // excluded from encoding.
-        let body = split.body.removingPercentEncoding ?? split.body
+        // Percent-DECODED for analysis and for the value returned, but ONLY for
+        // a markdown link: one written `Design%20Doc.md` names a file called
+        // `Design Doc.md`, and the style questions below ("does it carry an
+        // extension?", "does it name a folder?") are about the real name, not
+        // the escaping. A WIKILINK is never encoded, so its `%` is literal —
+        // see `decodedTarget`. The result is handed back decoded;
+        // `written(_:like:)` re-encodes it at write time, where the link's
+        // SYNTAX is known and a wikilink can be excluded from encoding.
+        let body = syntax == .markdown
+            ? (split.body.removingPercentEncoding ?? split.body) : split.body
         let hadExtension = body.lowercased().hasSuffix(".md")
         let withoutExtension = hadExtension ? String(body.dropLast(3)) : body
         let hadPath = withoutExtension.contains("/")
@@ -372,25 +389,73 @@ extension LinkRewriter {
         return String(chars)
     }
 
-    /// The new target spelled in the AUTHOR'S encoding style.
+    /// The new target, spelled so that it still resolves OUTSIDE Lore.
     ///
-    /// `newTarget` arrives percent-DECODED (see `rewritten`). A markdown link
-    /// whose original target was percent-encoded gets the new one encoded to
-    /// match — `[text](Design%20Doc.md)` renamed becomes
-    /// `[text](New%20Doc.md)`, not `[text](New Doc.md)`. One the author wrote
-    /// unencoded stays unencoded, and a wikilink is NEVER encoded, because
-    /// Obsidian does not encode those and an encoded one would stop resolving.
+    /// `newTarget` arrives percent-DECODED (see `rewritten`).
+    ///
+    /// This used to key off the author's style — encode the new target only if
+    /// the OLD one was encoded — which is why it is now written the other way
+    /// round. Renaming a note to a name containing a space rewrote every
+    /// unencoded markdown link `[t](Design.md)` to `[t](New Name.md)`. Lore's
+    /// own parser reads that back, but CommonMark and Obsidian do not: an
+    /// unencoded space TERMINATES a link destination, so the link silently
+    /// broke in the very editor the vault is shared with. Style preservation is
+    /// the right instinct, but it cannot outrank producing a target that
+    /// actually resolves.
+    ///
+    /// So: encode whenever the NEW target requires it, regardless of the old
+    /// spelling. A target that needs no encoding is left alone, so an ordinary
+    /// rename still produces a clean, unencoded link. A WIKILINK is never
+    /// encoded — Obsidian does not encode those, and an encoded one would stop
+    /// resolving there.
     private static func written(_ newTarget: String, like link: DocumentLink) -> String {
-        guard link.syntax == .markdown, link.rawTarget != link.resolutionTarget
-        else { return newTarget }
+        guard link.syntax == .markdown else { return newTarget }
         // The `#` fragment is a DELIMITER, not part of the path: encoding it to
         // `%23` would fold the heading into the filename. Split first, encode
         // only the path, put the fragment back as it came.
         let (body, fragment) = splitFragment(newTarget)
-        guard let encoded = body
-                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-        else { return newTarget }
-        return encoded + fragment
+        return markdownDestination(body) + fragment
+    }
+
+    /// Percent-encodes exactly the characters that stop a CommonMark link
+    /// destination from being read as one whole destination:
+    ///
+    /// * **space** (and any other whitespace) — terminates the destination; the
+    ///   remainder is parsed as a link TITLE, or the link fails outright.
+    /// * **`(`, `)`** — the destination's own delimiters. An unbalanced one
+    ///   closes the link early.
+    /// * **control characters** — not valid in a destination, and invisible in
+    ///   the file, which makes the breakage unexplainable.
+    /// * **`%`** — not a CommonMark requirement but a ROUND-TRIP one. Every
+    ///   reader of a markdown destination (Lore's own `resolutionTarget`
+    ///   included) percent-DECODES it, so a literal `%` written raw comes back
+    ///   as something else: a file genuinely named `100%20off` would be read as
+    ///   `100 off`. Encoded to `%25`, it decodes back to itself.
+    ///
+    /// Deliberately NOT the whole of `.urlPathAllowed`'s complement: that
+    /// encodes `#`, `?`, `[`, `]`, `&`, non-ASCII letters and more, none of
+    /// which a markdown reader needs escaped, and all of which would turn an
+    /// ordinary rename into an unreadable churn of `%`-triplets in the user's
+    /// own file.
+    static func markdownDestination(_ body: String) -> String {
+        var out = ""
+        for character in body {
+            if needsEncoding(character) {
+                for byte in String(character).utf8 {
+                    out += String(format: "%%%02X", byte)
+                }
+            } else {
+                out.append(character)
+            }
+        }
+        return out
+    }
+
+    private static func needsEncoding(_ character: Character) -> Bool {
+        if character == "(" || character == ")" || character == "%" { return true }
+        return character.unicodeScalars.allSatisfy {
+            $0.properties.isWhitespace || $0.value < 0x20 || $0.value == 0x7F
+        }
     }
 
     /// Splits a raw target into its path part and its `#…` fragment (empty

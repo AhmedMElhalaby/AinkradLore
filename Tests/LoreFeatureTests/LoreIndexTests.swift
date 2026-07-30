@@ -123,7 +123,8 @@ final class LoreIndexTests: XCTestCase {
             ]),
             linkedEntry("/v/Design.md", title: "Design"),
         ])
-        XCTAssertEqual(try index.unresolvedLinks(from: URL(fileURLWithPath: "/v/A.md")), ["Missing"])
+        XCTAssertEqual(try index.unresolvedLinks(from: URL(fileURLWithPath: "/v/A.md")),
+                       [UnresolvedLink(rawTarget: "Missing", syntax: .wikilink)])
     }
 
     func test_outgoingLinksPreserveRawTargets() throws {

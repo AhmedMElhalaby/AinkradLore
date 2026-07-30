@@ -1,7 +1,7 @@
 import XCTest
 @testable import LoreFeature
 
-/// The SINGLE create-from-a-link path, `LoreStore.createAndOpenNote(forLinkTarget:)`.
+/// The SINGLE create-from-a-link path, `LoreStore.createAndOpenNote(forLinkTarget:syntax:)`.
 ///
 /// Both "Create note" affordances — the backlinks panel's unresolved list and
 /// the Cmd-click prompt — route through it. They used to have one
@@ -26,7 +26,7 @@ final class LinkCreatePathTests: XCTestCase {
     /// write into a folder that did not exist, throw, and be swallowed.
     func test_folderedTargetCreatesTheNoteAndTheLinkThenResolves() throws {
         let (_, store) = try store()
-        let note = try store.createAndOpenNote(forLinkTarget: "Projects/Design")
+        let note = try store.createAndOpenNote(forLinkTarget: "Projects/Design", syntax: .wikilink)
         XCTAssertTrue(FileManager.default.fileExists(atPath: note.path.path))
         XCTAssertEqual(note.path.deletingLastPathComponent().lastPathComponent, "Projects")
         XCTAssertEqual(store.resolveLink("Projects/Design"), note.path)
@@ -36,14 +36,14 @@ final class LinkCreatePathTests: XCTestCase {
     /// not resolve the link it was created for.
     func test_aliasedTargetCreatesTheDocumentItNamesAndResolves() throws {
         let (_, store) = try store()
-        let note = try store.createAndOpenNote(forLinkTarget: "Design|why")
+        let note = try store.createAndOpenNote(forLinkTarget: "Design|why", syntax: .wikilink)
         XCTAssertEqual(note.path.lastPathComponent, "design.md")
         XCTAssertEqual(store.resolveLink("Design"), note.path)
     }
 
     func test_fragmentIsNotPartOfTheCreatedName() throws {
         let (_, store) = try store()
-        let note = try store.createAndOpenNote(forLinkTarget: "Design#Overview")
+        let note = try store.createAndOpenNote(forLinkTarget: "Design#Overview", syntax: .wikilink)
         XCTAssertEqual(note.path.lastPathComponent, "design.md")
     }
 
@@ -51,7 +51,7 @@ final class LinkCreatePathTests: XCTestCase {
     /// did something.
     func test_theCreatedNoteIsOpened() throws {
         let (_, store) = try store()
-        let note = try store.createAndOpenNote(forLinkTarget: "Design")
+        let note = try store.createAndOpenNote(forLinkTarget: "Design", syntax: .wikilink)
         XCTAssertEqual(store.selectedTab?.url.standardizedFileURL,
                        note.path.standardizedFileURL)
     }
@@ -62,7 +62,7 @@ final class LinkCreatePathTests: XCTestCase {
         let store = LoreStore(documents: FakeDocs(),
                               indexPath: FileManager.default.temporaryDirectory
                                   .appendingPathComponent("\(UUID()).sqlite"))
-        XCTAssertThrowsError(try store.createAndOpenNote(forLinkTarget: "Design")) {
+        XCTAssertThrowsError(try store.createAndOpenNote(forLinkTarget: "Design", syntax: .wikilink)) {
             XCTAssertEqual($0 as? LoreError, .noVault)
         }
     }
@@ -71,7 +71,7 @@ final class LinkCreatePathTests: XCTestCase {
     /// can show, not with a file called `/`.
     func test_aTargetThatNamesNoNoteIsRefusedWithAMessage() throws {
         let (_, store) = try store()
-        XCTAssertThrowsError(try store.createAndOpenNote(forLinkTarget: "/")) {
+        XCTAssertThrowsError(try store.createAndOpenNote(forLinkTarget: "/", syntax: .wikilink)) {
             XCTAssertEqual(($0 as? UncreatableLinkTarget)?.target, "/")
             XCTAssertNotNil(($0 as? UncreatableLinkTarget)?.errorDescription)
         }
@@ -81,7 +81,7 @@ final class LinkCreatePathTests: XCTestCase {
     /// note rather than refusing — `[[Projects/]]` is a `Projects` note.
     func test_aTrailingSlashStillNamesTheLastComponent() throws {
         let (_, store) = try store()
-        let note = try store.createAndOpenNote(forLinkTarget: "Projects/")
+        let note = try store.createAndOpenNote(forLinkTarget: "Projects/", syntax: .wikilink)
         XCTAssertEqual(note.path.lastPathComponent, "projects.md")
     }
 }

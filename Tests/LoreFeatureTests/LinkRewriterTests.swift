@@ -8,7 +8,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Architecture.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits,
                        [LinkEdit(file: URL(fileURLWithPath: "/v/A.md"),
@@ -19,7 +19,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Architecture.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design#Overview")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design#Overview", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Architecture#Overview")
     }
@@ -29,7 +29,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Projects/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Architecture.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Architecture")
     }
@@ -38,7 +38,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Architecture.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Architecture.md")
     }
@@ -48,7 +48,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Architecture.md"),
-            inboundLinks: [(a, "Design"), (a, "Design#Two")],
+            inboundLinks: [(a, "Design", .wikilink), (a, "Design#Two", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.affectedFiles, [a])
         XCTAssertEqual(plan.edits.count, 2)
@@ -59,7 +59,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design", .wikilink)],
             vaultRoot: root)
         XCTAssertTrue(plan.edits.isEmpty)
     }
@@ -68,7 +68,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Design.md")
     }
@@ -77,7 +77,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/elsewhere/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: root)
         XCTAssertTrue(plan.edits.isEmpty)
     }
@@ -87,7 +87,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: trailingRoot)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Design.md")
     }
@@ -99,7 +99,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/a/v/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "a/v/Design.md")
     }
@@ -108,7 +108,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Nested/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Design.md", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Nested/Design.md")
     }
@@ -117,7 +117,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Projects/Design.md"),
             to: URL(fileURLWithPath: "/v/Projects/Architecture.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Projects/Architecture.md#Overview")
     }
@@ -126,7 +126,7 @@ final class LinkRewriterTests: XCTestCase {
         let plan = LinkRewriter.plan(
             renaming: URL(fileURLWithPath: "/v/Projects/Design.md"),
             to: URL(fileURLWithPath: "/v/Archive/Projects/Design.md"),
-            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview")],
+            inboundLinks: [(URL(fileURLWithPath: "/v/A.md"), "Projects/Design.md#Overview", .wikilink)],
             vaultRoot: root)
         XCTAssertEqual(plan.edits.first?.newTarget, "Archive/Projects/Design.md#Overview")
     }
