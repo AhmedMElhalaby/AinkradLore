@@ -75,7 +75,8 @@ private struct MarkdownDocumentEditor: View {
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
-                           completions: ctx.completions, onOpenLink: ctx.openLink)
+                           completions: ctx.completions, onOpenLink: ctx.openLink,
+                           linkTarget: ctx.linkTarget)
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
         }
         .background(ctx.theme.tokens.background)

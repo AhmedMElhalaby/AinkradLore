@@ -35,7 +35,8 @@ struct DocumentPane: View {
                                   // and never resolve.
                                   let name = LinkCompletionContext.documentName(of: target)
                                   if !store.openLink(name) { unresolved = name }
-                              }))
+                              },
+                              linkTarget: { store.linkTarget(for: $0) }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
                 // without the generation in the identity the user clicks

@@ -111,18 +111,61 @@ public enum LinkCompletionContext {
     /// into a path suffix.
     private static let unusableInTarget: Set<Character> = ["#", "|", "[", "]", "/"]
 
-    /// The text to insert for a picked row, chosen so that resolving it finds
-    /// that same row again.
+    /// The text to insert for a picked row, VERIFIED against the resolver.
     ///
     /// Picking a document from a list must never produce a link that fails to
-    /// find it. A title like `Sprint #3` cannot be expressed as a wikilink
-    /// target at all — `basename` truncates it to `Sprint` — so the filename is
-    /// inserted instead, which `LinkResolver` matches just as happily (it keys
-    /// documents by filename, title AND aliases).
+    /// find it — or worse, one that finds a different document. Three things
+    /// break a target that merely looks reasonable, and only the first is
+    /// visible in the row itself:
+    ///
+    ///  - punctuation: `Sprint #3` truncates to `Sprint` at the fragment marker;
+    ///  - whitespace: `LinkResolver` keys on the RAW title, so a title stored as
+    ///    `"Design "` is not found by `Design` — and it cannot be found by
+    ///    `Design ` either, because `basename` trims;
+    ///  - ambiguity: a title equal to some OTHER document's filename resolves to
+    ///    whichever has the shorter path, which may not be this row.
+    ///
+    /// None of those are decidable from the row alone, so this does not guess.
+    /// It proposes candidates in order of how they read to a human — title,
+    /// filename, vault-relative path — and returns the first that resolves back
+    /// to this exact document. The path candidate is the backstop: it is what
+    /// `LinkResolver` disambiguates by suffix, so it survives ambiguity by
+    /// construction.
+    ///
+    /// - Parameters:
+    ///   - relativePath: `row`'s path relative to the vault root, without the
+    ///     extension (`Projects/Design`). Empty when there is no vault root.
+    ///   - resolves: the resolver, injected so this stays pure and testable.
+    public static func insertableTarget(for row: IndexRow, relativePath: String,
+                                        resolves: (String) -> URL?) -> String {
+        var candidates: [String] = []
+        let title = row.title.trimmingCharacters(in: .whitespaces)
+        if isUsableTarget(title) { candidates.append(title) }
+        let filename = row.path.deletingPathExtension().lastPathComponent
+        if isUsableTarget(filename) { candidates.append(filename) }
+        // The path candidate is exempt from the `/` rule — a `/` is the whole
+        // point of it — but not from the rest.
+        if !relativePath.isEmpty, isUsablePathTarget(relativePath) {
+            candidates.append(relativePath)
+        }
+
+        let wanted = row.path.standardizedFileURL.path
+        for candidate in candidates
+        where resolves(candidate)?.standardizedFileURL.path == wanted {
+            return candidate
+        }
+        // Nothing verified: the document is unreachable by any spelling we can
+        // write (an unindexed row, or a filename containing link punctuation).
+        // Prefer the most specific candidate over the prettiest one.
+        return candidates.last ?? filename
+    }
+
+    /// The store-blind form, for callers with no resolver — it can only apply
+    /// the punctuation rule, so it is NOT round-trip guaranteed.
     public static func insertableTarget(for row: IndexRow) -> String {
         let title = row.title.trimmingCharacters(in: .whitespaces)
-        if isUsableTarget(title) { return title }
-        return row.path.deletingPathExtension().lastPathComponent
+        return isUsableTarget(title) ? title
+            : row.path.deletingPathExtension().lastPathComponent
     }
 
     /// A trailing `.md` is excluded too: `basename` strips it, so a title of
@@ -130,6 +173,13 @@ public enum LinkCompletionContext {
     static func isUsableTarget(_ candidate: String) -> Bool {
         !candidate.isEmpty
             && candidate.allSatisfy { !unusableInTarget.contains($0) }
+            && !candidate.lowercased().hasSuffix(".md")
+    }
+
+    /// As `isUsableTarget`, but `/` is allowed — a path target is meant to be
+    /// read as a path suffix.
+    static func isUsablePathTarget(_ candidate: String) -> Bool {
+        isUsableTarget(candidate.replacingOccurrences(of: "/", with: ""))
             && !candidate.lowercased().hasSuffix(".md")
     }
 }

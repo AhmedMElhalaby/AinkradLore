@@ -333,8 +333,22 @@ public final class LoreStore {
         where part != "." && part != ".." && !part.isEmpty {
             dir.appendPathComponent(String(part), isDirectory: true)
         }
+        // Path arithmetic alone is not containment: a SYMLINKED folder inside
+        // the vault (common in Obsidian setups) would let
+        // `withIntermediateDirectories` follow it and write outside the root.
+        // Checked before the directory is created, on the deepest EXISTING
+        // ancestor — `resolvingSymlinksInPath` cannot resolve components that
+        // do not exist yet, and the link we are worried about does exist.
+        guard Self.isContained(dir, in: root) else {
+            throw LoreError.outsideVault(dir)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = uniqueURL(in: dir, slug: slug)
+        // Re-checked after creation: now the whole chain exists, so this
+        // resolves every component rather than only the pre-existing ones.
+        guard Self.isContained(url.deletingLastPathComponent(), in: root) else {
+            throw LoreError.outsideVault(url)
+        }
         let now = Date()
         let note = Note(path: url, id: UUID().uuidString, title: title, tags: [],
                         created: now, updated: now, body: "")
@@ -430,4 +444,8 @@ public enum LoreError: Error, Equatable {
     /// the user has never seen saved. The `String` is a reason phrase naming
     /// the unsaved edits and how to clear them — see `LoreStore.trash`.
     case unsavedEdits(URL, String)
+    /// A write would have landed outside the vault root — reached only via a
+    /// folder name taken from untrusted document text (a `[[a/b]]` link),
+    /// where a symlink inside the vault redirects the path out of it.
+    case outsideVault(URL)
 }

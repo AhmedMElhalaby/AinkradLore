@@ -167,17 +167,24 @@ final class LinkCompletionTests: XCTestCase {
 /// was picked. These go through the real `LinkResolver` on a real vault,
 /// because the assertion that matters is "resolving the inserted text finds
 /// this file again", not the literal string.
+/// Every vault here holds MORE THAN ONE document: a single-file vault cannot
+/// exhibit the failure that matters most, which is a link that resolves to the
+/// wrong document rather than to none.
 @MainActor
 final class LinkInsertionRoundTripTests: XCTestCase {
-    private func vault(_ files: [(name: String, title: String)]) async throws -> (URL, LoreStore) {
+    /// `path` is vault-relative and includes `.md`, so subfolders can be tested.
+    private func vault(_ files: [(path: String, title: String)]) async throws -> (URL, LoreStore) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lore-insert-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         for file in files {
-            // Quoted: these titles contain YAML-significant characters.
-            try "---\nid: \(file.name)\ntitle: \"\(file.title)\"\n---\nbody"
-                .write(to: root.appendingPathComponent("\(file.name).md"),
-                       atomically: true, encoding: .utf8)
+            let url = root.appendingPathComponent(file.path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            // Quoted: these titles contain YAML-significant characters, and
+            // quoting is also what preserves a deliberate trailing space.
+            try "---\nid: \(UUID().uuidString)\ntitle: \"\(file.title)\"\n---\nbody"
+                .write(to: url, atomically: true, encoding: .utf8)
         }
         let store = LoreStore(documents: FakeDocs(),
                               indexPath: root.appendingPathComponent(".idx.sqlite"))
@@ -187,60 +194,148 @@ final class LinkInsertionRoundTripTests: XCTestCase {
         return (root, store)
     }
 
-    private func assertRoundTrip(name: String, title: String,
-                                 file: StaticString = #filePath, line: UInt = #line) async throws {
-        let (root, store) = try await vault([(name, title)])
-        guard let row = store.rows.first(where: { $0.path.lastPathComponent == "\(name).md" })
-        else { return XCTFail("row not indexed", file: file, line: line) }
-        let inserted = LinkCompletionContext.insertableTarget(for: row)
-        XCTAssertEqual(store.resolveLink(inserted)?.lastPathComponent, "\(name).md",
-                       "[[\(inserted)]] must find \(name).md again", file: file, line: line)
-        XCTAssertEqual(store.resolveLink(inserted)?.deletingLastPathComponent().lastPathComponent,
-                       root.lastPathComponent, file: file, line: line)
+    private func row(_ store: LoreStore, _ path: String) throws -> IndexRow {
+        try XCTUnwrap(store.rows.first { $0.path.path.hasSuffix("/" + path) },
+                      "\(path) not indexed; have \(store.rows.map(\.path.lastPathComponent))")
+    }
+
+    /// The assertion that matters: resolving what we inserted finds THIS file.
+    @discardableResult
+    private func assertRoundTrip(_ store: LoreStore, _ path: String,
+                                 file: StaticString = #filePath,
+                                 line: UInt = #line) throws -> String {
+        let wanted = try row(store, path)
+        let inserted = store.linkTarget(for: wanted)
+        XCTAssertEqual(store.resolveLink(inserted)?.standardizedFileURL,
+                       wanted.path.standardizedFileURL,
+                       "[[\(inserted)]] must resolve to \(path)", file: file, line: line)
+        return inserted
+    }
+
+    // MARK: - Ambiguity: the wrong-document cases
+
+    /// One document's TITLE equals another document's FILENAME. `byKey["design"]`
+    /// holds both, and `resolve` returns the shortest path — so inserting the
+    /// title silently linked to the other file.
+    ///
+    /// The longer filename is deliberate: `resolve` breaks the tie by SHORTEST
+    /// path, so this is the arrangement where the titled document LOSES its own
+    /// title and the bug is reachable.
+    func test_titleCollidingWithAnotherFilename() async throws {
+        let (_, store) = try await vault([("a-much-longer-name.md", "Design"),
+                                          ("design.md", "Something")])
+        XCTAssertEqual(store.resolveLink("Design")?.lastPathComponent, "design.md",
+                       "premise: the bare title resolves to the OTHER document")
+        let inserted = try assertRoundTrip(store, "a-much-longer-name.md")
+        XCTAssertNotEqual(inserted, "Design", "the colliding title must not be inserted")
+        try assertRoundTrip(store, "design.md")
+    }
+
+    /// Two documents sharing a basename in different folders. One of them wins
+    /// the bare name; the other has to be written as a path.
+    func test_sameBasenameInDifferentFolders() async throws {
+        let (_, store) = try await vault([("A/design.md", "Design"),
+                                          ("Bee/design.md", "Design")])
+        let first = try assertRoundTrip(store, "A/design.md")
+        let second = try assertRoundTrip(store, "Bee/design.md")
+        XCTAssertNotEqual(first, second, "two documents cannot share one target")
+    }
+
+    /// Three-way: same title, same basename, three folders.
+    func test_threeWayCollision() async throws {
+        let (_, store) = try await vault([("A/design.md", "Design"),
+                                          ("Bee/design.md", "Design"),
+                                          ("Cee/design.md", "Design")])
+        let targets = try ["A/design.md", "Bee/design.md", "Cee/design.md"]
+            .map { try assertRoundTrip(store, $0) }
+        XCTAssertEqual(Set(targets).count, 3, "each document needs its own target")
+    }
+
+    /// A title identical to ANOTHER document's title.
+    func test_duplicateTitlesInTheSameFolder() async throws {
+        let (_, store) = try await vault([("one.md", "Design"), ("two.md", "Design")])
+        let a = try assertRoundTrip(store, "one.md")
+        let b = try assertRoundTrip(store, "two.md")
+        XCTAssertNotEqual(a, b)
+    }
+
+    // MARK: - Whitespace
+
+    /// `LinkResolver` keys on the RAW title, so a stored `"Design "` is found
+    /// by neither `Design` (not the key) nor `Design ` (`basename` trims).
+    func test_titleWithATrailingSpace() async throws {
+        let (_, store) = try await vault([("notes.md", "Design "), ("other.md", "Other")])
+        let wanted = try row(store, "notes.md")
+        XCTAssertEqual(wanted.title, "Design ", "frontmatter must preserve the space "
+                       + "or this test is not exercising the case")
+        let inserted = try assertRoundTrip(store, "notes.md")
+        XCTAssertNotEqual(inserted, "Design")
+    }
+
+    func test_titleWithALeadingSpace() async throws {
+        let (_, store) = try await vault([("notes.md", " Design"), ("other.md", "Other")])
+        try assertRoundTrip(store, "notes.md")
+    }
+
+    // MARK: - Punctuation, now in a multi-document vault
+
+    private func assertPunctuation(_ name: String, _ title: String) async throws {
+        let (_, store) = try await vault([("\(name).md", title), ("decoy.md", "Decoy")])
+        try assertRoundTrip(store, "\(name).md")
+        try assertRoundTrip(store, "decoy.md")
     }
 
     func test_plainTitleRoundTrips() async throws {
-        try await assertRoundTrip(name: "design", title: "Design")
+        try await assertPunctuation("design", "Design")
     }
 
     /// `#` starts a fragment — `[[Sprint #3]]` resolves to "Sprint", or nothing.
     func test_titleWithHashRoundTrips() async throws {
-        try await assertRoundTrip(name: "sprint-3", title: "Sprint #3")
+        try await assertPunctuation("sprint-3", "Sprint #3")
     }
 
     /// `|` starts an alias.
     func test_titleWithPipeRoundTrips() async throws {
-        try await assertRoundTrip(name: "either-or", title: "Either|Or")
+        try await assertPunctuation("either-or", "Either|Or")
     }
 
     /// `]]` would truncate the span outright.
     func test_titleWithClosingBracketsRoundTrips() async throws {
-        try await assertRoundTrip(name: "brackets", title: "Odd]]Title")
+        try await assertPunctuation("brackets", "Odd]]Title")
     }
 
     func test_titleWithOpeningBracketsRoundTrips() async throws {
-        try await assertRoundTrip(name: "opening", title: "Odd[[Title")
+        try await assertPunctuation("opening", "Odd[[Title")
     }
 
     /// A `/` in a title would be read as a path suffix, which this file is not.
     func test_titleWithSlashRoundTrips() async throws {
-        try await assertRoundTrip(name: "ratio", title: "A/B Test")
+        try await assertPunctuation("ratio", "A/B Test")
     }
 
     /// `basename` strips a trailing `.md`.
     func test_titleEndingInDotMDRoundTrips() async throws {
-        try await assertRoundTrip(name: "readme-doc", title: "Readme.md")
+        try await assertPunctuation("readme-doc", "Readme.md")
     }
 
     func test_emptyTitleFallsBackToTheFilename() async throws {
-        try await assertRoundTrip(name: "untitled-note", title: "")
+        try await assertPunctuation("untitled-note", "")
     }
 
-    /// The usable case must still prefer the human title over the slug.
-    func test_usableTitleIsPreferredOverTheFilename() async throws {
-        let (_, store) = try await vault([("design-doc", "Design")])
-        let row = try XCTUnwrap(store.rows.first)
-        XCTAssertEqual(LinkCompletionContext.insertableTarget(for: row), "Design")
+    /// A document in a subfolder with an unambiguous title still gets the
+    /// readable target, not the path — verification must not make every link ugly.
+    func test_unambiguousTitleIsPreferredOverThePath() async throws {
+        let (_, store) = try await vault([("Projects/design-doc.md", "Design"),
+                                          ("other.md", "Other")])
+        XCTAssertEqual(try assertRoundTrip(store, "Projects/design-doc.md"), "Design")
+    }
+
+    /// And when the title is unusable but the filename is unambiguous, the
+    /// filename is preferred over the longer path.
+    func test_filenameIsPreferredOverThePath() async throws {
+        let (_, store) = try await vault([("Projects/sprint-3.md", "Sprint #3"),
+                                          ("other.md", "Other")])
+        XCTAssertEqual(try assertRoundTrip(store, "Projects/sprint-3.md"), "sprint-3")
     }
 }
 
@@ -257,6 +352,16 @@ final class LinkCreateOnUnresolvedTests: XCTestCase {
         return (root, store)
     }
 
+    /// A real containment check: the note's directory must resolve to something
+    /// under the vault root, not merely end in a same-named component.
+    private func assertInsideVault(_ url: URL, _ root: URL,
+                                   file: StaticString = #filePath, line: UInt = #line) {
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        XCTAssertTrue(path.hasPrefix(rootPath + "/"),
+                      "\(path) is not inside \(rootPath)", file: file, line: line)
+    }
+
     /// `[[Projects/Design]]` used to fail silently: `create` slugged the whole
     /// thing to `projects/design` and wrote into a folder that did not exist.
     func test_createsTheSubfolderNamedByTheLink() throws {
@@ -264,10 +369,46 @@ final class LinkCreateOnUnresolvedTests: XCTestCase {
         let note = try store.create(title: "Design", in: "Projects")
         XCTAssertEqual(note.path.deletingLastPathComponent().lastPathComponent, "Projects")
         XCTAssertTrue(FileManager.default.fileExists(atPath: note.path.path))
-        XCTAssertTrue(note.path.resolvingSymlinksInPath().path
-            .hasPrefix(root.resolvingSymlinksInPath().path))
+        assertInsideVault(note.path, root)
         // The whole point: the link the user clicked now resolves.
         XCTAssertEqual(store.resolveLink("Projects/Design"), note.path)
+    }
+
+    /// Path arithmetic is not containment. A symlinked folder inside the vault
+    /// — ordinary in Obsidian setups — would otherwise let
+    /// `withIntermediateDirectories` follow it and write outside the root.
+    func test_symlinkedSubfolderCannotEscapeTheVault() throws {
+        let (root, store) = try store()
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-outside-\(UUID())")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("out"),
+                                                   withDestinationURL: outside)
+
+        XCTAssertThrowsError(try store.create(title: "Design", in: "out")) { error in
+            guard case .outsideVault(let url) = error as? LoreError ?? .noVault else {
+                return XCTFail("expected .outsideVault, got \(error)")
+            }
+            // Compared by suffix, not by whole URL: the store canonicalises the
+            // vault root (`/var` → `/private/var`), so the two spellings of the
+            // same directory are not `==`.
+            XCTAssertTrue(url.standardizedFileURL.path.hasSuffix("/out"),
+                          "the error must name the offending directory, got \(url.path)")
+        }
+        XCTAssertTrue(try FileManager.default
+            .contentsOfDirectory(atPath: outside.path).isEmpty,
+                      "nothing may be written through the symlink")
+    }
+
+    /// A symlink that stays inside the vault is not an escape, and must work.
+    func test_symlinkedSubfolderInsideTheVaultIsAllowed() throws {
+        let (root, store) = try store()
+        let real = root.appendingPathComponent("Real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Alias"),
+                                                   withDestinationURL: real)
+        let note = try store.create(title: "Design", in: "Alias")
+        assertInsideVault(note.path, root)
     }
 
     func test_createsNestedSubfolders() throws {
@@ -280,9 +421,7 @@ final class LinkCreateOnUnresolvedTests: XCTestCase {
     func test_subfolderCannotEscapeTheVault() throws {
         let (root, store) = try store()
         let note = try store.create(title: "Design", in: "../../etc")
-        XCTAssertTrue(note.path.resolvingSymlinksInPath().path
-            .hasPrefix(root.resolvingSymlinksInPath().path),
-                      "a link must never write outside the vault: \(note.path.path)")
+        assertInsideVault(note.path, root)
     }
 
     /// `[[Design|why]]` names the document "Design", not "Design|why".

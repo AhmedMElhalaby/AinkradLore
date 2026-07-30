@@ -199,6 +199,11 @@ final class SidebarOperations {
         case .externalChange:
             return "“\(name)” changed outside Lore, so nothing was deleted. "
                 + "Resolve it in the open tab, then delete it again."
+        case .outsideVault(let url):
+            // Not reachable from a delete — `outsideVault` is raised only by
+            // `create` — but the switch is exhaustive on purpose, so this says
+            // something true rather than nothing.
+            return "“\(url.lastPathComponent)” is outside the vault, so nothing was deleted."
         }
     }
 }

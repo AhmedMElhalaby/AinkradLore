@@ -101,9 +101,10 @@ final class LinkCompletionPanel {
     }
 
     private func makePanel(attachedTo window: NSWindow) -> NSPanel {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 260, height: 100),
-                            styleMask: [.borderless, .nonactivatingPanel],
-                            backing: .buffered, defer: false)
+        let panel = NonKeyPanel(contentRect: NSRect(x: 0, y: 0, width: 260, height: 100),
+                                styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
+        panel.becomesKeyOnlyIfNeeded = true
         panel.isFloatingPanel = true
         panel.level = .popUpMenu
         panel.hidesOnDeactivate = true
@@ -114,4 +115,22 @@ final class LinkCompletionPanel {
         window.addChildWindow(panel, ordered: .above)
         return panel
     }
+}
+
+/// A panel that can never take key status.
+///
+/// `NSPanel.canBecomeKey` is `true` even for a borderless panel, so WITHOUT
+/// this a mouse-down on a completion row makes the panel key, the text view
+/// resigns first responder, the resign handler hides the panel — and the row's
+/// action never runs, because the button it belonged to was torn down between
+/// mouse-down and mouse-up. Refusing key status keeps first responder on the
+/// text view for the whole click, so the button completes its tracking and
+/// fires, and the resign handler never runs at all.
+///
+/// Mouse events do not require key status: they are routed to the window under
+/// the cursor. That is what makes a non-key panel clickable but unfocusable,
+/// which is exactly what a completion list wants.
+private final class NonKeyPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }

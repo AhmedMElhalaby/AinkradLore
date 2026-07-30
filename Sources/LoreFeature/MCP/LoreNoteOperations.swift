@@ -339,6 +339,8 @@ struct LoreNoteOperations {
             return "Could not move \(relative(url)) to the Trash: \(reason)"
         case .unsavedEdits(let url, let reason):
             return "Lore declined to delete \(relative(url)): \(reason)"
+        case .outsideVault(let url):
+            return "Lore declined to write \(url.path) because it is outside the vault."
         }
     }
 

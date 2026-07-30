@@ -11,12 +11,17 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// What a picked row inserts. Defaults to the store-blind approximation.
+    let linkTarget: @MainActor (IndexRow) -> String
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
-                onOpenLink: (@MainActor (String) -> Void)? = nil) {
+                onOpenLink: (@MainActor (String) -> Void)? = nil,
+                linkTarget: @escaping @MainActor (IndexRow) -> String
+                    = { LinkCompletionContext.insertableTarget(for: $0) }) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
+        self.linkTarget = linkTarget
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -74,6 +79,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         guard let tv = context.coordinator.textView else { return }
         context.coordinator.completions = completions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.linkTarget = linkTarget
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
@@ -109,6 +115,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         var tokens: HostThemeTokens
         var completions: (@MainActor (String) -> [IndexRow])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        var linkTarget: @MainActor (IndexRow) -> String
+            = { LinkCompletionContext.insertableTarget(for: $0) }
         weak var textView: NSTextView?
         let completionPanel = LinkCompletionPanel()
         /// `nonisolated(unsafe)` only so `deinit` can unregister it. It is
@@ -228,7 +236,7 @@ public struct MarkdownEditor: NSViewRepresentable {
             guard let tv = textView, let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
             }
-            let insertion = LinkCompletionContext.insertableTarget(for: row) + "]]"
+            let insertion = linkTarget(row) + "]]"
             let caretUTF16 = tv.selectedRange().location
             let range = NSRange(location: caretUTF16 - prefix.utf16.count,
                                 length: prefix.utf16.count)

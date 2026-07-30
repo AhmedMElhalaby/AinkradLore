@@ -53,11 +53,19 @@ public struct EditorContext {
     public let completions: @MainActor (String) -> [IndexRow]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// The text to write for a picked completion. Supplied by the shell because
+    /// only the shell can check that the target resolves back to that document
+    /// — see `LoreStore.linkTarget(for:)`. The default is the store-blind
+    /// approximation, which is right for an engine with no link layer.
+    public let linkTarget: @MainActor (IndexRow) -> String
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
-                openLink: @escaping @MainActor (String) -> Void = { _ in }) {
+                openLink: @escaping @MainActor (String) -> Void = { _ in },
+                linkTarget: @escaping @MainActor (IndexRow) -> String
+                    = { LinkCompletionContext.insertableTarget(for: $0) }) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
+        self.linkTarget = linkTarget
     }
 }
