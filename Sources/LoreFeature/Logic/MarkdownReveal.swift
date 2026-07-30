@@ -10,28 +10,39 @@ enum MarkdownReveal {
     /// selection change, and a full AST walk per caret move is exactly the lag
     /// this milestone exists to avoid.
     ///
-    /// Handles CRLF: "\r\n" is one Character but two UTF-16 units, so the scan
-    /// works in UTF-16 units and treats a lone \r as a break too.
+    /// Scans in UTF-16 units but counts LINE TERMINATORS, not units: "\r\n" is
+    /// one terminator (two units), and a lone "\r" or lone "\n" is one
+    /// terminator each. A blank line is two consecutive terminators with
+    /// nothing but spaces/tabs between them — this is what makes a CRLF
+    /// document's ordinary single line breaks NOT count as a blank line.
     static func blocks(in text: String) -> [Range<Int>] {
         let ns = text as NSString
         var result: [Range<Int>] = []
         var start = 0
         var index = 0
-        var blankRun = 0
+        var terminatorRun = 0
 
         while index < ns.length {
             let unit = ns.character(at: index)
-            if unit == 0x0A || unit == 0x0D {
-                blankRun += 1
-                if blankRun >= 2 {
-                    if index + 1 > start { result.append(start..<(index + 1)) }
-                    start = index + 1
-                    blankRun = 0
+            if unit == 0x0D || unit == 0x0A {
+                // Consume a full terminator: a lone unit, or a "\r\n" pair.
+                var terminatorEnd = index + 1
+                if unit == 0x0D, terminatorEnd < ns.length, ns.character(at: terminatorEnd) == 0x0A {
+                    terminatorEnd += 1
                 }
+                terminatorRun += 1
+                if terminatorRun >= 2 {
+                    if terminatorEnd > start { result.append(start..<terminatorEnd) }
+                    start = terminatorEnd
+                    terminatorRun = 0
+                }
+                index = terminatorEnd
             } else if unit != 0x20 && unit != 0x09 {
-                blankRun = 0
+                terminatorRun = 0
+                index += 1
+            } else {
+                index += 1
             }
-            index += 1
         }
         if start < ns.length { result.append(start..<ns.length) }
         return result.isEmpty ? [0..<max(ns.length, 0)] : result
