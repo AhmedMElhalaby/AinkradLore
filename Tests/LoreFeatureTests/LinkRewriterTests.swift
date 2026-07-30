@@ -702,11 +702,19 @@ final class FolderRenameTests: XCTestCase {
             atPath: root.appendingPathComponent("projects/Design.md").path))
     }
 
-    /// The third appearance of M1's recurring failure mode: index rows are NOT
-    /// guaranteed canonical (`indexDocument` upserts the caller's URL), and a
-    /// raw-versus-canonical prefix comparison drops such a row from
-    /// `documentMoves` — no rewrite plan, the file still travels with the
-    /// directory, its inbound links break, and nothing is reported.
+    /// The third appearance of M1's recurring failure mode, now impossible to
+    /// reach: `indexDocument` used to upsert the caller's URL verbatim, so a
+    /// document indexed outside a full rescan could sit in the index under a
+    /// non-canonical spelling and be dropped from `documentMoves` by a
+    /// raw-versus-canonical prefix comparison — no rewrite plan, the file still
+    /// travelling with the directory, its inbound links broken, and nothing in
+    /// any report bucket.
+    ///
+    /// Task 8b closed it at the source: indexing via a NON-CANONICAL URL now
+    /// STORES a canonical `documents.path`. This test therefore pins the
+    /// invariant itself as well as the rename outcome — the setup deliberately
+    /// hands `indexDocument` the raw URL and asserts the row came back
+    /// canonical anyway.
     func test_documentIndexedUnderANonCanonicalSpellingIsStillPlannedAndRewritten() async throws {
         let (root, s) = try vault()
         let folder = root.appendingPathComponent("Projects")
@@ -719,16 +727,18 @@ final class FolderRenameTests: XCTestCase {
         try XCTSkipIf(canonicalDesign.path == design.path,
                       "this machine's temp root is already canonical; nothing to mix")
 
-        // Re-index `Design.md` under the RAW spelling, exactly as
-        // `indexDocument` does for any document written outside a full rescan.
-        // `removeFromIndex` drops the canonical row and the links it is the
-        // SOURCE of, so a.md's inbound link (whose target_path is canonical)
-        // survives untouched — this mixes ONLY the row spelling.
+        // Re-index `Design.md` through the RAW spelling — the exact call any
+        // document written outside a full rescan takes. `removeFromIndex` drops
+        // the canonical row and the links it is the SOURCE of, so a.md's inbound
+        // link survives untouched; the only variable is the URL spelling handed
+        // to `indexDocument`.
         try s.coordinator.removeFromIndex(canonicalDesign)
         try s.coordinator.indexDocument(MarkdownEngine.load(design), at: design)
-        XCTAssertTrue(s.rows.contains { $0.path.path == design.path },
-                      "setup failed: no non-canonically-spelled row exists")
-        XCTAssertFalse(s.rows.contains { $0.path.path == canonicalDesign.path })
+        // THE INVARIANT: the raw URL went in, a canonical row came out.
+        XCTAssertTrue(s.rows.contains { $0.path.path == canonicalDesign.path },
+                      "indexDocument stored a non-canonical documents.path")
+        XCTAssertFalse(s.rows.contains { $0.path.path == design.path },
+                       "a non-canonical spelling reached documents.path")
 
         let plan = s.plan(renameFolder: folder, to: "Work")
         XCTAssertEqual(plan.documentMoves.count, 1,

@@ -85,12 +85,14 @@ extension LoreStore {
         } catch {
             throw LoreError.trashFailed(row.path, error.localizedDescription)
         }
-        // Both spellings: rows written by `indexDocument` carry the caller's
-        // path, rows written by a full rescan carry the canonical one, and
-        // `remove(path:)` matches exactly.
-        try? coordinator.removeFromIndex(row.path)
-        if row.path != path { try? coordinator.removeFromIndex(path) }
-        forgetOpenMTime(row.path)
+        // One spelling is now enough, and this is why: every path in the index
+        // is canonical by invariant (see `LoreIndex.canonical(_:)`), and
+        // `remove(path:)` canonicalizes its argument, so `row.path` and `path`
+        // address the same row. `forgetOpenMTime` keys through
+        // `LoreStore.pathKey` for the same reason. The previous dual-spelling
+        // calls were a workaround for `indexDocument` storing the caller's URL
+        // verbatim — that hole is closed.
+        try? coordinator.removeFromIndex(path)
         forgetOpenMTime(path)
         return inbound
     }

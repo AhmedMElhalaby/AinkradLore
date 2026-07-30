@@ -14,7 +14,18 @@ public final class LoreStore {
     /// The rename applier lives in its own file to keep this one under the
     /// 500-line ceiling.
     let coordinator: VaultIndexCoordinator
-    private var openMTimes: [URL: Date] = [:]
+    /// mtime baselines for the legacy note API, keyed by CANONICAL path string
+    /// (`pathKey`), never by a raw `URL`.
+    ///
+    /// Keyed raw, `transferOpenMTime` — which both `apply` paths call with
+    /// CANONICAL URLs — found no entry for a note whose baseline had been stored
+    /// under the caller's raw `note.path`, silently no-opped, and left
+    /// `externalChangeDetected(for:)` with no baseline. That returns `false`,
+    /// which turns `save`'s external-change guard OFF for exactly the note that
+    /// was just renamed: precisely the data loss `transferOpenMTime`'s own doc
+    /// comment says it exists to prevent. One key function on both sides is what
+    /// makes that unrepresentable.
+    private var openMTimes: [String: Date] = [:]
 
     private static let defaultFolderKey = "defaultNoteFolder"
 
@@ -142,7 +153,11 @@ public final class LoreStore {
     public func open(_ row: IndexRow) { open(url: row.path) }
 
     public func open(url: URL) {
-        if let existing = tabs.first(where: { $0.url == url }) {
+        // Canonical on both sides. Compared raw, opening the already-open
+        // `/tmp/v/a.md` as `/private/tmp/v/a.md` (or via a canonical `row.path`)
+        // produced a SECOND session on the same file, each with its own mtime
+        // baseline and its own debounced autosave racing the other.
+        if let existing = tabs.first(where: { Self.pathKey($0.url) == Self.pathKey(url) }) {
             selectedTab = existing
             return
         }
@@ -246,7 +261,7 @@ public final class LoreStore {
     public func load(_ row: IndexRow) throws -> Note {
         let text = try String(contentsOf: row.path, encoding: .utf8)
         let note = Frontmatter.parse(text, path: row.path)
-        openMTimes[row.path] = try mtime(of: row.path)
+        openMTimes[Self.pathKey(row.path)] = try mtime(of: row.path)
         return note
     }
 
@@ -264,7 +279,7 @@ public final class LoreStore {
                         created: now, updated: now, body: "")
         try Frontmatter.serialize(note).write(to: url, atomically: true, encoding: .utf8)
         try coordinator.indexDocument(MarkdownEngine.load(url), at: url)
-        openMTimes[url] = try mtime(of: url)
+        openMTimes[Self.pathKey(url)] = try mtime(of: url)
         return note
     }
 
@@ -297,28 +312,31 @@ public final class LoreStore {
 
         try Frontmatter.serialize(updated).write(to: note.path, atomically: true, encoding: .utf8)
         try coordinator.indexDocument(MarkdownEngine.load(note.path), at: note.path)
-        openMTimes[note.path] = try mtime(of: note.path)
+        openMTimes[Self.pathKey(note.path)] = try mtime(of: note.path)
     }
 
     /// Drop a deleted document from the legacy note API's mtime map. Left
     /// behind, the entry is keyed by a path that no longer exists — harmless
     /// until a file reappears at that exact path, at which point `save`
     /// compares against a baseline from a different document.
-    func forgetOpenMTime(_ url: URL) { openMTimes[url] = nil }
+    func forgetOpenMTime(_ url: URL) { openMTimes[Self.pathKey(url)] = nil }
 
     /// Follow a rename in the legacy note API's mtime map. Left stale, the
     /// entry is keyed by a path that no longer exists, so
     /// `externalChangeDetected(for:)` finds no baseline for the renamed note
     /// and returns false — turning `save`'s external-change guard off for it.
+    /// Both keys go through `pathKey`, so the canonical URLs the rename paths
+    /// pass in match a baseline stored from a raw `note.path`.
     func transferOpenMTime(from old: URL, to new: URL) {
-        guard let known = openMTimes[old] else { return }
-        openMTimes[old] = nil
-        openMTimes[new] = known
+        guard let known = openMTimes[Self.pathKey(old)] else { return }
+        openMTimes[Self.pathKey(old)] = nil
+        openMTimes[Self.pathKey(new)] = known
     }
 
     /// True if the file changed on disk since we last loaded/saved it.
     public func externalChangeDetected(for note: Note) -> Bool {
-        guard let known = openMTimes[note.path], let disk = try? mtime(of: note.path) else { return false }
+        guard let known = openMTimes[Self.pathKey(note.path)],
+              let disk = try? mtime(of: note.path) else { return false }
         return disk > known
     }
 

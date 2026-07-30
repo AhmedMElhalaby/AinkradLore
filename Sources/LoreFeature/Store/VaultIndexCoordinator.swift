@@ -32,6 +32,14 @@ public final class VaultIndexCoordinator {
     }
 
     public func activate(root: URL) throws {
+        // CANONICAL ON WRITE. `vaultRoot` is stored canonically and is never the
+        // caller's spelling: it seeds `scanVault`'s enumerator (so every indexed
+        // path derives from it) and it is the prefix `LinkRewriter` strips to
+        // compute vault-relative link targets. Stored raw, a vault under `/tmp`
+        // or `/var` — which is every test vault, and some real ones — put a
+        // second spelling of every path into circulation. See the invariant on
+        // `LoreIndex.canonical(_:)`.
+        let root = Self.canonical(root)
         vaultRoot = root
         index = try LoreIndex(path: indexPath)
         // Paint immediately from whatever the index already holds — a reopen
@@ -136,6 +144,14 @@ public final class VaultIndexCoordinator {
     /// plaintext is the point: an unclaimed row must never match a full-text
     /// search for content nobody parsed.
     nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
+        // CANONICAL ON WRITE, part 1: the enumerator builds every URL it yields
+        // by appending to the URL it was given, so canonicalizing the root ONCE
+        // here makes every `IndexEntry.url` below canonical — without a
+        // `realpath(3)` per file. `activate` already stores a canonical
+        // `vaultRoot`, so in production this is a no-op; it is here because
+        // `scanVault` is also called directly (tests, `rebuild()`) and the
+        // invariant must not depend on which door the caller came through.
+        let root = Self.canonical(root)
         var entries: [IndexEntry] = []
         // Only components BELOW the root are ours to judge. Testing the
         // absolute path would make a vault under any dot-prefixed ancestor —
@@ -193,6 +209,12 @@ public final class VaultIndexCoordinator {
         }
         // Resolution is a second pass because a link can point at any document
         // in the vault, including one the enumerator has not reached yet.
+        //
+        // CANONICAL ON WRITE, part 2: `LinkResolver` returns one of the URLs it
+        // was given, and every `entry.url` here is canonical (part 1) — so every
+        // `ResolvedLink.targetPath`, and therefore every `links.target_path`
+        // row, is canonical too. That is what makes `backlinks`,
+        // `inboundLinks` and `inboundLinkCount` truthful.
         let resolver = LinkResolver(documents: entries.map {
             (url: $0.url, title: $0.payload.title, aliases: $0.payload.aliases)
         })
@@ -269,7 +291,10 @@ public final class VaultIndexCoordinator {
     /// returns `url` untouched — so a caller canonicalizing a rename
     /// DESTINATION must canonicalize its existing parent directory and
     /// re-append the last component (see `LoreStore.canonicalizingDestination`).
-    static func canonical(_ url: URL) -> URL {
+    /// `nonisolated` because the invariant is enforced off the main actor too:
+    /// `scanVault` runs in a detached task, and `LoreIndex` (a `Sendable` type
+    /// used from that task) routes every stored path through here.
+    nonisolated static func canonical(_ url: URL) -> URL {
         var buffer = [Int8](repeating: 0, count: Int(PATH_MAX))
         guard realpath(url.path, &buffer) != nil else { return url }
         return URL(fileURLWithPath: String(cString: buffer))
@@ -315,11 +340,24 @@ public final class VaultIndexCoordinator {
     /// for a whole-vault walk on every save.
     func indexDocument(_ engine: any DocumentEngine, at url: URL) throws {
         guard let index else { throw LoreError.noVault }
+        // CANONICAL ON WRITE, part 3: this was THE hole. `indexDocument` upserted
+        // the caller's URL verbatim, so a save routed through a `/tmp`-spelled
+        // URL wrote a non-canonical `documents.path` AND non-canonical
+        // `links.target_path` rows pointing at it — after which every read
+        // (which canonicalizes) matched nothing for that document, silently.
+        // Canonicalizing here means the `LinkResolver` below, the upserted row
+        // and the resolved link targets are all one spelling.
+        let url = Self.canonical(url)
         let type = type(of: engine).identifier
         let payload = engine.indexPayload
         // Exclude the STALE row for this same document (if it already exists in
         // `rows`): otherwise its old title/alias keys would stay resolvable
         // until the next full rescan, alongside the fresh keys appended below.
+        //
+        // Both sides are canonical: `rows` come from `LoreIndex`, which stores
+        // only canonical paths, and `url` was canonicalized above. Compared raw
+        // (as it was) the filter failed to exclude a row spelled differently
+        // from the incoming URL, and the old title/alias stayed resolvable.
         var documents = rows.filter { $0.path != url }
             .map { (url: $0.path, title: $0.title, aliases: $0.aliases) }
         documents.append((url: url, title: payload.title, aliases: payload.aliases))

@@ -51,7 +51,12 @@ public final class LoreIndex: @unchecked Sendable {
     /// Bump whenever the schema changes. On mismatch the file is deleted and
     /// rebuilt from disk — safe precisely because the index is derived state,
     /// so there is no migration SQL to get wrong.
-    static let schemaVersion: Int32 = 3
+    ///
+    /// 4: every stored path is CANONICAL (see `Self.canonical`). A version-3
+    /// index may hold rows written under a non-canonical spelling; there is no
+    /// migration to write, because the whole file is discarded and rebuilt
+    /// canonically on the next `activate`.
+    static let schemaVersion: Int32 = 4
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -121,6 +126,34 @@ public final class LoreIndex: @unchecked Sendable {
         }
     }
 
+    // MARK: - The canonical-path invariant
+
+    /// **INVARIANT: every path stored in, or looked up from, this index is
+    /// canonical** — `realpath(3)`-resolved, via `VaultIndexCoordinator.canonical`.
+    /// That covers `documents.path`, `links.source_path` and
+    /// `links.target_path`, and every read argument below.
+    ///
+    /// This is the LAST line of defence, not the only one: `activate`,
+    /// `scanVault` and `indexDocument` all canonicalize upstream so that the
+    /// in-memory `rows` (and every `LinkResolver` built from them) carry one
+    /// spelling too. Enforcing it here as well is what makes the invariant a
+    /// property of the STORE rather than a discipline every future write path
+    /// has to remember.
+    ///
+    /// Why it has to be an invariant: macOS exposes the same file as both
+    /// `/tmp/x` and `/private/tmp/x`, and `URL.resolvingSymlinksInPath()`
+    /// deliberately leaves `/tmp`, `/var` and `/etc` alone (Apple's documented
+    /// exception). Storing one spelling and comparing against the other makes
+    /// an exact-match SQL predicate silently return nothing — which in this
+    /// milestone has meant an empty backlinks pane, an under-reported
+    /// "N notes link here" warning before a delete, and a rename that dropped
+    /// every edit. All three looked like "there is nothing to do".
+    ///
+    /// **If you add a write path to this file, route its paths through here.**
+    private static func canonical(_ url: URL) -> String {
+        VaultIndexCoordinator.canonical(url).path
+    }
+
     // MARK: - Property encoding
 
     // ASCII unit/record separators rather than JSON: property values are raw
@@ -156,6 +189,10 @@ public final class LoreIndex: @unchecked Sendable {
     }
 
     private static func write(_ entry: IndexEntry, into db: Database) throws {
+        // The canonical-path invariant is enforced HERE, at the single function
+        // every `documents` and `links` row passes through (`upsert` and
+        // `replaceAll` both delegate to it). See `canonical(_:)` above.
+        let path = canonical(entry.url)
         try db.execute(sql: """
             INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties)
             VALUES(?,?,?,?,?,?,?,?,?)
@@ -164,25 +201,25 @@ public final class LoreIndex: @unchecked Sendable {
                 aliases=excluded.aliases,
                 updated=excluded.updated, plaintext=excluded.plaintext,
                 type=excluded.type, properties=excluded.properties;
-        """, arguments: [entry.url.path, entry.payload.id ?? entry.url.path, entry.payload.title,
+        """, arguments: [path, entry.payload.id ?? path, entry.payload.title,
                          entry.payload.tags.joined(separator: ","),
                          entry.payload.aliases.joined(separator: ","),
                          entry.updated.timeIntervalSince1970,
                          entry.payload.plaintext, entry.type,
                          encode(entry.payload.properties)])
         let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
-                                       arguments: [entry.url.path])
+                                       arguments: [path])
         try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
         try db.execute(sql: "INSERT INTO documents_fts(rowid,title,plaintext) VALUES(?,?,?)",
                        arguments: [rowid, entry.payload.title, entry.payload.plaintext])
         try db.execute(sql: "DELETE FROM links WHERE source_path = ?",
-                       arguments: [entry.url.path])
+                       arguments: [path])
         for link in entry.resolvedLinks {
             try db.execute(sql: """
                 INSERT INTO links(source_path, raw_target, target_path, is_embed)
                 VALUES(?,?,?,?);
-            """, arguments: [entry.url.path, link.rawTarget,
-                             link.targetPath?.path, link.isEmbed ? 1 : 0])
+            """, arguments: [path, link.rawTarget,
+                             link.targetPath.map(canonical), link.isEmbed ? 1 : 0])
         }
     }
 
@@ -195,7 +232,10 @@ public final class LoreIndex: @unchecked Sendable {
     /// rescan is now fast enough to be unnoticeable.
     public func replaceAll(with entries: [IndexEntry]) throws {
         try dbQueue.write { db in
-            let keep = Set(entries.map(\.url.path))
+            // Canonical, because that is the spelling `Self.write` stores: a raw
+            // keep-set would fail to match the row it just wrote and prune it
+            // again in the same transaction.
+            let keep = Set(entries.map { Self.canonical($0.url) })
             for entry in entries {
                 try Self.write(entry, into: db)
             }
@@ -212,13 +252,14 @@ public final class LoreIndex: @unchecked Sendable {
         }
     }
 
-    public func remove(path: URL) throws {
+    public func remove(path url: URL) throws {
+        let path = Self.canonical(url)
         try dbQueue.write { db in
             let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
-                                           arguments: [path.path])
+                                           arguments: [path])
             try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
-            try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path.path])
-            try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path.path])
+            try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
+            try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
         }
     }
 
@@ -299,7 +340,7 @@ public final class LoreIndex: @unchecked Sendable {
                 JOIN links l ON l.source_path = d.path
                 WHERE l.target_path = ?
                 ORDER BY d.updated DESC;
-            """, arguments: [target.path]).map(Self.row)
+            """, arguments: [Self.canonical(target)]).map(Self.row)
         }
     }
 
@@ -314,7 +355,7 @@ public final class LoreIndex: @unchecked Sendable {
             try Row.fetchAll(db, sql: """
                 SELECT DISTINCT source_path, raw_target FROM links
                 WHERE target_path = ?;
-            """, arguments: [target.path]).map { r -> (sourceFile: URL, rawTarget: String) in
+            """, arguments: [Self.canonical(target)]).map { r -> (sourceFile: URL, rawTarget: String) in
                 let source: String = r["source_path"]
                 let raw: String = r["raw_target"]
                 return (sourceFile: URL(fileURLWithPath: source), rawTarget: raw)
@@ -329,7 +370,7 @@ public final class LoreIndex: @unchecked Sendable {
             try String.fetchAll(db, sql: """
                 SELECT raw_target FROM links
                 WHERE source_path = ? AND target_path IS NULL;
-            """, arguments: [source.path])
+            """, arguments: [Self.canonical(source)])
         }
     }
 
@@ -338,7 +379,7 @@ public final class LoreIndex: @unchecked Sendable {
             try Row.fetchAll(db, sql: """
                 SELECT raw_target, target_path, is_embed FROM links
                 WHERE source_path = ?;
-            """, arguments: [source.path]).map { r in
+            """, arguments: [Self.canonical(source)]).map { r in
                 ResolvedLink(rawTarget: r["raw_target"],
                              targetPath: (r["target_path"] as String?).map {
                                  URL(fileURLWithPath: $0)
