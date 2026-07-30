@@ -66,10 +66,11 @@ public struct LinkSpan: Equatable, Sendable {
 /// Extracts links from markdown body text.
 ///
 /// Deliberately code-aware: a `[[link]]` inside a fenced block or inline code
-/// is documentation ABOUT a link, not a link. `MarkdownEngine.outline(of:)`
-/// has this gap and produces phantom headings from `#` comments in code; a
-/// phantom LINK is worse, because it appears in another document's backlinks
-/// and survives into rename rewriting.
+/// is documentation ABOUT a link, not a link. The line-scanning outline this
+/// module used to have (`MarkdownEngine.outline(of:)`, deleted in M2a Task 7)
+/// had exactly this gap and produced phantom headings from `#` comments in
+/// code; a phantom LINK would be worse, because it appears in another
+/// document's backlinks and survives into rename rewriting.
 public enum LinkParser {
     public static func links(in body: String) -> [DocumentLink] {
         spans(in: body).map(\.link)
@@ -82,106 +83,138 @@ public enum LinkParser {
     /// graph covers — no second, subtly different notion of "inside a code
     /// block" to keep in step.
     public static func spans(in body: String) -> [LinkSpan] {
-        var found: [LinkSpan] = []
-        var fence: (char: Character, length: Int)?
-        // Character offset of the current line's first character. Maintained
-        // incrementally: computing it with `distance(from:to:)` per line would
-        // make the scan quadratic in document length.
-        var lineStart = 0
+        spans(in: body, codeRegions: nil)
+    }
+
+    /// - Parameter codeRegions: regions the caller has ALREADY computed for
+    ///   this exact string, saving the parse this scan would otherwise do.
+    ///   `nil` — every existing caller — parses as before. The grammar, the
+    ///   kind filter and the results are identical either way; this is a
+    ///   work-saving injection point, not a behaviour switch. Passing regions
+    ///   computed for a DIFFERENT string (a pre-normalisation one, say) would
+    ///   misplace suppression, which is why `MarkdownDocumentModel` withholds
+    ///   them for CRLF documents.
+    static func spans(in body: String, codeRegions: [CodeRegion]?) -> [LinkSpan] {
+        spans(in: body, suppression: codeRegions.map {
+            CodeRegionIndex(regions: $0, kinds: MarkdownDocumentModel.linkSuppressingKinds)
+        })
+    }
+
+    /// The same injection point, pre-indexed. Callers that hold a
+    /// `MarkdownDocumentModel` already have the index and should not rebuild it.
+    static func spans(in body: String, suppression: CodeRegionIndex?) -> [LinkSpan] {
+        scan(body, suppression: suppression).spans
+    }
+
+    /// The scan, plus the character→UTF-16 table it had to build anyway.
+    ///
+    /// Exposed because `WikilinkSpanBuilder` needs exactly that table to convert
+    /// the spans it gets back, and building a second identical one was a second
+    /// `count`-sized allocation and a second grapheme walk per parse.
+    ///
+    /// - Returns: `normalised` is true when the body contained CRLF and the
+    ///   offsets therefore describe the NORMALISED string rather than `body` —
+    ///   the caller must not use the table against `body`'s UTF-16 offsets.
+    static func scan(_ body: String, suppression: CodeRegionIndex?)
+        -> (spans: [LinkSpan], offsets: CharacterOffsetMap, normalised: Bool) {
         // CRLF documents — Windows-authored vaults, sync clients, `core.autocrlf`
         // checkouts — do not split on `"\n"`: Swift treats `"\r\n"` as ONE
         // Character, which is not equal to `"\n"`, so the whole file scans as a
         // single line and every fence goes undetected. Normalising first fixes
         // that, and it is offset-SAFE precisely because `"\r\n"` is one
         // Character: every span offset still indexes the caller's own string.
-        let text = body.contains("\r\n")
+        let normalised = body.contains("\r\n")
+        let text = normalised
             ? body.replacingOccurrences(of: "\r\n", with: "\n") : body
 
+        // Code regions now come from the ONE markdown parse, not from a second
+        // hand-written fence tracker living here. The bracket grammar below is
+        // unchanged; only the answer to "is this position inside code?" moved.
+        //
+        // The model is built from `text` — the SAME string the character
+        // offsets below index — so its UTF-16 offsets and our character offsets
+        // describe one string, and `utf16OffsetForCharacterOffset` is the only
+        // place the two units meet.
+        // Injected regions, when the caller has them, describe this same
+        // string — see the parameter's note. Otherwise parse.
+        // `init(body:)`, never `init(fullText:)`. Every caller of this scan
+        // hands over a body already: `MarkdownEngine` passes `note.body`,
+        // `LinkRewriter` passes the slice past `Frontmatter.bodyOffset`, and
+        // `WikilinkSpanBuilder` passes the string its model already indexes.
+        // A frontmatter scan HERE would fire on any body opening with an `---`
+        // rule and drop that whole region from the suppression index — turning
+        // a `[[link]]` documented inside a fence there into a real graph edge
+        // that a rename then rewrites, in a file the user never opened.
+        let index = suppression ?? MarkdownDocumentModel(body: text).linkSuppressionIndex
+        let utf16OffsetForCharacterOffset = CharacterOffsetMap.make(for: text)
+        //
+        // FENCED and INLINE code only. Indented code blocks, HTML blocks and
+        // HTML comments deliberately do NOT suppress: the old hand-written
+        // scanner recognised only ``` / ~~~ fences and inline spans, and
+        // widening the net deletes links from the graph. A CommonMark type-6
+        // HTML block runs to the next BLANK line, so `text\n<div>\n[[A]]\n
+        // </div>\ntext [[R]]` swallows `[[R]]` — a link in an ordinary prose
+        // line — which a rename would then silently stop rewriting.
+        //
+        // The kind filter now lives in the INDEX, applied when it was built —
+        // `MarkdownDocumentModel.linkSuppressionIndex`, or the conversion in
+        // `spans(in:codeRegions:)` above. Same set, same answer, O(log n).
+        let isInsideCode: (Int) -> Bool = { characterOffset in
+            guard characterOffset >= 0,
+                  characterOffset < utf16OffsetForCharacterOffset.count else { return false }
+            return index.contains(utf16OffsetForCharacterOffset[characterOffset])
+        }
+
+        var found: [LinkSpan] = []
+        // Character offset of the current line's first character. Maintained
+        // incrementally: computing it with `distance(from:to:)` per line would
+        // make the scan quadratic in document length.
+        var lineStartCharacterOffset = 0
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            defer { lineStart += line.count + 1 }   // +1 for the "\n" removed by split
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let indent = leadingSpaceCount(line)
-            if let open = fence {
-                // A closing fence must use the same character, be at least as
-                // long as the opener, be indented no more than 3 spaces, and
-                // (per CommonMark) carry no info string of its own.
-                if indent <= 3, let run = fenceRun(trimmed, char: open.char),
-                   run.length >= open.length, run.rest.isEmpty {
-                    fence = nil
-                }
-                continue
-            }
-            if indent <= 3, let run = fenceOpener(trimmed) {
-                fence = (run.char, run.length)
-                continue
-            }
-            found.append(contentsOf: spans(inLine: String(line), offsetBy: lineStart))
+            // +1 for the "\n" removed by split
+            defer { lineStartCharacterOffset += line.count + 1 }
+            found.append(contentsOf: spans(inLine: String(line),
+                                           offsetBy: lineStartCharacterOffset,
+                                           isInsideCode: isInsideCode))
         }
-        return found
+        return (found, utf16OffsetForCharacterOffset, normalised)
     }
 
-    private static func leadingSpaceCount(_ line: Substring) -> Int {
-        var count = 0
-        for char in line {
-            if char == " " { count += 1 } else { break }
-        }
-        return count
-    }
-
-    /// A fence line is a run of 3+ backticks or 3+ tildes, per CommonMark.
-    /// Returns the run's character, its length, and whatever follows it
-    /// (the info string, if any).
-    private static func fenceRun(_ trimmed: String, char: Character) -> (length: Int, rest: Substring)? {
-        guard trimmed.first == char else { return nil }
-        let run = trimmed.prefix(while: { $0 == char })
-        guard run.count >= 3 else { return nil }
-        return (run.count, trimmed[run.endIndex...])
-    }
-
-    /// ``` or ~~~ (three or more), per CommonMark. An info string (e.g.
-    /// ```swift) is permitted after the opener only.
-    private static func fenceOpener(_ trimmed: String) -> (char: Character, length: Int)? {
-        for marker: Character in ["`", "~"] {
-            if let run = fenceRun(trimmed, char: marker) { return (marker, run.length) }
-        }
-        return nil
-    }
-
-    private static func spans(inLine line: String, offsetBy base: Int) -> [LinkSpan] {
+    /// - Parameter isInsideCode: takes an ABSOLUTE character offset into the
+    ///   scanned string (not a line-relative one).
+    private static func spans(inLine line: String, offsetBy base: Int,
+                              isInsideCode: (Int) -> Bool) -> [LinkSpan] {
         var result: [LinkSpan] = []
         let chars = Array(line)
         var i = 0
         while i < chars.count {
-            // Inline code spans swallow everything to the closing backtick —
-            // but only when a closer actually exists later on the line. A
-            // dangling/unbalanced backtick is ordinary text, not code, so
-            // scanning must continue past it rather than eating the rest of
-            // the line (which would silently drop any link that follows).
-            if chars[i] == "`" {
-                var j = i + 1
-                while j < chars.count, chars[j] != "`" { j += 1 }
-                if j < chars.count {
-                    i = j + 1
-                    continue
-                }
-                i += 1
-                continue
-            }
             if chars[i] == "[", i + 1 < chars.count, chars[i + 1] == "[" {
                 let isEmbed = i > 0 && chars[i - 1] == "!"
                 if let close = closingBrackets(chars, from: i + 2) {
                     let inner = String(chars[(i + 2)..<close])
-                    if let span = wikilink(inner, isEmbed: isEmbed, innerStart: i + 2,
-                                           offsetBy: base) {
-                        result.append(span)
+                    let span = wikilink(inner, isEmbed: isEmbed, innerStart: i + 2,
+                                        offsetBy: base)
+                    if let span, isInsideCode(span.targetRange.lowerBound) {
+                        // Suppressed: step ONE character rather than past the
+                        // closing brackets. A `[[` that opened inside inline
+                        // code can pair with a `]]` belonging to a REAL link
+                        // later on the line (`` `[[x` [[Real]] ``); jumping
+                        // past `close` would swallow that real link.
+                        i += 1
+                        continue
                     }
+                    if let span { result.append(span) }
                     i = close + 2
                     continue
                 }
             }
             if chars[i] == "[", let found = markdownLink(chars, from: i, offsetBy: base) {
-                result.append(found.span)
-                i = found.end
+                if !isInsideCode(found.span.targetRange.lowerBound) {
+                    result.append(found.span)
+                    i = found.end
+                    continue
+                }
+                i += 1
                 continue
             }
             i += 1
@@ -247,5 +280,63 @@ public enum LinkParser {
                          targetRange: range(of: target, within: slice,
                                             startingAt: base + i + 2)),
                 j + 1)
+    }
+}
+
+/// Character offset → UTF-16 offset for one string.
+///
+/// `LinkSpan.targetRange` is in CHARACTERS (it indexes the string handed to
+/// `LinkParser`); `MarkdownDocumentModel` answers in UTF-16 units. Mixing them
+/// silently misplaces every span in a document containing an emoji, so the two
+/// units meet here and nowhere else.
+///
+/// The table used to be built unconditionally: `count + 1` `Int`s, allocated and
+/// grapheme-walked on EVERY parse, twice over (once here, once in
+/// `WikilinkSpanBuilder`). For an all-ASCII string the map is the identity, and
+/// prose notes are overwhelmingly all-ASCII in the relevant sense, so the common
+/// case now allocates nothing at all.
+///
+/// The ASCII test is `utf8.count == utf16.count` — true exactly when every
+/// scalar is < U+0080 — PLUS the absence of any CR. The CR exclusion is not
+/// paranoia: `"\r\n"` is ASCII in both counts but is ONE `Character` carrying
+/// TWO UTF-16 units, which is precisely the case the identity map gets wrong.
+/// Both checks read contiguous code units, so neither pays for grapheme
+/// breaking.
+enum CharacterOffsetMap: Sendable {
+    /// Character offset equals UTF-16 offset. Payload is the character count.
+    case identity(characters: Int)
+    case table([Int])
+
+    static func make(for text: String) -> CharacterOffsetMap {
+        let utf16Count = text.utf16.count
+        if text.utf8.count == utf16Count, !text.utf8.contains(0x0D) {
+            return .identity(characters: utf16Count)
+        }
+        var offsets: [Int] = []
+        offsets.reserveCapacity(text.count + 1)
+        var running = 0
+        for character in text {
+            offsets.append(running)
+            running += character.utf16.count
+        }
+        offsets.append(running)
+        return .table(offsets)
+    }
+
+    /// Addressable offsets: one per character, plus a trailing entry so an END
+    /// offset can be looked up. Unchanged from the array it replaced, which is
+    /// what the callers' `< count` bounds checks are written against.
+    var count: Int {
+        switch self {
+        case .identity(let characters): return characters + 1
+        case .table(let table): return table.count
+        }
+    }
+
+    subscript(characterOffset: Int) -> Int {
+        switch self {
+        case .identity: return characterOffset
+        case .table(let table): return table[characterOffset]
+        }
     }
 }

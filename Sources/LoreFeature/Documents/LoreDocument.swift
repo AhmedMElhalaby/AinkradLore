@@ -6,7 +6,26 @@ import AinkradAppKit
 public struct OutlineEntry: Sendable, Equatable {
     public let level: Int
     public let text: String
-    public init(level: Int, text: String) { self.level = level; self.text = text }
+    /// UTF-16 offset of the heading, relative to whatever string the
+    /// PRODUCING engine parsed to build this outline — NOT necessarily the
+    /// on-disk file's full text. There is no runtime check tying this to an
+    /// editor's coordinate space; the contract is exactly "whatever string
+    /// the engine that built this outline handed its scroll-to-offset entry
+    /// point". For `MarkdownEngine` that string is `note.body` — frontmatter
+    /// EXCLUDED — because `MarkdownDocumentEditor` binds the editor's text to
+    /// `engine.note.body` (the title lives in a separate field), so an offset
+    /// counted from a serialized "frontmatter + body" string would be off by
+    /// the frontmatter's length the moment it reached the editor. An engine
+    /// producing offsets against a different string than the one its own
+    /// editor scrolls will misplace every click silently — offset math is
+    /// dropped, never guessed, everywhere else in this codebase; this field
+    /// is the one place a wrong convention would not even fail loudly.
+    /// Defaulted so existing construction sites (tests, other engines) keep
+    /// compiling.
+    public let utf16Offset: Int
+    public init(level: Int, text: String, utf16Offset: Int = 0) {
+        self.level = level; self.text = text; self.utf16Offset = utf16Offset
+    }
 }
 
 /// Everything the shell needs to index a document, supplied BY the engine.
@@ -58,14 +77,33 @@ public struct EditorContext {
     /// — see `LoreStore.linkTarget(for:)`. The default is the store-blind
     /// approximation, which is right for an engine with no link layer.
     public let linkTarget: @MainActor (IndexRow) -> String
+    /// Lets the editor hand the shell a "scroll to this offset" function,
+    /// without the shell reaching into the editor's internals to get one.
+    /// `OutlineSection` lives in `DocumentPane`, a sibling of whatever view
+    /// `makeEditor` returns — not a descendant of it — so this closure is the
+    /// only channel between the two. Defaulted to a no-op so an engine with no
+    /// outline (or no editor that supports scrolling at all) needs no changes.
+    public let registerScrollHandler: @MainActor (@escaping @MainActor (Int) -> Void) -> Void
+    /// The session refuses to write this document, so `onChange` cannot lead
+    /// anywhere: `DocumentSession.markChanged()` returns immediately for a
+    /// read-only session and `saveNow()` throws. An editor uses this to
+    /// withhold affordances that would otherwise PROMISE persistence — today
+    /// the task-checkbox toggle. Defaulted to writable so an engine or a test
+    /// that does not care behaves exactly as before.
+    public let isReadOnly: Bool
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
-                    = { LinkCompletionContext.insertableTarget(for: $0) }) {
+                    = { LinkCompletionContext.insertableTarget(for: $0) },
+                registerScrollHandler: @escaping @MainActor (@escaping @MainActor (Int) -> Void) -> Void
+                    = { _ in },
+                isReadOnly: Bool = false) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
         self.linkTarget = linkTarget
+        self.registerScrollHandler = registerScrollHandler
+        self.isReadOnly = isReadOnly
     }
 }

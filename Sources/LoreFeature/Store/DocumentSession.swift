@@ -53,11 +53,16 @@ public final class DocumentSession: Identifiable {
     private var baseline: Date
     private var saveTask: Task<Void, Never>?
 
-    /// Cached `engine.indexPayload.title`. `indexPayload` is computed, and for
-    /// markdown it scans the whole body to build an outline, so reading it from
-    /// a SwiftUI `body` (a tab label redraws constantly) or per keystroke is a
-    /// real cost. Refreshed only where the title can have changed AND the cost
-    /// is already amortised: load, save, reload.
+    /// Cached `engine.indexTitle`. Reading it from a SwiftUI `body` (a tab
+    /// label redraws constantly) would be a per-frame call, so it is refreshed
+    /// only where the title can have changed: load, save, reload, adoption.
+    ///
+    /// `indexTitle`, NOT `indexPayload.title`: the payload is computed, and for
+    /// markdown building it costs a full AST parse plus a link scan. Every one
+    /// of these four sites wanted a `String`. The save path in particular then
+    /// built the payload AGAIN inside `coordinator.indexDocument` — so a
+    /// debounced autosave of a large note ran the parser four times on the main
+    /// actor. See `DocumentEngine.indexTitle`.
     private var cachedTitle: String
 
     private static let autosaveDelay: Duration = .milliseconds(500)
@@ -72,7 +77,7 @@ public final class DocumentSession: Identifiable {
         self.engine = engine
         self.coordinator = coordinator
         self.baseline = Self.mtime(of: url) ?? .distantPast
-        self.cachedTitle = engine.indexPayload.title
+        self.cachedTitle = engine.indexTitle
         // Same honest-but-temporary type switch as `copyState(from:)`; M3/M4
         // replace both with protocol requirements.
         self.isReadOnly = (engine as? PlainTextEngine)?.isLossilyDecoded == true
@@ -157,7 +162,7 @@ public final class DocumentSession: Identifiable {
         // engine this session already owns rather than swapping the object.
         try copyState(from: fresh)
         baseline = Self.mtime(of: url) ?? .distantPast
-        cachedTitle = engine.indexPayload.title
+        cachedTitle = engine.indexTitle
         conflict = false
         isDirty = false
         lastSaveError = nil
@@ -191,7 +196,7 @@ public final class DocumentSession: Identifiable {
         try engine.save(to: candidate)
         url = candidate
         baseline = Self.mtime(of: candidate) ?? .distantPast
-        cachedTitle = engine.indexPayload.title
+        cachedTitle = engine.indexTitle
         conflict = false
         isDirty = false
         lastSaveError = nil
@@ -237,7 +242,7 @@ public final class DocumentSession: Identifiable {
             throw error
         }
         baseline = Self.mtime(of: url) ?? .distantPast
-        cachedTitle = engine.indexPayload.title
+        cachedTitle = engine.indexTitle
         isDirty = false
         conflict = false
         lastSaveError = nil

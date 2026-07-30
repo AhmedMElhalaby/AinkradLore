@@ -55,6 +55,12 @@ public final class PlainTextEngine: DocumentEngine {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// The filename, so the protocol default's payload construction (which
+    /// copies the whole file's text) is skipped — see `DocumentEngine.indexTitle`.
+    public var indexTitle: String {
+        sourceURL.deletingPathExtension().lastPathComponent
+    }
+
     public var indexPayload: IndexPayload {
         IndexPayload(title: sourceURL.deletingPathExtension().lastPathComponent,
                      plaintext: text)

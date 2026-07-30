@@ -18,5 +18,23 @@ public protocol DocumentEngine: AnyObject {
 
     var indexPayload: IndexPayload { get }
 
+    /// Just the title, without building the rest of the payload.
+    ///
+    /// `DocumentSession` caches the title and refreshes it on load, save,
+    /// reload and copy-adoption — four places that only ever wanted one
+    /// `String`. Routing them through `indexPayload` made each one pay for a
+    /// full markdown parse (outline) plus a link scan, and `save()` paid it a
+    /// SECOND time immediately afterwards inside `indexDocument`. On the main
+    /// actor, 500 ms after the user stops typing.
+    ///
+    /// Defaulted to `indexPayload.title` so no engine is forced to implement
+    /// it; an engine whose title is cheap (both of them, as it happens)
+    /// overrides and the parse disappears.
+    var indexTitle: String { get }
+
     @MainActor func makeEditor(_ ctx: EditorContext) -> AnyView
+}
+
+public extension DocumentEngine {
+    var indexTitle: String { indexPayload.title }
 }
