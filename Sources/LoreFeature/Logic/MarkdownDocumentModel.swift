@@ -137,11 +137,35 @@ struct CodeRangeCollector: MarkupWalker {
     /// "Bare" matters: ` ```text ` does not close a fence, so a fenced block MAY
     /// contain it, and it must not be mistaken for indented code.
     ///
-    /// KNOWN LIMIT: an indented block that opens with an info-string fence line
-    /// and never contains a bare closing run (`"    ```swift\n    [[X]]"`, no
-    /// terminator) still reads as fenced and suppresses. It needs 4-space
-    /// indentation, a fence-shaped first line WITH an info string, and no bare
-    /// fence line anywhere in the block.
+    /// KNOWN LIMIT — an accepted REGRESSION against the old scanner.
+    ///
+    /// An indented block whose first line is fence-shaped WITH an info string,
+    /// and which never contains a line that closes THAT run, still reads as
+    /// fenced and suppresses. The old scanner required `indent <= 3` on the raw
+    /// line, so it saw these as ordinary text and kept the link; we drop it.
+    /// Direction is link rot: the link leaves the graph and a rename stops
+    /// rewriting it. Accepted by the owner — the shapes are rare in prose and
+    /// the alternative risks the fence direction, which is verified sound.
+    ///
+    /// The class is wider than "unterminated". All five measured members, each
+    /// yielding `["X"]` from the old scanner and `[]` from this one:
+    ///
+    ///   1. unterminated:            `"    ```swift\n    [[X]]\n"`
+    ///   2. closer indented further: `"    ```swift\n    [[X]]\n     ```\n"`
+    ///   3. closer SHORTER than the opener:
+    ///                               `"    ````js\n    [[X]]\n    ```\n"`
+    ///   4. closer of the WRONG character:
+    ///                               `"    ~~~x\n    [[X]]\n    ```\n"`
+    ///   5. info line alone:         `"    ```swift\n"` — same misclassification,
+    ///      though it holds no link, so no link is actually lost.
+    ///
+    /// 3 and 4 are worth naming separately: they are not "unterminated" at all —
+    /// they have a closing-looking line that simply does not close the opener's
+    /// run, so `code` never contains a qualifying bare closer.
+    ///
+    /// A block with a MATCHING bare closer is classified correctly and is NOT
+    /// part of this class: `"    ```swift\n    [[X]]\n    ```\n"` keeps `[[X]]`,
+    /// matching the old scanner exactly.
     private func isFenced(at range: NSRange, code: String) -> Bool {
         guard let marker = leadingFenceRun(in: sourceLine(at: range)) else {
             return false

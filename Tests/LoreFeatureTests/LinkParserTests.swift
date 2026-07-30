@@ -327,6 +327,42 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(targets("- a\n  - b\n\n    ~~~\n    [[X]]\n    ~~~\n\n[[R]]"), ["R"])
     }
 
+    /// Deeper list nesting pushes the fence further right again; classification
+    /// must not depend on the depth.
+    func test_fenceIndentedEightByListNestingSuppresses() {
+        XCTAssertEqual(
+            targets("- a\n  - b\n    - c\n\n        ```\n        [[X]]\n        ```\n\n[[R]]"),
+            ["R"])
+        XCTAssertEqual(
+            targets("- a\n  - b\n    - c\n\n        ```\n        [t](X.md)\n        ```\n\n[t2](R.md)"),
+            ["R.md"])
+    }
+
+    // MARK: - Accepted regression: indented blocks with an unclosable fence line
+    //
+    // These SUPPRESS, and the old scanner did not — a link leaves the graph, so
+    // a rename stops rewriting it. Accepted by the owner; see the KNOWN LIMIT
+    // comment on `CodeRangeCollector.isFenced(at:code:)`. Pinned so the class
+    // stays visible and any future change to it is deliberate.
+
+    func test_knownLimit_indentedBlockWithNoMatchingCloserSuppresses() {
+        // 1. unterminated
+        XCTAssertEqual(targets("para\n\n    ```swift\n    [[X]]\n"), [])
+        // 2. closer indented one space further
+        XCTAssertEqual(targets("para\n\n    ```swift\n    [[X]]\n     ```\n"), [])
+        // 3. closer shorter than the opener
+        XCTAssertEqual(targets("para\n\n    ````js\n    [[X]]\n    ```\n"), [])
+        // 4. closer of the wrong character
+        XCTAssertEqual(targets("para\n\n    ~~~x\n    [[X]]\n    ```\n"), [])
+    }
+
+    /// The boundary of that class: give the same block a MATCHING bare closer
+    /// and it is classified correctly again, agreeing with the old scanner.
+    func test_knownLimit_doesNotExtendToBlocksWithAMatchingCloser() {
+        XCTAssertEqual(targets("para\n\n    ```swift\n    [[X]]\n    ```\n\nafter [[R]]"),
+                       ["X", "R"])
+    }
+
     func test_fenceInsideABlockquoteSuppresses() {
         XCTAssertEqual(targets("> ```\n> [[X]]\n> ```\n\n[[R]]"), ["R"])
     }
