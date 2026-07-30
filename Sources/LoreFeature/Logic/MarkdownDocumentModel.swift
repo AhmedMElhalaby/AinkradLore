@@ -28,7 +28,48 @@ public struct CodeRegion: Sendable, Equatable {
     public let kind: CodeRegionKind
 }
 
+/// Counts markdown parses so the editor's caching can be asserted on rather
+/// than asserted about. Test-only: the increment is `#if DEBUG`, so a release
+/// build carries neither the lock nor the call.
+///
+/// Not an actor: `MarkdownDocumentModel.init` is synchronous and `Sendable`, and
+/// making the count `await`-able would change every call site to prove a
+/// property no shipping code reads.
+public enum MarkdownParseCounter {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var stored = 0
+
+    public static var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+
+    public static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        stored = 0
+    }
+
+    static func record() {
+        lock.lock(); defer { lock.unlock() }
+        stored += 1
+    }
+}
+
 public struct MarkdownDocumentModel: Sendable {
+    /// Above this much text, styling covers only the visible range plus a
+    /// margin, re-derived on scroll. The outline and task lists still come from
+    /// a full parse, which happens once per debounce rather than per keystroke.
+    ///
+    /// 256 KB is roughly where applying attributes over the whole storage — not
+    /// the parse — starts to be felt on a keystroke, and it is far above any
+    /// hand-written note in the owner's vault, so ordinary editing never takes
+    /// this path.
+    public static let stylingViewportCap = 256 * 1024
+
+    /// Above this, styling is disabled entirely and the editor says so. A note
+    /// that is slow to type in is worse than one that is plainly styled.
+    public static let stylingHardCap = 2 * 1024 * 1024
+
     public let offsetMap: SourceOffsetMap
 
     /// Every raw-text region, tagged. Ordered as the walk found them.
@@ -80,7 +121,22 @@ public struct MarkdownDocumentModel: Sendable {
     /// no incomplete model to observe — this property always answers fully —
     /// at the cost of recomputing the link scan per access. Callers on a hot
     /// path should hold the result, not the model.
-    public var styleSpans: [StyleSpan] { astStyleSpans + wikilinkSpans }
+    /// Empty above `stylingHardCap`: past that size the honest answer is "this
+    /// document is not styled", not a slow one.
+    public var styleSpans: [StyleSpan] {
+        guard !isOverStylingHardCap else { return [] }
+        return astStyleSpans + wikilinkSpans
+    }
+
+    /// UTF-16 length, which is what every style offset is measured in.
+    public var isOverStylingHardCap: Bool {
+        fullText.utf16.count > Self.stylingHardCap
+    }
+
+    /// True when styling should be limited to the visible range plus a margin.
+    public var isOverStylingViewportCap: Bool {
+        fullText.utf16.count > Self.stylingViewportCap
+    }
 
     /// This model's regions, but only when they are known to describe exactly
     /// the string `LinkParser` will scan.
@@ -97,6 +153,9 @@ public struct MarkdownDocumentModel: Sendable {
     }
 
     public init(fullText: String) {
+        #if DEBUG
+        MarkdownParseCounter.record()
+        #endif
         let bodyStart = Frontmatter.bodyOffset(in: fullText)
         let body = String(fullText.dropFirst(bodyStart))
         let bodyUTF16Offset = (String(fullText.prefix(bodyStart)) as NSString).length

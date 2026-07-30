@@ -70,9 +70,29 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.observeScrolling(of: scroll.contentView)
 
         context.coordinator.textView = tv
+        context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
         tv.string = text
         context.coordinator.applyStyles()
         return scroll
+    }
+
+    /// A floating label, hidden unless the document is over the hard cap. Added
+    /// to the SCROLL view rather than the text view so it stays put while the
+    /// document scrolls under it, and so it never becomes part of the text.
+    private static func addStylingNotice(to scroll: NSScrollView,
+                                         tokens: HostThemeTokens) -> NSTextField {
+        let notice = NSTextField(labelWithString:
+            "Styling off — document over \(MarkdownDocumentModel.stylingHardCap / (1024 * 1024)) MB")
+        notice.font = .systemFont(ofSize: 11)
+        notice.textColor = NSColor(tokens.accentSecondary)
+        notice.isHidden = true
+        notice.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(notice)
+        NSLayoutConstraint.activate([
+            notice.trailingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: -20),
+            notice.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 6)
+        ])
+        return notice
     }
 
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
@@ -118,7 +138,27 @@ public struct MarkdownEditor: NSViewRepresentable {
         var linkTarget: @MainActor (IndexRow) -> String
             = { LinkCompletionContext.insertableTarget(for: $0) }
         weak var textView: NSTextView?
+        /// Shown only above the hard cap — the editor saying, in words, that it
+        /// has stopped styling rather than leaving the user to wonder.
+        weak var stylingNotice: NSTextField?
         let completionPanel = LinkCompletionPanel()
+
+        /// Long enough that a burst of typing is one parse, short enough that
+        /// the picture settles within a pause the user does not notice.
+        static let parseDebounce: TimeInterval = 0.15
+
+        /// The spans on screen and the string they describe. See
+        /// `MarkdownStyleCache` for why this is not recomputed per call.
+        private(set) var styleCache = MarkdownStyleCache()
+        private var parseTimer: Timer?
+        private var lastViewportWindow: NSRange?
+        /// The edit `shouldChangeTextIn` announced, consumed by the very next
+        /// `textDidChange`. AppKit always pairs them, and anything that edits
+        /// the storage WITHOUT the pair leaves the cache describing a stale
+        /// string, which `applyStyles()` then repairs with a real parse.
+        private var pendingEdit: (range: NSRange, replacementLength: Int)?
+
+        var cachedSpansForTesting: [StyleSpan] { styleCache.spans }
         /// `nonisolated(unsafe)` only so `deinit` can unregister it. It is
         /// written and read exclusively on the main actor; `deinit` merely
         /// hands the opaque token back to `NotificationCenter`, which is
@@ -138,22 +178,53 @@ public struct MarkdownEditor: NSViewRepresentable {
             scrollObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: clipView,
                 queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.repositionCompletions() }
+                    MainActor.assumeIsolated {
+                        self?.repositionCompletions()
+                        self?.restyleForViewportIfNeeded()
+                    }
                 }
         }
 
         func tearDown() {
             completionPanel.hide()
+            parseTimer?.invalidate()
+            parseTimer = nil
             if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
             scrollObserver = nil
         }
 
         // MARK: - Text
 
+        /// Records WHERE the edit is about to happen, so `textDidChange` can
+        /// shift the cached spans instead of re-parsing. Never vetoes an edit.
+        ///
+        /// A nil `replacementString` is an attributes-only change: there is no
+        /// delta to shift by, so the cache is left to notice the mismatch.
+        public func textView(_ tv: NSTextView, shouldChangeTextIn affected: NSRange,
+                             replacementString: String?) -> Bool {
+            // `tv.string` is still the PRE-edit text here, which is the only
+            // moment the cache's currency can be checked against it. Spans that
+            // did not describe the text before the edit cannot be shifted into
+            // describing it after.
+            pendingEdit = styleCache.describes(tv.string)
+                ? replacementString.map { (affected, ($0 as NSString).length) }
+                : nil
+            return true
+        }
+
         public func textDidChange(_ notification: Notification) {
             guard let tv = textView else { return }
             text.wrappedValue = tv.string
-            applyStyles()
+            if let edit = pendingEdit {
+                styleCache.shift(editedRange: edit.range,
+                                 delta: edit.replacementLength - edit.range.length,
+                                 newText: tv.string)
+            }
+            pendingEdit = nil
+            // Renders the SHIFTED spans — no parse on the keystroke path. The
+            // real parse lands one debounce later.
+            renderStyles()
+            scheduleParse()
             // The ONE place `completions` is called: a keystroke happened.
             refreshCompletions()
         }
@@ -268,44 +339,60 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         // MARK: - Styling
 
+        /// The one entry point for callers that do not know whether the text
+        /// changed: `makeNSView`, and `updateNSView` on every ancestor redraw.
+        ///
+        /// Parses ONLY when the cached spans describe a different string than
+        /// the one on screen — which, after a keystroke, they do not, because
+        /// `textDidChange` has already shifted them. A redraw therefore costs a
+        /// render and nothing else.
         func applyStyles() {
+            guard let tv = textView else { return }
+            if !styleCache.describes(tv.string) { styleCache.reparse(tv.string) }
+            renderStyles()
+        }
+
+        /// Applies the cached spans. No parse, ever.
+        private func renderStyles() {
             guard let tv = textView, let storage = tv.textStorage else { return }
-            let full = NSRange(location: 0, length: (tv.string as NSString).length)
-            storage.beginEditing()
-            storage.setAttributes([
-                .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
-                .foregroundColor: NSColor(tokens.foreground)
-            ], range: full)
-            // Spans now come from the ONE markdown parse, not the regex styler:
-            // `**bold**` and links written inside a fence are no longer styled,
-            // because the AST never called them bold or links. Appearance is
-            // Task 6's concern; this switch only keeps the existing look.
-            for span in MarkdownDocumentModel(fullText: tv.string).styleSpans {
-                let r = NSRange(location: span.range.lowerBound, length: span.range.count)
-                guard NSMaxRange(r) <= full.length else { continue }
-                switch span.kind {
-                case .heading(let lvl):
-                    storage.addAttribute(.font, value: NSFont.boldSystemFont(
-                        ofSize: max(14, 26 - CGFloat(lvl) * 2)), range: r)
-                    storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
-                case .strong:
-                    storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 14), range: r)
-                case .emphasis:
-                    storage.addAttribute(.font, value: NSFontManager.shared.convert(
-                        .systemFont(ofSize: 14), toHaveTrait: .italicFontMask), range: r)
-                case .inlineCode, .codeBlock:
-                    storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
-                case .link, .wikilink:
-                    storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
-                    storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: r)
-                case .checkbox:
-                    storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
-                case .listItem, .blockQuote:
-                    // Deliberately unstyled for now — Task 6 owns their look.
-                    break
-                }
+            let window = styleCache.isOverViewportCap
+                ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
+            lastViewportWindow = window
+            MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
+                                        tokens: tokens, limitedTo: window)
+            stylingNotice?.isHidden = !styleCache.isOverHardCap
+            stylingNotice?.textColor = NSColor(tokens.accentSecondary)
+        }
+
+        /// Re-arms the debounce. Only its firing parses, so a burst of typing
+        /// costs one parse rather than one per character.
+        private func scheduleParse() {
+            parseTimer?.invalidate()
+            let timer = Timer(timeInterval: Self.parseDebounce, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.parseNow() }
             }
-            storage.endEditing()
+            parseTimer = timer
+            // `.common` so the parse still lands while the user is scrolling or
+            // holding a menu open, rather than after they stop.
+            RunLoop.main.add(timer, forMode: .common)
+        }
+
+        private func parseNow() {
+            parseTimer = nil
+            guard let tv = textView else { return }
+            guard styleCache.isStale || !styleCache.describes(tv.string) else { return }
+            styleCache.reparse(tv.string)
+            renderStyles()
+        }
+
+        /// In viewport mode the styled range follows the scroll, so scrolling
+        /// has to re-render — but only when the window actually moved, since
+        /// this fires continuously during a drag.
+        private func restyleForViewportIfNeeded() {
+            guard styleCache.isOverViewportCap, let tv = textView else { return }
+            let window = MarkdownStyleRenderer.viewportWindow(of: tv)
+            if let last = lastViewportWindow, NSEqualRanges(last, window) { return }
+            renderStyles()
         }
     }
 }
