@@ -6,9 +6,22 @@ import AinkradAppKit
 public struct OutlineEntry: Sendable, Equatable {
     public let level: Int
     public let text: String
-    /// UTF-16 offset of the heading in the document's full text — frontmatter
-    /// included, so it indexes exactly what the editor scrolls. Defaulted so
-    /// existing construction sites (tests, other engines) keep compiling.
+    /// UTF-16 offset of the heading, relative to whatever string the
+    /// PRODUCING engine parsed to build this outline — NOT necessarily the
+    /// on-disk file's full text. There is no runtime check tying this to an
+    /// editor's coordinate space; the contract is exactly "whatever string
+    /// the engine that built this outline handed its scroll-to-offset entry
+    /// point". For `MarkdownEngine` that string is `note.body` — frontmatter
+    /// EXCLUDED — because `MarkdownDocumentEditor` binds the editor's text to
+    /// `engine.note.body` (the title lives in a separate field), so an offset
+    /// counted from a serialized "frontmatter + body" string would be off by
+    /// the frontmatter's length the moment it reached the editor. An engine
+    /// producing offsets against a different string than the one its own
+    /// editor scrolls will misplace every click silently — offset math is
+    /// dropped, never guessed, everywhere else in this codebase; this field
+    /// is the one place a wrong convention would not even fail loudly.
+    /// Defaulted so existing construction sites (tests, other engines) keep
+    /// compiling.
     public let utf16Offset: Int
     public init(level: Int, text: String, utf16Offset: Int = 0) {
         self.level = level; self.text = text; self.utf16Offset = utf16Offset

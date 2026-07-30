@@ -18,6 +18,25 @@ struct DocumentPane: View {
     /// of, not a parent of. `nil` until the editor has appeared once.
     @State private var scrollHandler: ((Int) -> Void)?
 
+    /// The current document's outline, cached rather than read off
+    /// `MarkdownEngine.outline` inside `body` — `outline` is a full AST parse,
+    /// and `body` re-evaluates on every unrelated redraw (a banner appearing,
+    /// a theme change). Same reasoning `BacklinksPanel` already applies to
+    /// `backlinks`/`unresolved`. `@State`, not `let`, because a reference type
+    /// (`OutlineRefreshDebouncer`) is fine to hold across redraws but this
+    /// needs SwiftUI to redraw ON assignment.
+    @State private var outline: [OutlineEntry] = []
+    /// Debounces the ONE trigger that can fire many times per second: typing.
+    /// `onAppear` / `.onChange(of: session.url)` / `.onChange(of:
+    /// session.reloadGeneration)` each fire at most once per real event and
+    /// refresh immediately; a keystroke goes through this instead, exactly
+    /// the way `MarkdownEditor.Coordinator.scheduleParse` debounces its own
+    /// re-parse — an outline refresh is the same class of cost (a full
+    /// `Document(parsing:)`) and firing it on every keystroke, on the main
+    /// actor, inside a SwiftUI `body`, is the exact regression Task 6 spent a
+    /// task removing from the styling path.
+    @State private var outlineDebouncer = OutlineRefreshDebouncer()
+
     var body: some View {
         VStack(spacing: 0) {
             if session.isReadOnly { readOnlyBanner }
@@ -29,7 +48,14 @@ struct DocumentPane: View {
 
             session.engine.makeEditor(
                 EditorContext(theme: theme,
-                              onChange: { session.markChanged() },
+                              onChange: {
+                                  session.markChanged()
+                                  // Debounced — see `outlineDebouncer`'s doc
+                                  // comment. `refreshOutline` is cheap to call
+                                  // repeatedly; the debouncer just makes sure
+                                  // only the LAST call in a typing burst runs.
+                                  outlineDebouncer.schedule(after: 0.3) { refreshOutline() }
+                              },
                               completions: { store.linkCompletions(matching: $0) },
                               openLink: { target in
                                   // `documentName` first: `openLink` funnels into
@@ -50,18 +76,36 @@ struct DocumentPane: View {
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
 
-            // Only markdown documents contribute to the link graph, or have
-            // headings at all — plain-text and unclaimed documents would show
-            // an empty panel, which is noise, not information.
-            if let markdownEngine = session.engine as? MarkdownEngine {
-                OutlineSection(store: store, outline: markdownEngine.indexPayload.outline,
-                              theme: theme) { offset in scrollHandler?(offset) }
-                    .frame(maxHeight: 200)
+            // Only markdown documents contribute to the link graph — plain-
+            // text and unclaimed documents would show an empty panel, which
+            // is noise, not information.
+            if session.engine is MarkdownEngine {
+                // Gated on the CACHED outline being non-empty, not merely on
+                // the document being markdown: a markdown note with no
+                // headings yet is exactly as noise-free a case as a
+                // plain-text file, and showing an empty "Outline (0)" here
+                // would contradict the reasoning that already justifies
+                // gating `BacklinksPanel` on the engine type in the first
+                // place — an empty panel either way is noise.
+                if !outline.isEmpty {
+                    OutlineSection(store: store, outline: outline,
+                                  theme: theme) { offset in scrollHandler?(offset) }
+                        .frame(maxHeight: 200)
+                }
                 BacklinksPanel(store: store, url: session.url, theme: theme)
                     .frame(maxHeight: 200)
             }
         }
         .background(theme.tokens.background)
+        .onAppear { refreshOutline() }
+        // Same two triggers `BacklinksPanel` uses for the reasons it already
+        // documents (a rename changes `url` without changing `session.id`),
+        // plus `reloadGeneration`: "Reload from disk" replaces the engine's
+        // note in place without either of those changing, and the outline
+        // must not keep showing headings from the text that was just
+        // discarded.
+        .onChange(of: session.url) { refreshOutline() }
+        .onChange(of: session.reloadGeneration) { refreshOutline() }
         .alert("Create this note?",
                isPresented: Binding(get: { unresolved != nil },
                                     set: { if !$0 { unresolved = nil } })) {
@@ -80,6 +124,25 @@ struct DocumentPane: View {
                                     set: { if !$0 { createFailure = nil } })) {
             MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
         }
+    }
+
+    /// Re-derives `outline` from the engine's own `outline` accessor — a
+    /// heading-only parse, NOT `indexPayload` (which also runs a link scan
+    /// this view has no use for). `nil` for a non-markdown engine, same as
+    /// the gating above.
+    ///
+    /// Staleness between refreshes: a click that lands mid-debounce scrolls
+    /// to an offset computed from the text as it was UP TO 0.3s ago. Purely
+    /// additive edits above the clicked heading shift where it visually sits
+    /// without changing the offset math (headings below an edit still start
+    /// where they started, relative to the edit's own position) — the only
+    /// case that can go visibly wrong is the debounce window closing between
+    /// an edit that changes a HEADING'S OWN text and a click on the OLD
+    /// label the user is still looking at. `MarkdownEditor.Coordinator.
+    /// scrollToOffset` clamps to `[0, length]`, so a stale offset can select
+    /// the wrong place; it can never crash or select out of bounds.
+    private func refreshOutline() {
+        outline = (session.engine as? MarkdownEngine)?.outline ?? []
     }
 
     /// Creates the note this dead link names, via the store's single
@@ -149,5 +212,30 @@ struct DocumentPane: View {
         }
         .padding(AinkradSpacing.sm)
         .background(tint.opacity(0.15))
+    }
+}
+
+/// Coalesces a burst of `ctx.onChange` calls (one per keystroke) into a
+/// single refresh, exactly the shape `MarkdownEditor.Coordinator.
+/// scheduleParse` already uses for the same reason: only the LAST call in a
+/// burst should do the expensive work.
+///
+/// A class, not a struct, so `DocumentPane`'s `@State` can hold the SAME
+/// instance — and therefore the same in-flight `Timer` — across every body
+/// re-evaluation between keystrokes; a struct copy would lose the pending
+/// timer on every redraw and never coalesce anything.
+@MainActor
+final class OutlineRefreshDebouncer {
+    private var timer: Timer?
+
+    func schedule(after seconds: TimeInterval, _ action: @escaping @MainActor () -> Void) {
+        timer?.invalidate()
+        let t = Timer(timeInterval: seconds, repeats: false) { _ in
+            MainActor.assumeIsolated { action() }
+        }
+        timer = t
+        // `.common`, matching `Coordinator.scheduleParse`: the refresh must
+        // still land while the user is scrolling or holding a menu open.
+        RunLoop.main.add(t, forMode: .common)
     }
 }

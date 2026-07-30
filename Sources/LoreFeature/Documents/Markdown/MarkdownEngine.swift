@@ -35,14 +35,32 @@ public final class MarkdownEngine: DocumentEngine {
     /// from full frontmatter+body text would shift every `utf16Offset` by the
     /// frontmatter's length, and the click-to-scroll entry point would land in
     /// the wrong place. `note.body` keeps this consistent with the editor by
-    /// construction, not by convention.
+    /// construction, not by convention. See `OutlineEntry.utf16Offset`'s doc
+    /// comment for the general contract this is an instance of.
+    ///
+    /// `bodyAlreadyStripped: true` because `note.body` has ALREADY had any
+    /// real frontmatter separated out by `Frontmatter.parse`. Passing `false`
+    /// here would run `Frontmatter.bodyOffset` a second time over text that is
+    /// no longer frontmatter-prefixed, and a body that happens to open with
+    /// something fence-shaped (an `---` rule, later followed by another bare
+    /// `---`) would have that whole span misread as frontmatter and dropped
+    /// from the parse — see `MarkdownDocumentModel.init`'s parameter doc.
+    ///
+    /// A dedicated accessor, not folded into `indexPayload`: `DocumentPane`
+    /// wants the outline on its own, on a cadence tighter than a full
+    /// `indexPayload` (title/tags/properties/links) is worth recomputing for.
+    /// Reaching through `indexPayload` for just the outline would also run
+    /// `LinkParser.links(in:)` — a second, unrelated scan — for no reason.
+    public var outline: [OutlineEntry] {
+        MarkdownDocumentModel(fullText: note.body, bodyAlreadyStripped: true).outline
+    }
+
     public var indexPayload: IndexPayload {
-        let model = MarkdownDocumentModel(fullText: note.body)
-        return IndexPayload(title: note.title,
+        IndexPayload(title: note.title,
                      plaintext: note.body,
                      tags: note.tags,
                      properties: note.extra,
-                     outline: model.outline,
+                     outline: outline,
                      links: LinkParser.links(in: note.body),
                      aliases: note.aliases,
                      id: note.id)
@@ -63,7 +81,7 @@ private struct MarkdownDocumentEditor: View {
     @State private var body_: String = ""
     /// Set by `ctx.registerScrollHandler`'s callback, which `OutlineSection`
     /// invokes through the closure the shell captured. Body-relative UTF-16 —
-    /// see `MarkdownEngine.indexPayload`'s doc comment for why that is what
+    /// see `MarkdownEngine.outline`'s doc comment for why that is what
     /// `outline` offsets already are.
     @State private var scrollTarget: Int?
 

@@ -66,10 +66,11 @@ public struct LinkSpan: Equatable, Sendable {
 /// Extracts links from markdown body text.
 ///
 /// Deliberately code-aware: a `[[link]]` inside a fenced block or inline code
-/// is documentation ABOUT a link, not a link. `MarkdownEngine.outline(of:)`
-/// has this gap and produces phantom headings from `#` comments in code; a
-/// phantom LINK is worse, because it appears in another document's backlinks
-/// and survives into rename rewriting.
+/// is documentation ABOUT a link, not a link. The line-scanning outline this
+/// module used to have (`MarkdownEngine.outline(of:)`, deleted in M2a Task 7)
+/// had exactly this gap and produced phantom headings from `#` comments in
+/// code; a phantom LINK would be worse, because it appears in another
+/// document's backlinks and survives into rename rewriting.
 public enum LinkParser {
     public static func links(in body: String) -> [DocumentLink] {
         spans(in: body).map(\.link)

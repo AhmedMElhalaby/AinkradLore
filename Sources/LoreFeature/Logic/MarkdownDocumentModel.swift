@@ -242,11 +242,25 @@ public struct MarkdownDocumentModel: Sendable {
         fullText.contains("\r\n") ? nil : linkSuppressionIndex
     }
 
-    public init(fullText: String) {
+    /// - Parameter bodyAlreadyStripped: `true` when `fullText` is KNOWN to
+    ///   already exclude frontmatter — a `Note.body`, say — so no further
+    ///   `Frontmatter.bodyOffset` scan should run over it.
+    ///
+    ///   Without this, a body that legitimately OPENS with something that
+    ///   merely looks like a frontmatter fence (an `---` horizontal rule
+    ///   followed, anywhere later, by another bare `---` line) gets a SECOND,
+    ///   spurious strip: `Frontmatter.bodyOffset` would treat everything up to
+    ///   that second `---` as frontmatter and exclude it from
+    ///   `Document(parsing:)` entirely — not shifted, DROPPED. A heading
+    ///   between the two `---` lines would silently vanish from the outline.
+    ///   `MarkdownEngine.outline` passes `true` for exactly this reason: its
+    ///   input is already `note.body`, which `Frontmatter.parse` has already
+    ///   separated from any real frontmatter once.
+    public init(fullText: String, bodyAlreadyStripped: Bool = false) {
         #if DEBUG
         MarkdownParseCounter.record()
         #endif
-        let bodyStart = Frontmatter.bodyOffset(in: fullText)
+        let bodyStart = bodyAlreadyStripped ? 0 : Frontmatter.bodyOffset(in: fullText)
         let body = String(fullText.dropFirst(bodyStart))
         let bodyUTF16Offset = (String(fullText.prefix(bodyStart)) as NSString).length
 

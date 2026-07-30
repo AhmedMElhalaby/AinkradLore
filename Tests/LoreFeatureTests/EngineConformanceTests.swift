@@ -113,6 +113,26 @@ final class MarkdownEngineTests: XCTestCase {
         XCTAssertEqual(engine.indexPayload.outline.map(\.text), ["Real"])
     }
 
+    /// Regression for the double-strip: `note.body` has ALREADY had real
+    /// frontmatter removed by `Frontmatter.parse`, so `MarkdownEngine.outline`
+    /// must not run `Frontmatter.bodyOffset` over it again. Left unguarded,
+    /// a body that legitimately OPENS with something fence-shaped — here, an
+    /// `---` thematic break, a real heading, then another bare `---` — gets
+    /// misread as a SECOND frontmatter block: everything up to that second
+    /// `---` (including the "Fake" heading) is excluded from the parse
+    /// entirely, not merely shifted. Both headings must survive.
+    func test_markdownOutline_headingBetweenBareDashLinesIsNotMistakenForFrontmatter() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-outline-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("n.md")
+        try "---\nid: a\ntitle: T\n---\n---\n# Fake\n---\n# Real\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        let engine = try MarkdownEngine.load(url)
+        XCTAssertEqual(engine.outline.map(\.text), ["Fake", "Real"])
+        XCTAssertEqual(engine.outline.map(\.level), [1, 1])
+    }
+
     func test_saveThenLoad_preservesUnmodelledProperties() throws {
         let url = try tempFile("n.md", """
         ---

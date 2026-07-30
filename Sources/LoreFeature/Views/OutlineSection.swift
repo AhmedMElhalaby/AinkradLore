@@ -4,11 +4,16 @@ import AinkradAppKit
 /// The open markdown document's headings, indented by level, in `DocumentPane`
 /// alongside `BacklinksPanel`.
 ///
-/// `outline` is handed in rather than fetched here: it comes straight from
-/// `MarkdownEngine.indexPayload`, which `DocumentPane` already has to reach
-/// past (only markdown contributes an outline), and duplicating that access
-/// here would be a second, divergent way to ask the same question.
+/// `outline` is handed in rather than fetched here: `DocumentPane` caches it
+/// in `@State` (see its `refreshOutline()`), and reading `MarkdownEngine.
+/// outline` — a fresh AST parse — directly from this view's `body` would
+/// bypass that cache on every redraw.
 struct OutlineSection: View {
+    /// `@Bindable`, not `let`, though nothing here builds a `Binding` off it:
+    /// mirrors `BacklinksPanel`, which has the same property for the same
+    /// non-reason. Kept for consistency with that established file rather
+    /// than because this view needs it — flagging rather than diverging, in
+    /// case a future pass decides both should be `let store: LoreStore`.
     @Bindable var store: LoreStore
     let outline: [OutlineEntry]
     let theme: HostTheme
