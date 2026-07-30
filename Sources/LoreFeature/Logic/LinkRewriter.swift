@@ -157,9 +157,28 @@ public enum LinkRewriter {
     /// trailing slashes and to the root's path text recurring elsewhere
     /// inside the destination path (a plain `replacingOccurrences` would
     /// mangle both of those cases).
+    ///
+    /// Deliberately does NOT use `.standardizedFileURL` here, despite the
+    /// name suggesting it is the right tool: `stringByStandardizingPath`
+    /// (what it calls under the hood) strips a leading `/private` from
+    /// `/private/var`, `/private/tmp`, `/private/etc` — but ONLY when the
+    /// shortened path can be verified to resolve to the same file, which
+    /// requires that shortened path to actually exist. `vaultRoot` almost
+    /// always exists (it is a real, already-active vault) and gets stripped;
+    /// `path` is a rename/move DESTINATION that, for a folder rename or a
+    /// move into a not-yet-created folder, does not exist yet and is left
+    /// alone. The two sides then disagree only in whether they still carry
+    /// `/private`, every prefix match fails, and every explicit-path or
+    /// explicit-extension inbound link for that document is silently dropped
+    /// as "outside the vault" — with no error, just an empty edit list. Both
+    /// `vaultRoot` and `path` arrive here already canonicalized consistently
+    /// by the caller (`LoreStore+Rename.swift` sources everything through
+    /// `VaultIndexCoordinator.canonical`), so comparing raw path components
+    /// is enough and does not need — must NOT use — a second pass through
+    /// path standardization.
     private static func vaultRelativePath(of path: URL, vaultRoot: URL) -> String? {
-        let rootComponents = vaultRoot.standardizedFileURL.pathComponents
-        let pathComponents = path.standardizedFileURL.pathComponents
+        let rootComponents = vaultRoot.pathComponents
+        let pathComponents = path.pathComponents
         guard pathComponents.count > rootComponents.count,
               Array(pathComponents.prefix(rootComponents.count)) == rootComponents
         else { return nil }

@@ -343,4 +343,8 @@ public enum LoreError: Error, Equatable {
     /// discard those changes, so the caller must decide: reload, or overwrite
     /// via `save(_:overwritingExternalChanges: true)`.
     case externalChange(URL)
+    /// `FileManager.trashItem` failed for the given URL (network volume,
+    /// external drive with no `.Trashes`, permissions, …). NEVER silently
+    /// falls back to `removeItem` — see `LoreStore+Trash.swift`.
+    case trashFailed(URL, String)
 }

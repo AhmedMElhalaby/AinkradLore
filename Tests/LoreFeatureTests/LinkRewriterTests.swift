@@ -455,4 +455,26 @@ final class RenameApplicationHardeningTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), url.path)
         }
     }
+
+    func test_folderRenamePlansEveryDocumentBeneathIt() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "---\nid: d\ntitle: Design\n---\nx"
+            .write(to: folder.appendingPathComponent("Design.md"),
+                   atomically: true, encoding: .utf8)
+        try "---\nid: n\ntitle: Notes\n---\ny"
+            .write(to: folder.appendingPathComponent("Notes.md"),
+                   atomically: true, encoding: .utf8)
+        try "---\nid: a\ntitle: A\n---\n[[Projects/Design]]"
+            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+
+        let plans = s.plan(renameFolder: folder, to: "Work")
+        XCTAssertEqual(plans.count, 2)
+        let reports = s.apply(plans)
+        XCTAssertTrue(reports.allSatisfy { $0.failed.isEmpty })
+        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("a.md"),
+                                 encoding: .utf8).contains("[[Work/Design]]"))
+    }
 }

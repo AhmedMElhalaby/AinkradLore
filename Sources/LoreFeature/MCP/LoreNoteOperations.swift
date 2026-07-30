@@ -300,6 +300,8 @@ struct LoreNoteOperations {
                 + "Saving now would discard those changes. Use read_note to see the current "
                 + "contents and re-apply your edit, or call save_note_overwriting to discard "
                 + "them deliberately (that needs approval and cannot be undone)."
+        case .trashFailed(let url, let reason):
+            return "Could not move \(relative(url)) to the Trash: \(reason)"
         }
     }
 

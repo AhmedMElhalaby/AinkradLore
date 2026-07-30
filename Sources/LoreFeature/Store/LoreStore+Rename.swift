@@ -36,6 +36,53 @@ extension LoreStore {
         planMove(source, to: folder.appendingPathComponent(source.lastPathComponent))
     }
 
+    /// One plan per document beneath `folder`, presented under a single
+    /// preview (Task 10 builds that UI). Each plan still goes through the full
+    /// `plan`/`apply` machinery below, one document at a time — there is no
+    /// second, folder-shaped application path.
+    public func plan(renameFolder folder: URL, to newName: String) -> [RenamePlan] {
+        let canonicalFolder = VaultIndexCoordinator.canonical(folder)
+        let destinationFolder = canonicalFolder.deletingLastPathComponent()
+            .appendingPathComponent(newName)
+        let prefix = canonicalFolder.path + "/"
+        return rows
+            .filter { $0.path.path.hasPrefix(prefix) }
+            .map { row in
+                let relative = String(row.path.path.dropFirst(prefix.count))
+                return planMove(row.path, to: destinationFolder.appendingPathComponent(relative))
+            }
+    }
+
+    /// Applies every plan in sequence, one document at a time, each with its
+    /// own full `apply` (baselines, refusal checks, dirty-tab exclusion, …).
+    /// If one document's apply refuses, the rest still proceed — a folder
+    /// rename that aborted halfway with no record of the documents it never
+    /// reached would be worse than a partial result the caller can see.
+    ///
+    /// A folder rename's destination directory (and any nested
+    /// subdirectories under it) does not exist yet on disk — that is exactly
+    /// what "rename the folder" means. `apply(_ plan:)`'s per-document
+    /// `moveItem` requires the parent to already exist (by design: see its
+    /// refusal check), so the destination tree is created here, once, up
+    /// front. This is not a second write path: it only ensures the directory
+    /// exists before the SAME hardened per-document `apply` does everything
+    /// else (baselines, refusal checks, link rewriting, the move itself).
+    @discardableResult
+    public func apply(_ plans: [RenamePlan]) -> [RenameReport] {
+        for plan in plans {
+            try? FileManager.default.createDirectory(
+                at: plan.destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+        }
+        return plans.map { apply($0) }
+    }
+
+    /// How many documents currently link to `url` — used by the Trash flow to
+    /// warn the caller before deleting.
+    public func inboundLinkCount(to url: URL) -> Int {
+        coordinator.inboundLinks(to: VaultIndexCoordinator.canonical(url)).count
+    }
+
     /// The single place source, destination and vault root are canonicalized.
     ///
     /// `LinkRewriter` computes a vault-relative target by comparing path
@@ -69,12 +116,30 @@ extension LoreStore {
     }
 
     /// `realpath(3)` fails on a path that does not exist yet — and a rename
-    /// destination never exists yet. Canonicalizing the (existing) parent
-    /// directory and re-appending the filename gives the destination the same
-    /// resolution as everything else.
+    /// destination never exists yet. A folder rename compounds this: the
+    /// destination's PARENT directory does not exist yet either (that
+    /// directory is exactly what "rename the folder" creates), so
+    /// canonicalizing only the immediate parent still fails and hands back
+    /// an unresolved path. That unresolved path's root prefix (`/var/...`)
+    /// then fails to match the already-canonical vault root (`/private/var
+    /// /...`) inside `LinkRewriter.vaultRelativePath`, and every explicit-path
+    /// or explicit-extension inbound link for that document is dropped as
+    /// "outside the vault" — silently, since a caller sees an empty edit
+    /// list rather than an error. So this walks UP to the nearest ancestor
+    /// that actually exists, canonicalizes only that, and re-appends every
+    /// component below it — however many levels of not-yet-created
+    /// directory that is.
     private static func canonicalizingDestination(_ destination: URL) -> URL {
-        VaultIndexCoordinator.canonical(destination.deletingLastPathComponent())
-            .appendingPathComponent(destination.lastPathComponent)
+        var existingAncestor = destination.deletingLastPathComponent()
+        var trailingComponents: [String] = [destination.lastPathComponent]
+        while !FileManager.default.fileExists(atPath: existingAncestor.path),
+              existingAncestor.pathComponents.count > 1 {
+            trailingComponents.insert(existingAncestor.lastPathComponent, at: 0)
+            existingAncestor.deleteLastPathComponent()
+        }
+        return trailingComponents.reduce(VaultIndexCoordinator.canonical(existingAncestor)) {
+            $0.appendingPathComponent($1)
+        }
     }
 
     private static func mtimeOnDisk(_ url: URL) -> Date? {
