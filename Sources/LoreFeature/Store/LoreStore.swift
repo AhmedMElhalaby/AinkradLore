@@ -315,13 +315,24 @@ public final class LoreStore {
         return note
     }
 
+    /// - Parameter subfolder: a path relative to the default note folder, created
+    ///   if missing. Only used by the "create the note this link points at" flow,
+    ///   where `[[Projects/Design]]` names a folder as well as a note; empty
+    ///   everywhere else, which is the pre-existing behaviour exactly.
     @discardableResult
-    public func create(title: String) throws -> Note {
+    public func create(title: String, in subfolder: String = "") throws -> Note {
         guard let root = vaultRoot, coordinator.hasIndex else { throw LoreError.noVault }
         let slug = title.isEmpty ? "untitled" : title.lowercased()
             .replacingOccurrences(of: " ", with: "-")
-        let dir = defaultNoteFolder.isEmpty
+        var dir = defaultNoteFolder.isEmpty
             ? root : root.appendingPathComponent(defaultNoteFolder, isDirectory: true)
+        // `..` and absolute segments are dropped, not rejected: this string
+        // comes from document text, so it is untrusted input, and a link must
+        // never be able to write outside the vault.
+        for part in subfolder.split(separator: "/")
+        where part != "." && part != ".." && !part.isEmpty {
+            dir.appendPathComponent(String(part), isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = uniqueURL(in: dir, slug: slug)
         let now = Date()

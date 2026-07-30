@@ -1,28 +1,44 @@
 import SwiftUI
 import AinkradAppKit
 
-/// Decides whether the caret sits inside an unclosed `[[`, and what has been
-/// typed so far — plus, for click-to-open, which `[[…]]` span an offset falls
-/// inside. Pure, so the fiddly caret arithmetic is testable without a view host.
+/// Decides whether the caret sits inside an unclosed `[[`, what has been typed
+/// so far, which `[[…]]` span an offset falls inside, and what text a picked
+/// row must insert to be findable again. Pure, so all the fiddly arithmetic is
+/// testable without a view host.
 ///
-/// Both functions take CHARACTER offsets, not UTF-16 offsets. `MarkdownEditor`
-/// converts at the AppKit boundary, because that is the only place the two
-/// index spaces meet.
+/// The offset-taking entry points speak CHARACTER offsets, not UTF-16 offsets.
+/// `MarkdownEditor` converts at the AppKit boundary, because that is the only
+/// place the two index spaces meet.
 public enum LinkCompletionContext {
     /// The text between the nearest unclosed `[[` before `caret` and `caret`,
     /// or `nil` when the caret is not inside an open wikilink.
     public static func activePrefix(in text: String, caret: Int) -> String? {
-        let chars = Array(text)
-        guard caret <= chars.count else { return nil }
-        var i = caret - 1
-        while i >= 1 {
-            if chars[i] == "\n" { return nil }
-            // A closing `]]` between here and the caret means the link is done.
-            if chars[i] == "]" && chars[i - 1] == "]" { return nil }
-            if chars[i] == "[" && chars[i - 1] == "[" {
-                return String(chars[(i + 1)..<caret])
+        guard caret >= 0,
+              let index = text.index(text.startIndex, offsetBy: caret,
+                                     limitedBy: text.endIndex) else { return nil }
+        return activePrefix(in: text, caret: index)
+    }
+
+    /// The real implementation, in `String.Index` space.
+    ///
+    /// Index-based rather than `Array(text)`-based because this runs on EVERY
+    /// keystroke: materialising the whole document as a `[Character]` per
+    /// keypress made the cost of typing grow with document length for no
+    /// reason. This walks backwards from the caret and stops at the line start,
+    /// so the cost is the length of the current line, not of the document.
+    static func activePrefix(in text: String, caret: String.Index) -> String? {
+        var i = caret
+        while i > text.startIndex {
+            let prev = text.index(before: i)
+            let c = text[prev]
+            if c == "\n" { return nil }
+            if prev > text.startIndex {
+                let before = text[text.index(before: prev)]
+                // A closing `]]` between here and the caret means the link is done.
+                if c == "]" && before == "]" { return nil }
+                if c == "[" && before == "[" { return String(text[i..<caret]) }
             }
-            i -= 1
+            i = prev
         }
         return nil
     }
@@ -30,36 +46,122 @@ public enum LinkCompletionContext {
     /// The raw target of the `[[…]]` span containing `offset`, or `nil`.
     ///
     /// Raw: any `#heading` or `|alias` syntax is preserved, because
-    /// `LinkResolver` — not this function — owns what those mean.
+    /// `LinkResolver` — not this function — owns what those mean. Use
+    /// `documentName(of:)` for the part that names a document.
     public static func target(in text: String, at offset: Int) -> String? {
         let chars = Array(text)
         guard offset >= 0, offset <= chars.count else { return nil }
+        let start = normalised(offset, in: chars)
 
         // Scan back for `[[`, stopping at a line break or a closing `]]`
         // (which would mean the offset sits after a span, not inside one).
         var open: Int?
-        var i = offset - 1
+        var i = start - 1
         while i >= 1 {
             if chars[i] == "\n" { return nil }
             if chars[i] == "]" && chars[i - 1] == "]" { return nil }
             if chars[i] == "[" && chars[i - 1] == "[" { open = i + 1; break }
             i -= 1
         }
-        guard let start = open else { return nil }
+        guard let from = open else { return nil }
 
         // Scan forward for `]]`, again stopping at a line break or a new `[[`.
         var close: Int?
-        var j = offset
+        var j = start
         while j + 1 < chars.count {
             if chars[j] == "\n" { return nil }
             if chars[j] == "[" && chars[j + 1] == "[" { return nil }
             if chars[j] == "]" && chars[j + 1] == "]" { close = j; break }
             j += 1
         }
-        guard let end = close, end > start else { return nil }
-        let raw = String(chars[start..<end]).trimmingCharacters(in: .whitespaces)
+        guard let to = close, to > from else { return nil }
+        let raw = String(chars[from..<to]).trimmingCharacters(in: .whitespaces)
         return raw.isEmpty ? nil : raw
     }
+
+    /// Pulls a click that landed ON the `[[` or `]]` glyphs into the span's
+    /// interior, so the whole visible link is clickable rather than only its
+    /// inner text — the brackets are the most obviously "link-ish" part of it.
+    private static func normalised(_ offset: Int, in chars: [Character]) -> Int {
+        if offset + 1 < chars.count, chars[offset] == "[", chars[offset + 1] == "[" {
+            return offset + 2                     // before the opening `[[`
+        }
+        if offset > 0, offset < chars.count, chars[offset - 1] == "[", chars[offset] == "[" {
+            return offset + 1                     // between the two `[`
+        }
+        if offset > 0, offset < chars.count, chars[offset - 1] == "]", chars[offset] == "]" {
+            return offset - 1                     // between the two `]`
+        }
+        return offset
+    }
+
+    /// The part of a raw target that names a DOCUMENT: alias segment and any
+    /// `#heading` fragment removed.
+    ///
+    /// `LinkResolver.basename` strips the fragment but not the alias, so
+    /// `Design|why` would otherwise be looked up — and created — verbatim.
+    public static func documentName(of rawTarget: String) -> String {
+        var target = rawTarget
+        if let pipe = target.firstIndex(of: "|") { target = String(target[..<pipe]) }
+        return LinkResolver.basename(of: target)
+    }
+
+    /// Characters that change what a target MEANS: `#` starts a fragment, `|`
+    /// starts an alias, brackets end or restart the span, `/` turns the target
+    /// into a path suffix.
+    private static let unusableInTarget: Set<Character> = ["#", "|", "[", "]", "/"]
+
+    /// The text to insert for a picked row, chosen so that resolving it finds
+    /// that same row again.
+    ///
+    /// Picking a document from a list must never produce a link that fails to
+    /// find it. A title like `Sprint #3` cannot be expressed as a wikilink
+    /// target at all — `basename` truncates it to `Sprint` — so the filename is
+    /// inserted instead, which `LinkResolver` matches just as happily (it keys
+    /// documents by filename, title AND aliases).
+    public static func insertableTarget(for row: IndexRow) -> String {
+        let title = row.title.trimmingCharacters(in: .whitespaces)
+        if isUsableTarget(title) { return title }
+        return row.path.deletingPathExtension().lastPathComponent
+    }
+
+    /// A trailing `.md` is excluded too: `basename` strips it, so a title of
+    /// `Notes.md` would resolve to `Notes`.
+    static func isUsableTarget(_ candidate: String) -> Bool {
+        !candidate.isEmpty
+            && candidate.allSatisfy { !unusableInTarget.contains($0) }
+            && !candidate.lowercased().hasSuffix(".md")
+    }
+}
+
+/// Which rows the completion list is offering, and which one is highlighted.
+///
+/// A value type with no AppKit in it, so the two rules that are easy to get
+/// wrong — the highlight resets when the matches change, and the arrow keys
+/// clamp at the ends rather than wrapping — are unit-testable without a window.
+struct LinkCompletionSelection: Equatable {
+    private(set) var matches: [IndexRow] = []
+    private(set) var index = 0
+
+    /// Rows the list can actually show. The highlight may never point past them.
+    var visibleCount: Int { min(matches.count, LinkCompletionView.maxRows) }
+
+    var current: IndexRow? { index < matches.count ? matches[index] : nil }
+
+    /// A changed match set resets the highlight to the top: after another
+    /// keystroke the row at the old index is a different document, and silently
+    /// leaving the highlight there is how a user accepts the wrong note.
+    mutating func update(to rows: [IndexRow]) {
+        if rows != matches { matches = rows; index = 0 }
+        index = min(index, max(0, visibleCount - 1))
+    }
+
+    mutating func move(by delta: Int) {
+        guard visibleCount > 0 else { index = 0; return }
+        index = min(max(0, index + delta), visibleCount - 1)
+    }
+
+    mutating func clear() { matches = []; index = 0 }
 }
 
 /// The `[[` completion list. Deliberately dumb: it renders rows and reports

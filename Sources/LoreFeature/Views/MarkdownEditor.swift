@@ -48,7 +48,21 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.onCommandClick = { [weak coordinator = context.coordinator] index in
             coordinator?.openLink(atUTF16: index) ?? false
         }
+        // Losing first responder INSIDE the same window — clicking the title
+        // field, the sidebar, another pane — is not covered by
+        // `hidesOnDeactivate`, and would otherwise leave a `.popUpMenu`-level
+        // panel floating over the UI. `textDidEndEditing` covers the common
+        // routes; this covers the rest (focus moved by keyboard, by the shell,
+        // or to a control that does not end editing).
+        tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
+            coordinator?.completionPanel.hide()
+        }
         scroll.documentView = tv
+
+        // The caret moves under the list when the document scrolls, so the list
+        // has to follow it.
+        scroll.contentView.postsBoundsChangedNotifications = true
+        context.coordinator.observeScrolling(of: scroll.contentView)
 
         context.coordinator.textView = tv
         tv.string = text
@@ -73,8 +87,20 @@ public struct MarkdownEditor: NSViewRepresentable {
 
     public func makeCoordinator() -> Coordinator { Coordinator(text: $text, tokens: tokens) }
 
+    /// Tearing the editor down must take the floating panel with it — this is
+    /// the path that fires on a tab close and on a document switch (the pane
+    /// re-`id`s the editor, so the old one is dismantled).
+    ///
+    /// `assumeIsolated` only where it is true. AppKit always dismantles on the
+    /// main thread, but asserting that would turn a wrong assumption into a
+    /// crash in the user's editor; off the main thread this degrades to a hop
+    /// instead.
     public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
-        MainActor.assumeIsolated { coordinator.completionPanel.hide() }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { coordinator.tearDown() }
+        } else {
+            Task { @MainActor in coordinator.tearDown() }
+        }
     }
 
     @MainActor
@@ -85,11 +111,33 @@ public struct MarkdownEditor: NSViewRepresentable {
         var onOpenLink: (@MainActor (String) -> Void)?
         weak var textView: NSTextView?
         let completionPanel = LinkCompletionPanel()
+        /// `nonisolated(unsafe)` only so `deinit` can unregister it. It is
+        /// written and read exclusively on the main actor; `deinit` merely
+        /// hands the opaque token back to `NotificationCenter`, which is
+        /// thread-safe. Without the deinit an editor that is released without a
+        /// `dismantleNSView` would leak one observer per document opened.
+        nonisolated(unsafe) private var scrollObserver: (any NSObjectProtocol)?
 
         init(text: Binding<String>, tokens: HostThemeTokens) {
             self.text = text; self.tokens = tokens
             super.init()
             completionPanel.onPick = { [weak self] row in self?.insert(row) }
+        }
+
+        deinit { if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) } }
+
+        func observeScrolling(of clipView: NSClipView) {
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clipView,
+                queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.repositionCompletions() }
+                }
+        }
+
+        func tearDown() {
+            completionPanel.hide()
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+            scrollObserver = nil
         }
 
         // MARK: - Text
@@ -108,6 +156,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         public func textViewDidChangeSelection(_ notification: Notification) {
             guard completionPanel.isVisible, let tv = textView else { return }
             if activePrefix(in: tv) == nil { completionPanel.hide() }
+        }
+
+        /// Focus left the editor. Nothing the list offers can be accepted from
+        /// here, so it must not keep floating.
+        public func textDidEndEditing(_ notification: Notification) {
+            completionPanel.hide()
         }
 
         // MARK: - Keys the popup owns, and only while it is open
@@ -131,40 +185,50 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         // MARK: - Completion
 
-        /// `(prefix, caret in characters)` for the current caret, or `nil`.
-        private func activePrefix(in tv: NSTextView) -> (String, Int)? {
+        /// The typed prefix for the current caret, or `nil`.
+        ///
+        /// Runs per keystroke, so it allocates nothing proportional to the
+        /// document: `Range(_:in:)` converts the UTF-16 caret to a
+        /// `String.Index` without copying, and the scan itself stops at the
+        /// start of the current line.
+        private func activePrefix(in tv: NSTextView) -> String? {
             guard tv.selectedRange().length == 0 else { return nil }
-            let ns = tv.string as NSString
-            let caretUTF16 = tv.selectedRange().location
-            guard caretUTF16 <= ns.length else { return nil }
-            let caret = ns.substring(to: caretUTF16).count
-            guard let prefix = LinkCompletionContext.activePrefix(in: tv.string, caret: caret)
-            else { return nil }
-            return (prefix, caret)
+            let text = tv.string
+            guard let caret = Range(NSRange(location: tv.selectedRange().location, length: 0),
+                                    in: text)?.lowerBound else { return nil }
+            return LinkCompletionContext.activePrefix(in: text, caret: caret)
         }
 
         private func refreshCompletions() {
             guard let tv = textView, let completions,
-                  let (prefix, _) = activePrefix(in: tv) else {
+                  let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
             }
             let rows = completions(prefix)
             guard !rows.isEmpty else { completionPanel.hide(); return }
-            let caretRect = tv.firstRect(forCharacterRange: tv.selectedRange(),
-                                         actualRange: nil)
             completionPanel.show(matches: rows, tokens: tokens,
-                                 caretRect: caretRect, over: tv)
+                                 caretRect: caretRect(in: tv), over: tv)
         }
 
-        /// Replaces the typed prefix with the row's title, closes the link, and
-        /// leaves the caret AFTER the `]]` so typing continues in prose.
+        /// Scrolling moves the caret on screen but changes nothing about what
+        /// is being completed — so this re-places the panel and never re-queries.
+        private func repositionCompletions() {
+            guard completionPanel.isVisible, let tv = textView else { return }
+            completionPanel.reposition(caretRect: caretRect(in: tv), over: tv)
+        }
+
+        private func caretRect(in tv: NSTextView) -> NSRect {
+            tv.firstRect(forCharacterRange: tv.selectedRange(), actualRange: nil)
+        }
+
+        /// Replaces the typed prefix with a target that resolves back to `row`,
+        /// closes the link, and leaves the caret AFTER the `]]` so typing
+        /// continues in prose.
         private func insert(_ row: IndexRow) {
-            guard let tv = textView, let (prefix, _) = activePrefix(in: tv) else {
+            guard let tv = textView, let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
             }
-            let title = row.title.isEmpty
-                ? row.path.deletingPathExtension().lastPathComponent : row.title
-            let insertion = title + "]]"
+            let insertion = LinkCompletionContext.insertableTarget(for: row) + "]]"
             let caretUTF16 = tv.selectedRange().location
             let range = NSRange(location: caretUTF16 - prefix.utf16.count,
                                 length: prefix.utf16.count)
@@ -184,10 +248,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// Returns whether a link was actually opened.
         func openLink(atUTF16 index: Int) -> Bool {
             guard let tv = textView, let onOpenLink else { return false }
-            let ns = tv.string as NSString
-            guard index <= ns.length else { return false }
-            let offset = ns.substring(to: index).count
-            guard let target = LinkCompletionContext.target(in: tv.string, at: offset)
+            let text = tv.string
+            guard let clicked = Range(NSRange(location: index, length: 0), in: text)?.lowerBound
+            else { return false }
+            let offset = text.distance(from: text.startIndex, to: clicked)
+            guard let target = LinkCompletionContext.target(in: text, at: offset)
             else { return false }
             onOpenLink(target)
             return true
@@ -243,6 +308,15 @@ final class LinkTextView: NSTextView {
     /// link handler at all, i.e. plain text — must fall through to AppKit so
     /// the caret still lands where the user clicked.
     var onCommandClick: (@MainActor (Int) -> Bool)?
+    /// Fires whenever focus leaves this view, including the routes that do not
+    /// produce a `textDidEndEditing`.
+    var onResignFirstResponder: (@MainActor () -> Void)?
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onResignFirstResponder?() }
+        return resigned
+    }
 
     override func mouseDown(with event: NSEvent) {
         guard event.modifierFlags.contains(.command), let onCommandClick else {

@@ -11,6 +11,8 @@ struct DocumentPane: View {
     /// only while the "create it?" prompt is up — clicking a dead link must
     /// never create a file silently.
     @State private var unresolved: String?
+    /// Why creating that note failed, when it did.
+    @State private var createFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +28,13 @@ struct DocumentPane: View {
                               onChange: { session.markChanged() },
                               completions: { store.linkCompletions(matching: $0) },
                               openLink: { target in
-                                  if !store.openLink(target) { unresolved = target }
+                                  // `documentName` first: `openLink` funnels into
+                                  // `LinkResolver.basename`, which strips a
+                                  // `#fragment` but NOT an `|alias`, so
+                                  // `[[Design|why]]` would look up "Design|why"
+                                  // and never resolve.
+                                  let name = LinkCompletionContext.documentName(of: target)
+                                  if !store.openLink(name) { unresolved = name }
                               }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
@@ -54,18 +62,40 @@ struct DocumentPane: View {
                 unresolved = nil
             }
         } message: {
-            Text("\"\(LinkResolver.basename(of: unresolved ?? ""))\" doesn't exist in this "
-                 + "vault yet.")
+            Text("\"\(unresolved ?? "")\" doesn't exist in this vault yet.")
+        }
+        // The same "Not done" sheet the sidebar uses for a refused trash. A
+        // Create button that silently does nothing on a failed write is worse
+        // than no button.
+        .sheet(isPresented: Binding(get: { createFailure != nil },
+                                    set: { if !$0 { createFailure = nil } })) {
+            MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
         }
     }
 
-    /// The link's basename becomes the new note's title — the alias/heading
-    /// syntax in the raw target names a place INSIDE a document, not the
-    /// document, so it must not end up in the filename.
+    /// Splits the link into the folder it names and the note it names.
+    ///
+    /// A target with a `/` means a SUBFOLDER, and it is created: `[[Projects/
+    /// Design]]` is a path suffix to `LinkResolver`, so a note flattened into
+    /// the default folder would leave the very link the user just clicked
+    /// still unresolved — the one outcome "Create" must not produce.
+    ///
+    /// The alias and fragment are already gone by here (`documentName` runs at
+    /// the click site), but stripping again is free and keeps this correct if
+    /// it is ever called with a raw target.
     private func createUnresolved(_ target: String) {
-        let title = LinkResolver.basename(of: target)
-        guard !title.isEmpty, let note = try? store.create(title: title) else { return }
-        store.open(url: note.path)
+        var parts = LinkCompletionContext.documentName(of: target)
+            .split(separator: "/").map(String.init)
+        guard let title = parts.popLast(), !title.isEmpty else {
+            createFailure = "\"\(target)\" doesn't name a note."
+            return
+        }
+        do {
+            let note = try store.create(title: title, in: parts.joined(separator: "/"))
+            store.open(url: note.path)
+        } catch {
+            createFailure = "Couldn't create \"\(title)\": \(error.localizedDescription)"
+        }
     }
 
     /// Persistent and non-alarming: this file is open, readable and searchable,

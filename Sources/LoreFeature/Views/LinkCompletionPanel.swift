@@ -11,13 +11,17 @@ import AinkradAppKit
 /// still lands in the document. That in turn means the panel never receives
 /// key events at all — arrow/return/escape handling lives in the text view's
 /// `doCommandBy:` and drives this controller's selection.
+///
+/// A floating window that outlives its reason to exist is the failure mode
+/// here, so every path that ends editing calls `hide()`: Escape, the caret
+/// leaving the link, the text view resigning first responder, and view
+/// teardown. Scrolling repositions instead — the caret is still there.
 @MainActor
 final class LinkCompletionPanel {
     private var panel: NSPanel?
     private var host: NSHostingController<LinkCompletionView>?
-
-    private(set) var matches: [IndexRow] = []
-    private(set) var selected = 0
+    private var selection = LinkCompletionSelection()
+    private var tokens: HostThemeTokens?
 
     /// Called when the user picks a row, by click or by return.
     var onPick: ((IndexRow) -> Void)?
@@ -29,30 +33,22 @@ final class LinkCompletionPanel {
     func show(matches: [IndexRow], tokens: HostThemeTokens,
               caretRect: NSRect, over view: NSView) {
         guard !matches.isEmpty, let window = view.window else { hide(); return }
-        if self.matches != matches { selected = 0 }
-        self.matches = matches
-        selected = min(selected, max(0, matches.count - 1))
+        selection.update(to: matches)
+        self.tokens = tokens
 
-        let root = makeRootView(tokens: tokens)
         let panel = self.panel ?? makePanel(attachedTo: window)
-        if let host { host.rootView = root } else {
-            let controller = NSHostingController(rootView: root)
-            host = controller
-            panel.contentViewController = controller
-        }
         self.panel = panel
-
-        let size = host?.view.fittingSize ?? NSSize(width: 260, height: 100)
-        panel.setContentSize(size)
-        // Below the caret line by default; above it when there is no room, so
-        // the list never hangs off the bottom of the screen.
-        let screen = window.screen ?? NSScreen.main
-        let below = caretRect.minY - 4
-        let fitsBelow = (screen.map { below - size.height >= $0.visibleFrame.minY }) ?? true
-        let topLeft = NSPoint(x: caretRect.minX,
-                              y: fitsBelow ? below : caretRect.maxY + 4 + size.height)
-        panel.setFrameTopLeftPoint(topLeft)
+        render(into: panel)
+        place(panel, at: caretRect, on: window)
         panel.orderFront(nil)
+    }
+
+    /// Keeps an open list pinned to the caret while the document scrolls
+    /// underneath it. Without this the list stays put and points at the wrong
+    /// line.
+    func reposition(caretRect: NSRect, over view: NSView) {
+        guard let panel, let window = view.window else { return }
+        place(panel, at: caretRect, on: window)
     }
 
     func hide() {
@@ -62,32 +58,46 @@ final class LinkCompletionPanel {
         }
         panel = nil
         host = nil
-        matches = []
-        selected = 0
+        tokens = nil
+        selection.clear()
     }
 
-    /// Arrow-key navigation. Clamped rather than wrapping: wrapping in a short
-    /// list reads as the selection jumping unpredictably.
     func moveSelection(by delta: Int) {
-        guard !matches.isEmpty else { return }
-        let limit = min(matches.count, LinkCompletionView.maxRows) - 1
-        selected = min(max(0, selected + delta), limit)
-        if let host { host.rootView = rebuild(host.rootView) }
+        guard let panel else { return }
+        selection.move(by: delta)
+        render(into: panel)
     }
 
     func pickSelected() {
-        guard selected < matches.count else { return }
-        onPick?(matches[selected])
+        guard let row = selection.current else { return }
+        onPick?(row)
     }
 
-    private func makeRootView(tokens: HostThemeTokens) -> LinkCompletionView {
-        LinkCompletionView(matches: matches, selected: selected, tokens: tokens) {
-            [weak self] row in self?.onPick?(row)
+    // MARK: - Plumbing
+
+    private func render(into panel: NSPanel) {
+        guard let tokens else { return }
+        let root = LinkCompletionView(matches: selection.matches,
+                                      selected: selection.index,
+                                      tokens: tokens) { [weak self] row in self?.onPick?(row) }
+        if let host { host.rootView = root } else {
+            let controller = NSHostingController(rootView: root)
+            host = controller
+            panel.contentViewController = controller
         }
+        panel.setContentSize(host?.view.fittingSize ?? NSSize(width: 260, height: 100))
     }
 
-    private func rebuild(_ old: LinkCompletionView) -> LinkCompletionView {
-        makeRootView(tokens: old.tokens)
+    private func place(_ panel: NSPanel, at caretRect: NSRect, on window: NSWindow) {
+        let size = panel.frame.size
+        // Below the caret line by default; above it when there is no room, so
+        // the list never hangs off the bottom of the screen.
+        let screen = window.screen ?? NSScreen.main
+        let below = caretRect.minY - 4
+        let fitsBelow = (screen.map { below - size.height >= $0.visibleFrame.minY }) ?? true
+        panel.setFrameTopLeftPoint(NSPoint(x: caretRect.minX,
+                                           y: fitsBelow ? below
+                                                        : caretRect.maxY + 4 + size.height))
     }
 
     private func makePanel(attachedTo window: NSWindow) -> NSPanel {
