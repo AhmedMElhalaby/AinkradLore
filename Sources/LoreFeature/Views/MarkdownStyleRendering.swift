@@ -179,11 +179,17 @@ enum MarkdownStyleRenderer {
             .paragraphStyle: MarkdownParagraphStyles.style(for: .body, theme: theme)
         ], range: full)
 
-        for span in spans {
+        // Derived over ALL spans, before any windowing: nesting depth is a
+        // property of the document, and counting only the spans that survive
+        // the viewport window would make an indent change with the scroll.
+        let depths = MarkdownListDepth.depths(of: spans)
+
+        for (index, span) in spans.enumerated() {
             let r = NSRange(location: span.range.lowerBound, length: span.range.count)
             guard r.length > 0, NSMaxRange(r) <= full.length else { continue }
             if let window, NSIntersectionRange(r, window).length == 0 { continue }
-            add(span.kind, in: r, to: storage, tokens: tokens, theme: theme)
+            add(span.kind, in: r, to: storage, tokens: tokens, theme: theme,
+                listDepth: depths[index])
         }
         storage.endEditing()
     }
@@ -245,7 +251,7 @@ enum MarkdownStyleRenderer {
     /// every case styles the span's whole source range, markers included.
     private static func add(_ kind: StyleSpan.Kind, in r: NSRange,
                             to storage: NSTextStorage, tokens: HostThemeTokens,
-                            theme: MarkdownTheme) {
+                            theme: MarkdownTheme, listDepth: Int) {
         switch kind {
         case .heading(let level):
             // Foreground, not accentPrimary. Size and weight carry hierarchy;
@@ -337,7 +343,26 @@ enum MarkdownStyleRenderer {
         case .listItem:
             // Foreground unchanged by design: a list item is most of a note, and
             // tinting it would tint the note. Its children still style.
-            break
+            //
+            // The INDENT is the whole of a list's appearance, and until now
+            // nothing supplied a depth, so `MarkdownParagraphStyles`' list case
+            // was unreachable in practice. `listDepth` comes from containment —
+            // see `MarkdownListDepth` — and because spans are applied
+            // parent-first a nested item's deeper indent lands on top of its
+            // parent's, over its own range only.
+            //
+            // Applied over the PARAGRAPH, not the span. A nested item's range
+            // begins at its bullet, after the line's leading indent — but
+            // `NSTextStorage.endEditing` fixes paragraph attributes by
+            // extending the style of each paragraph's FIRST character across
+            // the whole paragraph. The leading spaces belong only to the
+            // ancestor's span, so the ancestor's shallower indent won every
+            // nested line and lists rendered flat no matter what depth said.
+            let paragraph = (storage.string as NSString).paragraphRange(for: r)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(
+                                    for: .listItem(depth: listDepth), theme: theme),
+                                 range: paragraph)
 
         case .marker:
             // Deliberately inert HERE. Marker spans exist so a later task can

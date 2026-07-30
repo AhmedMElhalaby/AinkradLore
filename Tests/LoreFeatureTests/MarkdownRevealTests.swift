@@ -164,6 +164,55 @@ extension MarkdownRevealTests {
         XCTAssertEqual(storage.string, body)
     }
 
+    /// Requirement 1. Reveal must be driven by SELECTION, not only by edits —
+    /// otherwise markers only update when the user types, which reads as the
+    /// editor being stuck. Nothing about the text changes between these two
+    /// calls; only the caret moves.
+    func test_changingOnlyTheSelectionChangesWhichMarkersAreHidden() {
+        let body = "**a**\n\n*b*"
+        let model = MarkdownDocumentModel(body: body)
+        let blocks = MarkdownReveal.blocks(in: body)
+        let storage = NSTextStorage(string: body)
+
+        func markerSize(caret: Int) -> CGFloat {
+            MarkdownStyleRenderer.apply(model.styleSpans, to: storage,
+                                        tokens: TestTokens.make(),
+                                        theme: MarkdownTheme(tokens: TestTokens.make()),
+                                        limitedTo: nil)
+            MarkdownStyleRenderer.collapse(
+                MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
+                                             selection: NSRange(location: caret, length: 0),
+                                             blocks: blocks),
+                in: storage)
+            return (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?
+                .pointSize ?? -1
+        }
+
+        // Caret in the SECOND block: the first block's `**` is collapsed.
+        XCTAssertLessThan(markerSize(caret: 8), 0.1)
+        // Caret in the FIRST block, same text, same spans: it comes back.
+        XCTAssertGreaterThan(markerSize(caret: 1), 1)
+        XCTAssertEqual(storage.string, body, "reveal is attributes only")
+    }
+
+    /// The fast path that keeps arrowing cheap: which blocks are revealed is
+    /// the whole of the reveal state, and it only changes when the caret
+    /// CROSSES a block boundary. Moving within a block must be a no-op, so the
+    /// editor can skip re-attributing entirely.
+    func test_revealedBlocksAreStableWhileTheCaretMovesWithinOneBlock() {
+        let body = "**a** and more\n\n*b*"
+        let blocks = MarkdownReveal.blocks(in: body)
+        let atOne = MarkdownEditorReveal.revealedBlocks(
+            blocks, selection: NSRange(location: 1, length: 0))
+        let atFive = MarkdownEditorReveal.revealedBlocks(
+            blocks, selection: NSRange(location: 5, length: 0))
+        XCTAssertEqual(atOne, atFive, "moving inside a block must not change reveal")
+
+        let inSecond = MarkdownEditorReveal.revealedBlocks(
+            blocks, selection: NSRange(location: (body as NSString).length - 1, length: 0))
+        XCTAssertNotEqual(atOne, inSecond, "crossing a boundary must change reveal")
+    }
+
     /// End to end: what `hiddenMarkers` reports, `collapse` hides — and the
     /// document text is identical afterwards.
     func test_hiddenMarkersCollapseWithoutTouchingTheDocument() {

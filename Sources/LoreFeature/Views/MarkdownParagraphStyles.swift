@@ -9,6 +9,39 @@ enum MarkdownBlock: Equatable {
     case codeBlock
 }
 
+/// How deeply each `.listItem` span is nested.
+///
+/// `StyleSpan.Kind.listItem` carries no depth, and does not need to: nesting is
+/// already in the ranges. `MarkdownASTCollector.visitListItem` appends the item
+/// then `descendInto`s it, so a nested item is emitted AFTER its ancestors and
+/// its range is strictly contained in theirs. Depth is therefore the number of
+/// still-open ancestors — which a stack answers in one pass, without changing
+/// the span kind and without a second walk of the document.
+enum MarkdownListDepth {
+
+    /// Depths aligned with `spans` by index. Entries for non-list spans are
+    /// `0` and are never read; the array is index-aligned rather than a
+    /// dictionary so the renderer's own loop can look a depth up by position.
+    static func depths(of spans: [StyleSpan]) -> [Int] {
+        var result = [Int](repeating: 0, count: spans.count)
+        var open: [Range<Int>] = []
+        for (index, span) in spans.enumerated() {
+            guard case .listItem = span.kind else { continue }
+            // Pop every ancestor this item is NOT inside. A sibling that starts
+            // where the previous item ended closes it; a genuinely nested item
+            // leaves it open.
+            while let top = open.last,
+                  !(span.range.lowerBound >= top.lowerBound
+                    && span.range.upperBound <= top.upperBound) {
+                open.removeLast()
+            }
+            result[index] = open.count
+            open.append(span.range)
+        }
+        return result
+    }
+}
+
 /// Block layout as paragraph ATTRIBUTES.
 ///
 /// Never as inserted whitespace: padding a list with spaces would change the

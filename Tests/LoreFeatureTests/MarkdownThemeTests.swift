@@ -150,6 +150,117 @@ extension MarkdownThemeTests {
         ])
     }
 
+    /// Requirement 2. The owner's complaint was that text runs edge to edge.
+    /// `contentInset` existed and was ignored in favour of a hard-coded 16.
+    func test_theTextContainerUsesTheThemeInsetRatherThanAHardcodedSixteen() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        // Narrow enough that the measure cap cannot be the thing setting the
+        // inset — this is the plain "comfortable margin" case.
+        let inset = MarkdownEditorLayout.containerInset(forViewWidth: 500, theme: theme)
+        XCTAssertEqual(inset.width, theme.contentInset, accuracy: 0.01)
+        XCTAssertNotEqual(inset.width, 16, accuracy: 0.01)
+    }
+
+    /// Requirement 2. On a wide window the column is capped at `maxMeasure`
+    /// and CENTRED — equal margins, not a left-hugging column.
+    func test_aWideViewCapsAndCentresTheTextColumnAtMaxMeasure() throws {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let measure = try XCTUnwrap(theme.maxMeasure)
+        let width: CGFloat = 2000
+        let inset = MarkdownEditorLayout.containerInset(forViewWidth: width, theme: theme)
+        XCTAssertEqual(width - inset.width * 2, measure, accuracy: 0.5,
+                       "the column must be capped at the theme's measure")
+        XCTAssertGreaterThan(inset.width, theme.contentInset,
+                             "a wide view must grow its margins, not its column")
+        // Centred: one symmetric inset means left margin == right margin.
+        XCTAssertEqual(inset.width, width - (inset.width + measure), accuracy: 0.5)
+    }
+
+    /// The cap must never make the margin smaller than the theme's floor on a
+    /// narrow window — a phone-width pane still gets its breathing room.
+    func test_aNarrowViewNeverShrinksBelowTheThemeInset() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let inset = MarkdownEditorLayout.containerInset(forViewWidth: 120, theme: theme)
+        XCTAssertEqual(inset.width, theme.contentInset, accuracy: 0.01)
+    }
+
+    /// Requirement 3. Once the column is centred, the drawn decoration has to
+    /// move with it. Two coordinate sources (`textContainerOrigin` for the
+    /// text rect, `textContainerInset` for the panel x) agree only while the
+    /// column is NOT centred, so this is the test that pins them together.
+    func test_backgroundGeometryTracksTheTextColumnWhenCentred() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let width: CGFloat = 2000
+        let tv = LinkTextView(frame: NSRect(x: 0, y: 0, width: width, height: 400))
+        tv.isHorizontallyResizable = false
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainerInset = MarkdownEditorLayout.containerInset(forViewWidth: width,
+                                                                    theme: theme)
+        let x = MarkdownBlockBackgrounds.columnX(in: tv)
+        let columnWidth = MarkdownBlockBackgrounds.columnWidth(in: tv)
+        XCTAssertEqual(x, tv.textContainerOrigin.x, accuracy: 0.5,
+                       "decoration must use the same origin the text rects use")
+        XCTAssertGreaterThan(x, theme.contentInset,
+                             "a centred column starts well right of the bare inset")
+        XCTAssertEqual(width - (x + columnWidth), x, accuracy: 2,
+                       "the panel must be as far from the right edge as from the left")
+    }
+
+    /// Requirement 6. `MarkdownParagraphStyles` has taken a depth since Task 5;
+    /// nothing ever supplied one, so every nesting level rendered flat.
+    func test_nestedListItemsIndentByDerivedDepth() throws {
+        let tokens = TestTokens.make()
+        let body = "- outer\n    - inner\n"
+        let model = MarkdownDocumentModel(body: body)
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.apply(model.styleSpans, to: storage, tokens: tokens,
+                                    theme: MarkdownTheme(tokens: tokens), limitedTo: nil)
+        let outer = try XCTUnwrap(storage.attribute(
+            .paragraphStyle, at: (body as NSString).range(of: "outer").location,
+            effectiveRange: nil) as? NSParagraphStyle)
+        let inner = try XCTUnwrap(storage.attribute(
+            .paragraphStyle, at: (body as NSString).range(of: "inner").location,
+            effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertGreaterThan(outer.firstLineHeadIndent, 0,
+                             "even a top-level item must indent")
+        XCTAssertGreaterThan(inner.firstLineHeadIndent, outer.firstLineHeadIndent,
+                             "a nested item must indent past its parent")
+    }
+
+    /// Depth is DERIVED from containment, so a second top-level item after a
+    /// nested one must fall back to depth 0 rather than inheriting the nesting.
+    func test_listDepthReturnsToZeroAfterANestedItem() {
+        let spans = [StyleSpan(range: 0..<20, kind: .listItem),
+                     StyleSpan(range: 5..<15, kind: .listItem),
+                     StyleSpan(range: 20..<30, kind: .listItem)]
+        XCTAssertEqual(MarkdownListDepth.depths(of: spans), [0, 1, 0])
+    }
+
+    /// Requirement 4. Regions are derived from ALL spans while attributes are
+    /// windowed, so an unclipped panel could be painted behind text that was
+    /// never styled.
+    func test_regionsAreClippedToTheViewportWindow() {
+        let spans = [StyleSpan(range: 0..<10, kind: .codeBlock(language: nil)),
+                     StyleSpan(range: 100..<120, kind: .blockQuote)]
+        let window = NSRange(location: 0, length: 50)
+        let regions = MarkdownBlockBackgrounds.regions(for: spans, length: 200,
+                                                       limitedTo: window)
+        XCTAssertEqual(regions, [
+            .init(kind: .codePanel, range: NSRange(location: 0, length: 10))
+        ], "a region outside the styled window must not be drawn")
+    }
+
+    /// A region straddling the window edge is clipped, not dropped — the
+    /// visible half still needs its panel.
+    func test_aRegionStraddlingTheWindowIsClippedNotDropped() {
+        let spans = [StyleSpan(range: 40..<200, kind: .codeBlock(language: nil))]
+        let regions = MarkdownBlockBackgrounds.regions(
+            for: spans, length: 200, limitedTo: NSRange(location: 0, length: 50))
+        XCTAssertEqual(regions, [
+            .init(kind: .codePanel, range: NSRange(location: 40, length: 10))
+        ])
+    }
+
     /// Body text gets real line height even with no spans at all — the rhythm
     /// is the floor, not something only headings enjoy.
     func test_bodyTextCarriesTheThemesLineHeight() {

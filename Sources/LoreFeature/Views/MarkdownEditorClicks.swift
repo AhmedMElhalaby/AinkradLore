@@ -34,6 +34,26 @@ final class LinkTextView: NSTextView {
     /// Fires whenever focus leaves this view, including the routes that do not
     /// produce a `textDidEndEditing`.
     var onResignFirstResponder: (@MainActor () -> Void)?
+    /// Fires when the view's WIDTH changes, which is the only input to where
+    /// the text column sits — see `MarkdownEditorLayout`. Height changes are
+    /// ignored, and a height change is what most `setFrameSize` calls are: the
+    /// view grows as the document does.
+    var onWidthChange: (@MainActor (CGFloat) -> Void)?
+    private var lastNotifiedWidth: CGFloat = -1
+
+    /// The resize hook. `updateNSView` is not one: SwiftUI does not re-run it
+    /// for every frame of a live window resize, so a column centred only there
+    /// would drift off-centre while the user drags the window edge.
+    ///
+    /// Cannot recurse: the handler sets `textContainerInset`, never the frame,
+    /// and any frame change that follows carries the same width — which this
+    /// guard drops.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard abs(newSize.width - lastNotifiedWidth) > 0.5 else { return }
+        lastNotifiedWidth = newSize.width
+        onWidthChange?(newSize.width)
+    }
 
     /// Code panels and blockquote bars to paint BEHIND the text. Set by the
     /// coordinator whenever styles are applied; see `MarkdownBlockBackgrounds`
