@@ -201,7 +201,7 @@ extension LoreStore {
     /// the pass knows both.
     struct LinkRewritePass {
         var rewritten: [URL] = []
-        var skipped: [URL] = []
+        var skipped: [SkippedFile] = []
         var unchanged: [URL] = []
         var failed: [(url: URL, reason: String)] = []
         /// Sessions on a file that is about to move, with its pre-move path.
@@ -279,7 +279,7 @@ extension LoreStore {
         for (path, fileEdits) in editedByFile {
             let file = fileEdits[0].file
             guard !blockedByUnsavedEdits.contains(path) else {
-                pass.skipped.append(file)
+                pass.skipped.append(SkippedFile(url: file, reason: .unsavedEdits))
                 continue
             }
             do {
@@ -287,7 +287,8 @@ extension LoreStore {
                                                    baseline: baselines[path]) {
                 case .written:   pass.rewritten.append(file); pass.writtenPaths.insert(path)
                 case .unchanged: pass.unchanged.append(file)
-                case .skipped:   pass.skipped.append(file)
+                case .skipped(let reason):
+                    pass.skipped.append(SkippedFile(url: file, reason: reason))
                 }
             } catch {
                 pass.failed.append((file, error.localizedDescription))
@@ -417,7 +418,7 @@ extension LoreStore {
             (moved != nil && $0.path == plan.source.path) ? plan.destination : $0
         }
         return RenameReport(rewritten: reportedRewrites.sorted { $0.path < $1.path },
-                            skipped: pass.skipped.sorted { $0.path < $1.path },
+                            skipped: pass.skipped.sorted { $0.url.path < $1.url.path },
                             unchanged: pass.unchanged.sorted { $0.path < $1.path },
                             failed: failed, movedTo: moved)
     }

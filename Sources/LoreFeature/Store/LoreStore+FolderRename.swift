@@ -241,8 +241,10 @@ extension LoreStore {
         // new path: the old one no longer exists by the time the UI renders.
         let reported = pass.rewritten.map { Self.relocating($0, from: prefix, to: moved) }
         return RenameReport(rewritten: reported.sorted { $0.path < $1.path },
-                            skipped: pass.skipped.map { Self.relocating($0, from: prefix, to: moved) }
-                                .sorted { $0.path < $1.path },
+                            skipped: pass.skipped.map {
+                                SkippedFile(url: Self.relocating($0.url, from: prefix, to: moved),
+                                            reason: $0.reason)
+                            }.sorted { $0.url.path < $1.url.path },
                             unchanged: pass.unchanged.map { Self.relocating($0, from: prefix, to: moved) }
                                 .sorted { $0.path < $1.path },
                             failed: failed, movedTo: moved)

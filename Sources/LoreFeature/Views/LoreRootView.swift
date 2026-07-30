@@ -12,6 +12,15 @@ struct LoreRootView: View {
     /// that produced it; gating the fallback viewer on this makes sure a stale
     /// error never shadows a document that opened perfectly well.
     @State private var attempted: URL?
+    /// Rename / move / trash for both sidebar modes. Created here so the two
+    /// sidebars share one state machine and one set of modals.
+    @State private var ops: SidebarOperations
+
+    init(store: LoreStore, theme: HostTheme) {
+        self.store = store
+        self.theme = theme
+        _ops = State(initialValue: SidebarOperations(store: store))
+    }
 
     /// A filtered tree of mostly-empty branches is worse than a list, so an
     /// active search or tag filter always wins over the persisted tree
@@ -23,20 +32,34 @@ struct LoreRootView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: AinkradSpacing.sm) {
+                // Search and quick-capture live ABOVE the mode picker, outside
+                // both sidebars. They used to live inside `NoteListView`, which
+                // is not mounted in tree mode — so in tree mode the user could
+                // not search and could not create a note at all. Typing a query
+                // still swings the sidebar to the flat list (see
+                // `effectiveSidebarMode`); the point is that the field exists to
+                // type into either way.
+                HStack(spacing: AinkradSpacing.sm) {
+                    AinkradSearchField(text: $query, placeholder: "Search notes")
+                    AinkradIconButton(systemName: "plus", action: quickCapture)
+                        .keyboardShortcut("n", modifiers: .command)
+                }
+                .padding(.horizontal, AinkradSpacing.md)
+                .padding(.top, AinkradSpacing.md)
+
                 AinkradSegmentedPicker(
                     items: [LoreStore.SidebarMode.tree, .all],
                     selection: Binding(get: { store.sidebarMode },
                                        set: { store.setSidebarMode($0) })
                 ) { mode in mode == .tree ? "Folders" : "All notes" }
                 .padding(.horizontal, AinkradSpacing.md)
-                .padding(.top, AinkradSpacing.md)
 
                 if effectiveSidebarMode == .tree {
                     FolderTreeView(store: store, theme: theme, selected: $selected,
-                                  onSelect: openRow)
+                                  onSelect: openRow, ops: ops)
                 } else {
                     NoteListView(store: store, query: $query, selected: $selected, theme: theme,
-                                onSelect: openRow, onNew: quickCapture, onDelete: deleteRow,
+                                onSelect: openRow, onNew: quickCapture, ops: ops,
                                 activeTag: $activeTag)
                 }
             }
@@ -51,6 +74,22 @@ struct LoreRootView: View {
         }
         .background(theme.tokens.background)
         .environment(\.ainkradTheme, theme.tokens)
+        // Attached at the surface ROOT: `ainkradConfirmDialog` dims and centers
+        // within the view it modifies, so attaching it to the 280pt sidebar
+        // would scope a destructive confirmation to a narrow column.
+        .loreSidebarOperations(ops, theme: theme)
+        // A rename, a move or a delete makes a held `IndexRow` stale — its path
+        // no longer names a file. Dropped when the row set changes, so the
+        // sidebar cannot keep a selection pointing at something that is gone
+        // (and `content` cannot keep showing a fallback for it).
+        .onChange(of: store.rows.count) { _, _ in
+            if let row = selected, !store.rows.contains(where: { $0.path == row.path }) {
+                selected = nil
+            }
+            if let url = attempted, !store.rows.contains(where: { $0.path == url }) {
+                attempted = nil
+            }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -77,12 +116,6 @@ struct LoreRootView: View {
         store.open(row)
     }
 
-    private func deleteRow(_ row: IndexRow) {
-        deleteDocument(row, in: store)
-        if selected?.path == row.path { selected = nil }
-        if attempted == row.path { attempted = nil }
-    }
-
     private func quickCapture() {
         guard let note = try? store.create(title: "") else { return }
         attempted = note.path
@@ -106,10 +139,24 @@ struct LoreRootView: View {
 /// defect `trash` was written to close. It has no business owning that logic
 /// twice.
 ///
-/// The error is dropped here because the sidebar has nowhere to render it yet;
-/// Task 10 owns the confirmation sheet and should surface `LoreError` —
-/// `unsavedEdits` in particular, which is a refusal the user must act on.
+/// RETURNS the refusal rather than swallowing it, and nil on success.
+///
+/// This was `try? store.trash(row)`. `trash` REFUSES when an open tab still
+/// holds unsaved edits it could not flush — so the user pressed Delete, the file
+/// stayed, and nothing said why: a silent no-op indistinguishable from a broken
+/// button. `trashFailed` (a volume with no `.Trashes`) was equally invisible.
+/// `SidebarOperations.confirmTrash` puts the returned sentence in front of the
+/// user, and the sentence for `unsavedEdits` carries the way out.
 @MainActor
-func deleteDocument(_ row: IndexRow, in store: LoreStore) {
-    try? store.trash(row)
+@discardableResult
+func deleteDocument(_ row: IndexRow, in store: LoreStore) -> String? {
+    do {
+        _ = try store.trash(row)
+        return nil
+    } catch let error as LoreError {
+        return SidebarOperations.describe(error, row: row)
+    } catch {
+        return "“\(row.path.lastPathComponent)” could not be moved to the Trash: "
+            + error.localizedDescription
+    }
 }

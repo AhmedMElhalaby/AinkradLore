@@ -8,16 +8,13 @@ struct NoteListView: View {
     let theme: HostTheme
     let onSelect: (IndexRow) -> Void
     let onNew: () -> Void
-    /// Delete affordance, inherited from the old `NoteEditorPane`: it lives on
-    /// the row's context menu now that the editor pane is engine-owned.
-    let onDelete: (IndexRow) -> Void
+    /// Rename / move / trash, shared with `FolderTreeView`. Owns the
+    /// confirmation dialog, the preview sheet and — new in Task 10 — the
+    /// VISIBLE refusal when a delete is declined.
+    let ops: SidebarOperations
     /// Lifted to `LoreRootView` so it can decide whether an active tag filter
     /// should force the flat list even while the sidebar is in tree mode.
     @Binding var activeTag: String?
-
-    /// The row a delete was requested for. Deleting a file is destructive and
-    /// irreversible, so it keeps its confirmation.
-    @State private var pendingDelete: IndexRow?
 
     private var visible: [IndexRow] {
         var base = query.isEmpty ? store.rows : store.search(query)
@@ -26,13 +23,14 @@ struct NoteListView: View {
     }
 
     var body: some View {
+        // The search field and the "+" button used to live HERE, which meant
+        // neither existed in tree mode — this view is not even mounted then.
+        // They are now in `LoreRootView`'s sidebar header, above the mode
+        // picker, so both are reachable in both modes. Tag chips stay here: they
+        // are a flat-list filter by nature (a tag cuts across folders, so
+        // filtering the tree by one leaves a scaffold of empty branches), and
+        // `LoreRootView` already forces the flat list whenever a tag is active.
         VStack(spacing: AinkradSpacing.sm) {
-            HStack(spacing: AinkradSpacing.sm) {
-                AinkradSearchField(text: $query, placeholder: "Search notes")
-                AinkradIconButton(systemName: "plus", action: onNew)
-                    .keyboardShortcut("n", modifiers: .command)
-            }
-
             if !store.allTags.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AinkradSpacing.xs) {
@@ -69,40 +67,12 @@ struct NoteListView: View {
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
-                            .contextMenu {
-                                // Unclaimed rows list so the sidebar tells the
-                                // truth about the vault — but Lore cannot open
-                                // them, so M0 does not arm an irreversible
-                                // delete against arbitrary binaries the user
-                                // has no way to inspect here first. A later
-                                // milestone can decide that deliberately.
-                                if row.type != EngineRegistry.unclaimedType {
-                                    Button("Delete", role: .destructive) { pendingDelete = row }
-                                }
-                            }
+                            .contextMenu { LoreRowMenu(row: row, ops: ops) }
                         }
                     }
                 }
             }
         }
         .padding(AinkradSpacing.md)
-        .ainkradConfirmDialog(
-            isPresented: deleteBinding,
-            title: "Delete document",
-            message: "Delete “\(pendingDeleteName)”? This removes the file from disk.",
-            confirmTitle: "Delete",
-            isDestructive: true) {
-                if let row = pendingDelete { onDelete(row) }
-                pendingDelete = nil
-            }
-    }
-
-    private var deleteBinding: Binding<Bool> {
-        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
-    }
-
-    private var pendingDeleteName: String {
-        guard let row = pendingDelete else { return "" }
-        return row.title.isEmpty ? row.path.lastPathComponent : row.title
     }
 }

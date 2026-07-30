@@ -186,7 +186,10 @@ final class RenameApplicationTests: XCTestCase {
         // INDEX knows it (realpath-canonical, `/private/var/...`), while the
         // test built `a` from `temporaryDirectory` (`/var/...`). Same file,
         // different spelling — see `LoreStore.planMove`.
-        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(report.skipped.map(\.url.lastPathComponent), ["a.md"])
+        // The CAUSE travels with the file: the report must not describe an
+        // unsaved-edits skip as somebody else's edit, or vice versa.
+        XCTAssertEqual(report.skipped.map(\.reason), [.changedOnDisk])
         XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), external)
     }
 
@@ -348,7 +351,10 @@ final class RenameApplicationHardeningTests: XCTestCase {
         // The file was not written...
         XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), external)
         // ...the outcome is in the report...
-        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(report.skipped.map(\.url.lastPathComponent), ["a.md"])
+        // The CAUSE travels with the file: the report must not describe an
+        // unsaved-edits skip as somebody else's edit, or vice versa.
+        XCTAssertEqual(report.skipped.map(\.reason), [.unsavedEdits])
         XCTAssertFalse(report.rewritten.contains { $0.lastPathComponent == "a.md" })
         // ...and the unsaved text is still in the editor, still conflicted,
         // for the user to resolve themselves.
@@ -429,10 +435,12 @@ final class RenameApplicationHardeningTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "see [[Design]]")
 
         // No baseline: fail closed.
-        XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file, baseline: nil), .skipped)
+        XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file, baseline: nil),
+                       .skipped(.unverifiable))
         // Stale baseline: refuse.
         XCTAssertEqual(try LinkRewriter.applyEdits(hit, to: file,
-                                                   baseline: .distantPast), .skipped)
+                                                   baseline: .distantPast),
+                       .skipped(.changedOnDisk))
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "see [[Design]]")
 
         // A real match writes.
@@ -851,7 +859,10 @@ final class FolderRenameTests: XCTestCase {
 
         let report = s.apply(s.plan(renameFolder: folder, to: "Work"))
 
-        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(report.skipped.map(\.url.lastPathComponent), ["a.md"])
+        // The CAUSE travels with the file: the report must not describe an
+        // unsaved-edits skip as somebody else's edit, or vice versa.
+        XCTAssertEqual(report.skipped.map(\.reason), [.unsavedEdits])
         XCTAssertEqual(report.rewritten.map(\.lastPathComponent), ["b.md"])
         // Nothing was written to the excluded file, and the tab kept its edits.
         XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("external"))
@@ -907,7 +918,10 @@ final class FolderRenameTests: XCTestCase {
         try external.write(to: a, atomically: true, encoding: .utf8)
 
         let report = s.apply(plan)
-        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(report.skipped.map(\.url.lastPathComponent), ["a.md"])
+        // The CAUSE travels with the file: the report must not describe an
+        // unsaved-edits skip as somebody else's edit, or vice versa.
+        XCTAssertEqual(report.skipped.map(\.reason), [.changedOnDisk])
         XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), external)
     }
 }

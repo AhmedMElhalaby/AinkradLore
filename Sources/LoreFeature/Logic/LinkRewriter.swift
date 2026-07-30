@@ -198,6 +198,47 @@ public enum LinkRewriter {
     }
 }
 
+/// Why one file was left alone by a rewrite pass.
+///
+/// Carried per file rather than implied by the list it lands in, because
+/// `skipped` has THREE causes that are not interchangeable to the person
+/// reading the report: "another app edited this file" is a fact about the
+/// vault, while "your own tab has unsaved edits" is an instruction to go and
+/// save. The first cut of the confirmation UI described every skip as "changed
+/// by another app and left alone", which is simply false for the unsaved-edits
+/// case — a report that misattributes a cause is worse than one that omits it,
+/// because the user acts on it.
+public enum SkipReason: Sendable, Equatable {
+    /// The file's mtime moved past the plan-time baseline: someone edited it
+    /// between the preview and the confirmation.
+    case changedOnDisk
+    /// No usable baseline, or the mtime could not be read. We cannot prove the
+    /// file is the one we planned against, so we do not write it.
+    case unverifiable
+    /// An open tab still holds unsaved edits to it and flushing them refused,
+    /// so the file was excluded from the rewrite entirely.
+    case unsavedEdits
+
+    /// Completes the sentence "This file …". Present tense, because each of
+    /// these is still true when the user reads it.
+    public var phrase: String {
+        switch self {
+        case .changedOnDisk: "was changed outside Lore after the preview"
+        case .unverifiable: "could not be confirmed unchanged since the preview"
+        case .unsavedEdits: "has unsaved edits in an open tab"
+        }
+    }
+}
+
+/// One file a rewrite pass declined to write, with the reason it declined.
+public struct SkippedFile: Sendable, Equatable {
+    public let url: URL
+    public let reason: SkipReason
+    public init(url: URL, reason: SkipReason) {
+        self.url = url; self.reason = reason
+    }
+}
+
 /// What actually happened when a plan was applied. Partial success is the
 /// EXPECTED case, not an error state: a file that changed on disk is skipped
 /// so an edit made seconds ago in another app is not destroyed. `apply` does
@@ -205,10 +246,9 @@ public enum LinkRewriter {
 public struct RenameReport: Sendable {
     /// Files whose inbound links were rewritten.
     public let rewritten: [URL]
-    /// Files left ALONE, either because they changed on disk after the plan was
-    /// computed or because a tab still holds unsaved edits to them. Their links
-    /// still point at the old name; nothing was lost.
-    public let skipped: [URL]
+    /// Files left ALONE, each carrying WHY — see `SkipReason`. Their links still
+    /// point at the old name; nothing was lost.
+    public let skipped: [SkippedFile]
     /// Files that were opened and matched nothing — no delimiter-anchored
     /// occurrence of the old target survived to rewrite time. Nothing was
     /// written, so they must not be listed as `rewritten` (an untruthful
@@ -220,7 +260,7 @@ public struct RenameReport: Sendable {
     /// The new location, or nil if the file was not moved.
     public let movedTo: URL?
 
-    public init(rewritten: [URL], skipped: [URL], unchanged: [URL] = [],
+    public init(rewritten: [URL], skipped: [SkippedFile], unchanged: [URL] = [],
                 failed: [(url: URL, reason: String)], movedTo: URL?) {
         self.rewritten = rewritten; self.skipped = skipped
         self.unchanged = unchanged
@@ -237,13 +277,17 @@ extension LinkRewriter {
     /// it and nothing matched" is neither a write nor a refusal, and collapsing
     /// it into either one makes the report lie — and, worse, drags that file's
     /// tab through a `resolveByReloading()` it never needed.
-    enum EditOutcome {
+    /// Explicitly `Equatable`: an enum stops synthesizing it as soon as a case
+    /// carries an associated value, and `.skipped` now carries its cause.
+    enum EditOutcome: Equatable {
         case written
         /// No delimiter-anchored occurrence matched. Nothing was written.
         case unchanged
-        /// Refused: the file changed on disk since the plan, or we have no
-        /// baseline to compare against.
-        case skipped
+        /// Refused, with the cause: the file changed on disk since the plan, or
+        /// we have no baseline to compare against. The cause travels with the
+        /// outcome so the report can word each case correctly instead of
+        /// describing every skip as somebody else's edit.
+        case skipped(SkipReason)
     }
 
     /// Applies one file's edits, refusing if the file changed since `baseline`.
@@ -253,10 +297,14 @@ extension LinkRewriter {
     /// not open. Failing closed costs a redo; failing open costs their text.
     static func applyEdits(_ edits: [LinkEdit], to file: URL,
                            baseline: Date?) throws -> EditOutcome {
-        guard let baseline else { return .skipped }
+        guard let baseline else { return .skipped(.unverifiable) }
+        // Split from the comparison so the two causes stay distinguishable in
+        // the report: an unreadable mtime is "cannot verify", a newer one is
+        // "somebody edited it". Same behaviour, honest wording.
         guard let disk = try? FileManager.default
-                .attributesOfItem(atPath: file.path)[.modificationDate] as? Date,
-              disk <= baseline else { return .skipped }
+                .attributesOfItem(atPath: file.path)[.modificationDate] as? Date
+        else { return .skipped(.unverifiable) }
+        guard disk <= baseline else { return .skipped(.changedOnDisk) }
         let text = try String(contentsOf: file, encoding: .utf8)
         var out = text
         for edit in edits {

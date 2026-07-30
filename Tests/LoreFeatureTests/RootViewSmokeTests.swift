@@ -70,7 +70,12 @@ final class RootViewSmokeTests: XCTestCase {
                               indexPath: root.appendingPathComponent(".idx.sqlite"))
         try store.setVaultRootForTesting(root)
         _ = FolderTreeView(store: store, theme: HostTheme(TestTokens.make()),
-                           selected: .constant(nil), onSelect: { _ in })
+                           selected: .constant(nil), onSelect: { _ in },
+                           ops: SidebarOperations(store: store))
+        _ = NoteListView(store: store, query: .constant(""), selected: .constant(nil),
+                         theme: HostTheme(TestTokens.make()), onSelect: { _ in },
+                         onNew: {}, ops: SidebarOperations(store: store),
+                         activeTag: .constant(nil))
     }
 
     func test_fallbackViewer_builds() {

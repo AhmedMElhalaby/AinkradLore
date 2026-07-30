@@ -43,13 +43,15 @@ struct FolderNode: Identifiable {
 /// flat list. Expansion state and the choice between the two views persist
 /// via `LoreStore`; see `LoreStore.sidebarMode` / `setExpandedFolders`.
 ///
-/// Task 10 owns context menus, rename/move/trash on tree rows — this view
-/// intentionally has none of that. Selecting a document is its only affordance.
+/// Rename / move / trash arrive through `ops`, whose menus (`LoreRowMenu`,
+/// `LoreFolderMenu`) are shared with `NoteListView` so a destructive affordance
+/// is not defined twice.
 struct FolderTreeView: View {
     @Bindable var store: LoreStore
     let theme: HostTheme
     @Binding var selected: IndexRow?
     let onSelect: (IndexRow) -> Void
+    let ops: SidebarOperations
     @State private var expanded: Set<String> = []
 
     var body: some View {
@@ -83,6 +85,13 @@ struct FolderTreeView: View {
                 .padding(.leading, CGFloat(depth) * 12)
             }
             .buttonStyle(.plain)
+            // Only a real folder gets a folder menu. `node.id` is a
+            // vault-RELATIVE path, so it is resolved against the live vault root
+            // rather than assumed absolute; with no vault there is no folder to
+            // rename and the menu is simply absent.
+            .contextMenu {
+                if let folder = folderURL(node) { LoreFolderMenu(folder: folder, ops: ops) }
+            }
         }
         if depth == 0 || expanded.contains(node.id) {
             ForEach(node.documents, id: \.path) { row in
@@ -94,9 +103,17 @@ struct FolderTreeView: View {
                     subtitle: nil,
                     trailing: { EmptyView() })
                 .padding(.leading, CGFloat(depth + 1) * 12)
+                .contextMenu { LoreRowMenu(row: row, ops: ops) }
             }
             ForEach(node.children) { child in outline(child, depth: depth + 1) }
         }
+    }
+
+    /// The absolute URL of a tree node, or nil for the synthetic root node (its
+    /// id is `"/"` and it IS the vault — renaming it is not a folder rename).
+    private func folderURL(_ node: FolderNode) -> URL? {
+        guard let root = store.vaultRoot, node.id != "/" else { return nil }
+        return root.appendingPathComponent(node.id)
     }
 
     private func icon(for row: IndexRow) -> String {
