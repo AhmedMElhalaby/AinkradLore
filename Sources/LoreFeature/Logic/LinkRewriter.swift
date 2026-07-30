@@ -44,11 +44,22 @@ public struct RenamePlan: Sendable {
     /// the guard would never fire.
     public let baselines: [String: Date]
 
+    /// Non-nil when the operation was refused at PLAN time, before anything was
+    /// computed — today only an invalid new name (empty, a path separator, `.`,
+    /// `..`, or a destination outside the vault root). A refusal is carried on
+    /// the plan rather than thrown so the preview UI can render it beside every
+    /// other outcome, and so `apply` has exactly one place to report it.
+    ///
+    /// `apply` writes NOTHING and creates NOTHING for a refused plan.
+    public let refusal: String?
+
     public init(source: URL, destination: URL, edits: [LinkEdit],
                 unrewritable: [UnrewritableLink] = [],
-                baselines: [String: Date] = [:]) {
+                baselines: [String: Date] = [:],
+                refusal: String? = nil) {
         self.source = source; self.destination = destination; self.edits = edits
         self.unrewritable = unrewritable; self.baselines = baselines
+        self.refusal = refusal
     }
 
     /// A copy carrying freshly-read mtimes. Keeps the mtime read (I/O) out of
@@ -56,7 +67,8 @@ public struct RenamePlan: Sendable {
     /// it and where the preview UI (Task 10) can see it too.
     public func withBaselines(_ baselines: [String: Date]) -> RenamePlan {
         RenamePlan(source: source, destination: destination, edits: edits,
-                   unrewritable: unrewritable, baselines: baselines)
+                   unrewritable: unrewritable, baselines: baselines,
+                   refusal: refusal)
     }
 
     /// First-seen order, deduplicated, so the confirmation UI shows a stable

@@ -186,8 +186,19 @@ struct LoreNoteOperations {
 
     private func deleteNote(_ object: [String: Any]) throws -> AgentActionResult {
         let row = try resolve(object)
-        try store.delete(row)
-        return .success("Deleted \"\(row.title)\" (\(relative(row.path))).")
+        // `store.trash` and not the old `store.delete`: this path closed no tab
+        // and cancelled no pending save, so `delete_note` could permanently
+        // unlink a file AND have the open tab's debounced autosave recreate it
+        // 500ms later. `trash` owns all of that, and moves the file to the
+        // Trash instead of unlinking it. It can also REFUSE (a tab with
+        // unsaved edits that cannot be flushed) where `delete` never did; that
+        // arrives here as a `LoreError`, which `run`'s existing catch turns
+        // into the same `isError` result shape every other failure uses.
+        let inbound = try store.trash(row)
+        let warning = inbound == 0 ? "" :
+            " \(inbound) note\(inbound == 1 ? "" : "s") still link\(inbound == 1 ? "s" : "") "
+            + "to it; those links are now unresolved."
+        return .success("Moved \"\(row.title)\" (\(relative(row.path))) to the Trash.\(warning)")
     }
 
     // MARK: - helpers
@@ -302,6 +313,8 @@ struct LoreNoteOperations {
                 + "them deliberately (that needs approval and cannot be undone)."
         case .trashFailed(let url, let reason):
             return "Could not move \(relative(url)) to the Trash: \(reason)"
+        case .unsavedEdits(let url, let reason):
+            return "Lore declined to delete \(relative(url)): \(reason)"
         }
     }
 

@@ -1,7 +1,7 @@
 import Foundation
 
 // Renaming and moving a document: the first operation in Lore that writes to
-// files the user never opened. Three properties are load-bearing, in order:
+// files the user never opened. Four properties are load-bearing, in order:
 //
 //  1. ORDERING. Inbound links are rewritten BEFORE the file moves. Reversed,
 //     a crash mid-operation leaves a renamed file with every inbound link
@@ -14,9 +14,17 @@ import Foundation
 //  3. OPEN TABS. A session holding pre-rewrite content would clobber the
 //     rewrite on its next autosave, so pending saves are disarmed first and
 //     the sessions reloaded after.
+//  4. VALIDATE THE NAME AT THE BOUNDARY. `newName` is a basename, never a
+//     path: see `nameRejection`.
 //
-// It lives in its own file because `LoreStore.swift` is at 336 lines and the
-// project ceiling is 500.
+// `rewriteInboundLinks` below is the SINGLE link-rewriting write path, shared
+// by single-document rename/move (`apply(_ plan:)`, here) and folder rename
+// (`apply(_ plan: FolderRenamePlan)`, in `LoreStore+FolderRename.swift`).
+// There is deliberately no second, folder-shaped implementation of properties
+// 1–3: a bulk operation is the LAST place to re-derive them.
+//
+// It lives in its own file because `LoreStore.swift` is near the 500-line
+// project ceiling.
 extension LoreStore {
 
     // MARK: - Planning
@@ -24,10 +32,16 @@ extension LoreStore {
     /// Computes the change set for renaming `source` to `newName` (a basename,
     /// no extension). Nothing is written.
     public func plan(rename source: URL, to newName: String) -> RenamePlan {
-        let destination = source.deletingLastPathComponent()
+        let canonicalSource = VaultIndexCoordinator.canonical(source)
+        let parent = canonicalSource.deletingLastPathComponent()
+        if let refusal = nameRejection(newName, in: parent) {
+            return RenamePlan(source: canonicalSource, destination: canonicalSource,
+                              edits: [], refusal: refusal)
+        }
+        let destination = parent
             .appendingPathComponent(newName)
             .appendingPathExtension(source.pathExtension)
-        return planMove(source, to: destination)
+        return planMove(canonicalSource, to: destination)
     }
 
     /// Moving is renaming without the name change: it must still rewrite,
@@ -36,45 +50,46 @@ extension LoreStore {
         planMove(source, to: folder.appendingPathComponent(source.lastPathComponent))
     }
 
-    /// One plan per document beneath `folder`, presented under a single
-    /// preview (Task 10 builds that UI). Each plan still goes through the full
-    /// `plan`/`apply` machinery below, one document at a time — there is no
-    /// second, folder-shaped application path.
-    public func plan(renameFolder folder: URL, to newName: String) -> [RenamePlan] {
-        let canonicalFolder = VaultIndexCoordinator.canonical(folder)
-        let destinationFolder = canonicalFolder.deletingLastPathComponent()
-            .appendingPathComponent(newName)
-        let prefix = canonicalFolder.path + "/"
-        return rows
-            .filter { $0.path.path.hasPrefix(prefix) }
-            .map { row in
-                let relative = String(row.path.path.dropFirst(prefix.count))
-                return planMove(row.path, to: destinationFolder.appendingPathComponent(relative))
-            }
-    }
-
-    /// Applies every plan in sequence, one document at a time, each with its
-    /// own full `apply` (baselines, refusal checks, dirty-tab exclusion, …).
-    /// If one document's apply refuses, the rest still proceed — a folder
-    /// rename that aborted halfway with no record of the documents it never
-    /// reached would be worse than a partial result the caller can see.
+    /// Rejects a `newName` that is not a NAME. Nil means acceptable.
     ///
-    /// A folder rename's destination directory (and any nested
-    /// subdirectories under it) does not exist yet on disk — that is exactly
-    /// what "rename the folder" means. `apply(_ plan:)`'s per-document
-    /// `moveItem` requires the parent to already exist (by design: see its
-    /// refusal check), so the destination tree is created here, once, up
-    /// front. This is not a second write path: it only ensures the directory
-    /// exists before the SAME hardened per-document `apply` does everything
-    /// else (baselines, refusal checks, link rewriting, the move itself).
-    @discardableResult
-    public func apply(_ plans: [RenamePlan]) -> [RenameReport] {
-        for plan in plans {
-            try? FileManager.default.createDirectory(
-                at: plan.destination.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
+    /// `newName` reaches this from a text field, and (once Task 10 wires the
+    /// UI) potentially from anywhere a name can be pasted. Unvalidated,
+    /// `"../X"` builds a destination outside `parent`, and because a folder
+    /// rename's destination tree may not exist yet, a
+    /// `createDirectory(withIntermediateDirectories: true)` anywhere on the
+    /// path would MATERIALIZE that escape where a bare `moveItem` would simply
+    /// have failed. The document then moves out of the vault, its inbound
+    /// links become unrewritable — and the move still happens.
+    ///
+    /// Checked syntactically AND on the outcome: the syntactic rules give a
+    /// message that names what was wrong, and the containment check is the
+    /// backstop for anything they miss. Refused, never mangled into something
+    /// "safe" — silently renaming to a different name than the user typed is
+    /// its own surprise.
+    func nameRejection(_ newName: String, in parent: URL) -> String? {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "A new name cannot be empty."
         }
-        return plans.map { apply($0) }
+        guard !newName.contains("/"), !newName.contains("\\") else {
+            return "“\(newName)” is not a name: it contains a path separator."
+        }
+        guard trimmed != ".", trimmed != ".." else {
+            return "“\(newName)” is a relative path component, not a name."
+        }
+        // Containment. Only meaningful once a vault is active; without one
+        // there is no root to be inside of and the syntactic rules above are
+        // all we can honestly enforce.
+        guard let root = vaultRoot else { return nil }
+        let rootComponents = VaultIndexCoordinator.canonical(root).pathComponents
+        let destination = Self.canonicalizingDestination(
+            parent.appendingPathComponent(newName).standardizedFileURL)
+        let components = destination.pathComponents
+        guard components.count > rootComponents.count,
+              Array(components.prefix(rootComponents.count)) == rootComponents else {
+            return "“\(newName)” would move it outside the vault."
+        }
+        return nil
     }
 
     /// How many documents currently link to `url` — used by the Trash flow to
@@ -93,11 +108,10 @@ extension LoreStore {
     /// with zero edits, a rename that looks clean, and every inbound link
     /// quietly broken. Task 6's review found exactly this. Sourcing all three
     /// through `VaultIndexCoordinator.canonical` is what prevents it.
-    private func planMove(_ source: URL, to destination: URL) -> RenamePlan {
+    func planMove(_ source: URL, to destination: URL) -> RenamePlan {
         let canonicalSource = VaultIndexCoordinator.canonical(source)
         let canonicalDestination = Self.canonicalizingDestination(destination)
-        let root = VaultIndexCoordinator.canonical(
-            vaultRoot ?? canonicalSource.deletingLastPathComponent())
+        let root = canonicalVaultRoot(fallback: canonicalSource.deletingLastPathComponent())
 
         let inbound = coordinator.inboundLinks(to: canonicalSource)
         let plan = LinkRewriter.plan(renaming: canonicalSource,
@@ -108,11 +122,19 @@ extension LoreStore {
         // (microseconds before comparing them) makes the external-change guard
         // tautological: it can never fire, and requirement 2 silently
         // evaporates while the code still looks like it enforces it.
+        return plan.withBaselines(Self.baselines(for: plan.affectedFiles))
+    }
+
+    func canonicalVaultRoot(fallback: URL) -> URL {
+        VaultIndexCoordinator.canonical(vaultRoot ?? fallback)
+    }
+
+    /// Plan-time mtimes for every file an operation will write. Shared by
+    /// single-document and folder planning so both get requirement 2.
+    static func baselines(for files: [URL]) -> [String: Date] {
         var baselines: [String: Date] = [:]
-        for file in plan.affectedFiles {
-            baselines[file.path] = Self.mtimeOnDisk(file)
-        }
-        return plan.withBaselines(baselines)
+        for file in files { baselines[file.path] = mtimeOnDisk(file) }
+        return baselines
     }
 
     /// `realpath(3)` fails on a path that does not exist yet — and a rename
@@ -129,7 +151,7 @@ extension LoreStore {
     /// that actually exists, canonicalizes only that, and re-appends every
     /// component below it — however many levels of not-yet-created
     /// directory that is.
-    private static func canonicalizingDestination(_ destination: URL) -> URL {
+    static func canonicalizingDestination(_ destination: URL) -> URL {
         var existingAncestor = destination.deletingLastPathComponent()
         var trailingComponents: [String] = [destination.lastPathComponent]
         while !FileManager.default.fileExists(atPath: existingAncestor.path),
@@ -142,9 +164,129 @@ extension LoreStore {
         }
     }
 
-    private static func mtimeOnDisk(_ url: URL) -> Date? {
+    static func mtimeOnDisk(_ url: URL) -> Date? {
         try? FileManager.default
             .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+    }
+
+    // MARK: - The shared link-rewriting pass
+
+    /// Everything one rewrite pass produced. Carries session bookkeeping as
+    /// well as the report fields, because the reload decision (below) is keyed
+    /// off session IDENTITY paired with each session's PRE-MOVE path, and only
+    /// the pass knows both.
+    struct LinkRewritePass {
+        var rewritten: [URL] = []
+        var skipped: [URL] = []
+        var unchanged: [URL] = []
+        var failed: [(url: URL, reason: String)] = []
+        /// Sessions on a file that is about to move, with its pre-move path.
+        var movingSessions: [(session: DocumentSession, path: String)] = []
+        /// Every session touched, with its pre-move path.
+        var affected: [(session: DocumentSession, path: String)] = []
+        /// Paths actually WRITTEN, so only those sessions are reloaded.
+        var writtenPaths: Set<String> = []
+    }
+
+    /// Prepares every open session and then rewrites inbound links — the one
+    /// implementation of load-bearing properties 2 and 3, used by both
+    /// single-document rename and folder rename.
+    ///
+    /// `movingPaths` are the canonical pre-move paths of files the caller is
+    /// about to relocate; a session on one of them is flushed and disarmed even
+    /// when no link in it needs rewriting.
+    ///
+    /// Does NOT move anything and does NOT reload anything: the caller performs
+    /// its move (links first, always) and then calls `reloadRewritten`.
+    func rewriteInboundLinks(edits: [LinkEdit],
+                             baselines: [String: Date],
+                             movingPaths: Set<String>) -> LinkRewritePass {
+        var pass = LinkRewritePass()
+        var baselines = baselines
+        let editedByFile = Dictionary(grouping: edits, by: { $0.file.path })
+
+        // Disarm every debounced autosave that could land on top of a rewrite,
+        // INCLUDING a moving document's own. A session holding unsaved text is
+        // flushed first so its edits are on disk before we touch the file —
+        // cancelling alone would leave them to be overwritten by the rewrite
+        // and then erased by the reload. Because that flush is OUR write, the
+        // baseline is refreshed with it: it is not an external change.
+        //
+        // Session identity is paired with the path held BEFORE the move. Every
+        // later decision (reload, skip) keys off this, never off `session.url`:
+        // `adoptRenamed` repoints that URL, so a self-linking document — both
+        // a move source AND a rewrite target — would never match its own
+        // pre-move path afterwards, keep pre-rewrite text, and revert its own
+        // self-link to the old, now-dangling name on the next save.
+        //
+        // Files a tab still holds unsaved edits to are NOT written at all.
+        var blockedByUnsavedEdits: Set<String> = []
+        for session in tabs {
+            let path = VaultIndexCoordinator.canonical(session.url).path
+            let isMoving = movingPaths.contains(path)
+            let isEdited = editedByFile[path] != nil
+            if isMoving { pass.movingSessions.append((session, path)) }
+            guard isEdited || isMoving else { continue }
+            pass.affected.append((session, path))
+            if session.isDirty && !session.isReadOnly {
+                if (try? session.saveNow()) != nil, baselines[path] != nil {
+                    baselines[path] = Self.mtimeOnDisk(session.url)
+                }
+            }
+            session.cancelPendingSave()
+            // The flush can REFUSE: a session that was already `conflict` when
+            // the plan was computed re-throws `externalChange` and stays dirty.
+            // The plan-time baseline was captured AFTER that external edit, so
+            // the mtime guard would happily write the file, and the reload
+            // below would then replace the engine's contents — destroying the
+            // user's unsaved text with no dialog and no report entry. So a
+            // still-dirty session takes its file out of the rewrite set
+            // entirely: nothing is written, nothing is reloaded, and the
+            // session keeps its `isDirty`/`conflict` for the user to resolve.
+            if isEdited && session.isDirty { blockedByUnsavedEdits.insert(path) }
+        }
+
+        for (path, fileEdits) in editedByFile {
+            let file = fileEdits[0].file
+            guard !blockedByUnsavedEdits.contains(path) else {
+                pass.skipped.append(file)
+                continue
+            }
+            do {
+                switch try LinkRewriter.applyEdits(fileEdits, to: file,
+                                                   baseline: baselines[path]) {
+                case .written:   pass.rewritten.append(file); pass.writtenPaths.insert(path)
+                case .unchanged: pass.unchanged.append(file)
+                case .skipped:   pass.skipped.append(file)
+                }
+            } catch {
+                pass.failed.append((file, error.localizedDescription))
+            }
+        }
+        return pass
+    }
+
+    /// Reloads sessions whose file we actually WROTE, so the editor does not
+    /// keep showing pre-rewrite text and then save it back.
+    /// `resolveByReloading` bumps `reloadGeneration`, which the editor's view
+    /// identity uses. Matched by session identity against the pre-move path.
+    /// The `isDirty` guard is belt-and-braces: such a session is already
+    /// excluded from `writtenPaths`, and reloading one would discard unsaved
+    /// text. Call this AFTER `adoptRenamed`, so a moved session reloads from
+    /// its new location.
+    func reloadRewritten(_ pass: LinkRewritePass) {
+        for entry in pass.affected where pass.writtenPaths.contains(entry.path) {
+            guard !entry.session.isDirty else { continue }
+            try? entry.session.resolveByReloading()
+        }
+    }
+
+    /// Plan-time links that have no rewrite, as report failures. A rename that
+    /// leaves a link broken must not report success.
+    static func unrewritableFailures(_ links: [UnrewritableLink]) -> [(url: URL, reason: String)] {
+        links.map { ($0.sourceFile,
+                     "Could not rewrite the link “\($0.rawTarget)” — "
+                     + "the new location is outside the vault.") }
     }
 
     // MARK: - Applying
@@ -153,19 +295,13 @@ extension LoreStore {
     /// and the caller (the confirmation UI, Task 10) decides how to present it.
     @discardableResult
     public func apply(_ plan: RenamePlan) -> RenameReport {
-        var rewritten: [URL] = []
-        var skipped: [URL] = []
-        var unchanged: [URL] = []
-        var failed: [(url: URL, reason: String)] = []
-
-        // Links the planner could not rewrite are surfaced up front. A rename
-        // that leaves a link broken must not report success.
-        for link in plan.unrewritable {
-            failed.append((link.sourceFile,
-                           "Could not rewrite the link “\(link.rawTarget)” — "
-                           + "the new location is outside the vault."))
+        // A refused plan writes nothing and creates nothing.
+        if let refusal = plan.refusal {
+            return RenameReport(rewritten: [], skipped: [],
+                                failed: [(plan.source, refusal)], movedTo: nil)
         }
 
+        var failed = Self.unrewritableFailures(plan.unrewritable)
         let isMove = plan.source.path != plan.destination.path
 
         // Refusals are checked BEFORE anything is written. The obvious
@@ -186,6 +322,11 @@ extension LoreStore {
             // write to, reaches the SAME mass-link-break through the other
             // entry point: every inbound link repointed at a location the file
             // never arrives at. Checked here, before the first write.
+            //
+            // The destination folder is NOT created here. Pre-creating it (as
+            // the first cut of folder rename did) leaves an empty directory
+            // behind for every operation that then refuses — residue in no
+            // report, from an operation that did nothing else.
             let parent = plan.destination.deletingLastPathComponent()
             var parentIsDirectory: ObjCBool = false
             let parentExists = FileManager.default.fileExists(
@@ -205,99 +346,31 @@ extension LoreStore {
         // the correct amount.
         coordinator.suppressWatcher(for: VaultIndexCoordinator.selfWriteSuppressionWindow)
 
-        var baselines = plan.baselines
-        let editedByFile = Dictionary(grouping: plan.edits, by: { $0.file.path })
-
-        // Disarm every debounced autosave that could land on top of a rewrite,
-        // INCLUDING the renamed document's own. A session holding unsaved text
-        // is flushed first so its edits are on disk before we touch the file —
-        // cancelling alone would leave them to be overwritten by the rewrite
-        // and then erased by the reload. Because that flush is OUR write, the
-        // baseline is refreshed with it: it is not an external change.
-        // Resolved BEFORE the move, never after: `canonical` is `realpath(3)`,
-        // which FAILS on a path that no longer exists and then hands back the
-        // unresolved URL. Matching the source tab after `moveItem` therefore
-        // compared `/var/...` against `/private/var/...` and silently found
-        // nothing — the renamed document's own tab kept pointing at a file
-        // that was gone.
-        var sourceSessions: [DocumentSession] = []
-        // Session identity, paired with the path it held BEFORE the move. Every
-        // later decision (reload, skip) keys off this, never off `session.url`:
-        // `adoptRenamed` repoints that URL, so a self-linking document — both
-        // the move source AND a rewrite target — would never match its own
-        // pre-move path afterwards, keep pre-rewrite text, and revert its own
-        // self-link to the old, now-dangling name on the next save.
-        var affected: [(session: DocumentSession, path: String)] = []
-        // Files a tab still holds unsaved edits to. NOT written at all.
-        var blockedByUnsavedEdits: Set<String> = []
-
-        for session in tabs {
-            let path = VaultIndexCoordinator.canonical(session.url).path
-            let isSource = isMove && path == plan.source.path
-            let isEdited = editedByFile[path] != nil
-            if isSource { sourceSessions.append(session) }
-            guard isEdited || isSource else { continue }
-            affected.append((session, path))
-            if session.isDirty && !session.isReadOnly {
-                if (try? session.saveNow()) != nil, baselines[path] != nil {
-                    baselines[path] = Self.mtimeOnDisk(session.url)
-                }
-            }
-            session.cancelPendingSave()
-            // The flush can REFUSE: a session that was already `conflict` when
-            // the plan was computed re-throws `externalChange` and stays dirty.
-            // The plan-time baseline was captured AFTER that external edit, so
-            // the mtime guard would happily write the file, and the reload
-            // below would then replace the engine's contents — destroying the
-            // user's unsaved text with no dialog and no report entry. So a
-            // still-dirty session takes its file out of the rewrite set
-            // entirely: nothing is written, nothing is reloaded, and the
-            // session keeps its `isDirty`/`conflict` for the user to resolve.
-            if isEdited && session.isDirty { blockedByUnsavedEdits.insert(path) }
-        }
-
         // Links FIRST, then the move.
-        var writtenPaths: Set<String> = []
-        for (path, edits) in editedByFile {
-            let file = edits[0].file
-            guard !blockedByUnsavedEdits.contains(path) else {
-                skipped.append(file)
-                continue
-            }
-            do {
-                switch try LinkRewriter.applyEdits(edits, to: file, baseline: baselines[path]) {
-                case .written:   rewritten.append(file); writtenPaths.insert(path)
-                case .unchanged: unchanged.append(file)
-                case .skipped:   skipped.append(file)
-                }
-            } catch {
-                failed.append((file, error.localizedDescription))
-            }
-        }
+        let pass = rewriteInboundLinks(edits: plan.edits, baselines: plan.baselines,
+                                       movingPaths: isMove ? [plan.source.path] : [])
+        failed += pass.failed
 
         var moved: URL?
         if isMove {
             do {
                 try FileManager.default.moveItem(at: plan.source, to: plan.destination)
                 moved = plan.destination
-                for session in sourceSessions { session.adoptRenamed(plan.destination) }
+                // Resolved BEFORE the move (inside the pass), never after:
+                // `canonical` is `realpath(3)`, which FAILS on a path that no
+                // longer exists and then hands back the unresolved URL.
+                // Matching the source tab after `moveItem` therefore compared
+                // `/var/...` against `/private/var/...` and silently found
+                // nothing — the renamed document's own tab kept pointing at a
+                // file that was gone.
+                for entry in pass.movingSessions { entry.session.adoptRenamed(plan.destination) }
                 transferOpenMTime(from: plan.source, to: plan.destination)
             } catch {
                 failed.append((plan.source, error.localizedDescription))
             }
         }
 
-        // Reload sessions whose file we actually WROTE, so the editor does not
-        // keep showing pre-rewrite text and then save it back.
-        // `resolveByReloading` bumps `reloadGeneration`, which the editor's
-        // view identity uses. Matched by session identity against the pre-move
-        // path (see `affected`). The `isDirty` guard is belt-and-braces: such a
-        // session is already excluded from `writtenPaths`, and reloading one
-        // would discard unsaved text.
-        for entry in affected where writtenPaths.contains(entry.path) {
-            guard !entry.session.isDirty else { continue }
-            try? entry.session.resolveByReloading()
-        }
+        reloadRewritten(pass)
 
         // Re-armed: the window is a fixed 1s from the START of `apply`, and a
         // rename touching many files can outlive it — the watcher would then
@@ -310,12 +383,12 @@ extension LoreStore {
         // The moved file's own entry must be reported at its NEW path: it was
         // rewritten under the old name, which no longer exists by the time the
         // UI renders the report.
-        let reportedRewrites = rewritten.map {
+        let reportedRewrites = pass.rewritten.map {
             (moved != nil && $0.path == plan.source.path) ? plan.destination : $0
         }
         return RenameReport(rewritten: reportedRewrites.sorted { $0.path < $1.path },
-                            skipped: skipped.sorted { $0.path < $1.path },
-                            unchanged: unchanged.sorted { $0.path < $1.path },
+                            skipped: pass.skipped.sorted { $0.path < $1.path },
+                            unchanged: pass.unchanged.sorted { $0.path < $1.path },
                             failed: failed, movedTo: moved)
     }
 }

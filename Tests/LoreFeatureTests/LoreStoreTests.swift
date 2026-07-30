@@ -37,10 +37,13 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertEqual(s.search("haystack").map(\.id), [note.id])
     }
 
-    func test_delete_removesFileAndRow() throws {
+    /// `delete(_:)` — a permanent `removeItem` with a known
+    /// autosave-resurrection defect — is gone; `trash(_:)` is the only deletion
+    /// path. It must still satisfy what this test always asserted.
+    func test_trash_removesFileAndRow() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Trash")
-        try s.delete(s.rows.first { $0.id == note.id }!)
+        try s.trash(s.rows.first { $0.id == note.id }!)
         XCTAssertFalse(FileManager.default.fileExists(atPath: note.path.path))
         XCTAssertTrue(s.rows.isEmpty)
     }

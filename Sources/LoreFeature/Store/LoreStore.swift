@@ -300,12 +300,11 @@ public final class LoreStore {
         openMTimes[note.path] = try mtime(of: note.path)
     }
 
-    public func delete(_ row: IndexRow) throws {
-        guard coordinator.hasIndex else { throw LoreError.noVault }
-        try? FileManager.default.removeItem(at: row.path)
-        try coordinator.removeFromIndex(row.path)
-        openMTimes[row.path] = nil
-    }
+    /// Drop a deleted document from the legacy note API's mtime map. Left
+    /// behind, the entry is keyed by a path that no longer exists — harmless
+    /// until a file reappears at that exact path, at which point `save`
+    /// compares against a baseline from a different document.
+    func forgetOpenMTime(_ url: URL) { openMTimes[url] = nil }
 
     /// Follow a rename in the legacy note API's mtime map. Left stale, the
     /// entry is keyed by a path that no longer exists, so
@@ -347,4 +346,9 @@ public enum LoreError: Error, Equatable {
     /// external drive with no `.Trashes`, permissions, …). NEVER silently
     /// falls back to `removeItem` — see `LoreStore+Trash.swift`.
     case trashFailed(URL, String)
+    /// An open tab still holds unsaved edits to this file, and flushing them
+    /// refused, so the operation was declined rather than performed over text
+    /// the user has never seen saved. The `String` is a reason phrase naming
+    /// the unsaved edits and how to clear them — see `LoreStore.trash`.
+    case unsavedEdits(URL, String)
 }

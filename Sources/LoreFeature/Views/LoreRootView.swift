@@ -70,20 +70,22 @@ struct LoreRootView: View {
 /// Testable core of the list's delete affordance (which moved off the old
 /// `NoteEditorPane` when that view was deleted).
 ///
-/// The tab is closed BEFORE the file is removed, and forced: a dirty session's
-/// pending save would otherwise either refuse the close or write the file back
-/// out again after the delete.
+/// Goes through `store.trash(_:)`, which owns the whole destructive sequence:
+/// flushing or REFUSING on a tab with unsaved edits, cancelling the debounced
+/// autosave (which would otherwise recreate the file the user just deleted),
+/// closing the tab, moving the file to the Trash rather than unlinking it, and
+/// dropping it from the index.
 ///
-/// The debounced autosave is cancelled explicitly and FIRST. Closing the tab
-/// already cancels it, but the file is about to be unlinked and this is the one
-/// path where a stray write does not merely resurrect stale content — it
-/// recreates a file the user deliberately deleted. Belt and braces on the
-/// destructive path.
+/// This function used to do the tab handling itself, matching `$0.url ==
+/// row.path` — a raw-versus-canonical comparison that silently found nothing
+/// for a tab opened with a non-canonical URL, leaving exactly the resurrection
+/// defect `trash` was written to close. It has no business owning that logic
+/// twice.
+///
+/// The error is dropped here because the sidebar has nowhere to render it yet;
+/// Task 10 owns the confirmation sheet and should surface `LoreError` —
+/// `unsavedEdits` in particular, which is a refusal the user must act on.
 @MainActor
 func deleteDocument(_ row: IndexRow, in store: LoreStore) {
-    if let tab = store.tabs.first(where: { $0.url == row.path }) {
-        tab.cancelPendingSave()
-        store.closeTab(tab, force: true)
-    }
-    try? store.delete(row)
+    try? store.trash(row)
 }

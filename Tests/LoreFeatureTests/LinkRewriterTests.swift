@@ -456,25 +456,286 @@ final class RenameApplicationHardeningTests: XCTestCase {
         }
     }
 
-    func test_folderRenamePlansEveryDocumentBeneathIt() async throws {
+    // MARK: - name validation
+    //
+    // `newName` is a basename, never a path. Unvalidated it builds a
+    // destination outside the folder's parent — and a folder rename's
+    // destination tree does not exist yet, so any
+    // `createDirectory(withIntermediateDirectories:)` on that path
+    // MATERIALIZES the escape where a bare `moveItem` would have failed.
+
+    func test_invalidNewNamesAreRefusedWithoutWritingOrCreatingAnything() async throws {
+        let (root, s) = try vault()
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Design]]")
+        let design = try write(root, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        let before = try String(contentsOf: a, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+
+        for name in ["", "..", "../escape", "a/b", "."] {
+            let plan = s.plan(rename: design, to: name)
+            XCTAssertNotNil(plan.refusal, "“\(name)” must be refused")
+            XCTAssertTrue(plan.edits.isEmpty, "“\(name)” planned edits")
+
+            let report = s.apply(plan)
+            XCTAssertEqual(report.failed.count, 1, "“\(name)”")
+            XCTAssertNil(report.movedTo, "“\(name)” moved a file")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: design.path),
+                          "“\(name)” moved the source away")
+            XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), before,
+                           "“\(name)” rewrote a link")
+        }
+        // Nothing was created anywhere: the vault holds exactly the two files.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { !$0.hasPrefix(".") }.sorted()
+        XCTAssertEqual(contents, ["Design.md", "a.md"])
+        // …and nothing escaped into the parent directory either.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.deletingLastPathComponent().appendingPathComponent("escape.md").path))
+    }
+
+    func test_invalidFolderNamesAreRefusedWithoutMovingTheFolder() async throws {
         let (root, s) = try vault()
         let folder = root.appendingPathComponent("Projects")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try "---\nid: d\ntitle: Design\n---\nx"
-            .write(to: folder.appendingPathComponent("Design.md"),
-                   atomically: true, encoding: .utf8)
-        try "---\nid: n\ntitle: Notes\n---\ny"
-            .write(to: folder.appendingPathComponent("Notes.md"),
-                   atomically: true, encoding: .utf8)
-        try "---\nid: a\ntitle: A\n---\n[[Projects/Design]]"
-            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        _ = try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
         await s.settleForTesting(); try s.rebuild()
 
-        let plans = s.plan(renameFolder: folder, to: "Work")
-        XCTAssertEqual(plans.count, 2)
-        let reports = s.apply(plans)
-        XCTAssertTrue(reports.allSatisfy { $0.failed.isEmpty })
-        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("a.md"),
-                                 encoding: .utf8).contains("[[Work/Design]]"))
+        for name in ["", "..", "../escape", "a/b"] {
+            let plan = s.plan(renameFolder: folder, to: name)
+            XCTAssertNotNil(plan.refusal, "“\(name)” must be refused")
+            XCTAssertTrue(plan.documentMoves.isEmpty, "“\(name)” planned moves")
+            let report = s.apply(plan)
+            XCTAssertNil(report.movedTo, "“\(name)” moved the folder")
+            XCTAssertEqual(report.failed.count, 1, "“\(name)”")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.deletingLastPathComponent().appendingPathComponent("escape").path))
+    }
+}
+
+/// Folder rename moves the FOLDER ITSELF, then rewrites links — it is not N
+/// independent document moves. These tests pin the reasons why.
+@MainActor
+final class FolderRenameTests: XCTestCase {
+    private func vault() throws -> (URL, LoreStore) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-folder-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let s = LoreStore(documents: FakeDocs(),
+                          indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try s.setVaultRootForTesting(root)
+        return (root, s)
+    }
+
+    @discardableResult
+    private func write(_ dir: URL, _ name: String, _ text: String) throws -> URL {
+        let url = dir.appendingPathComponent(name)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// The headline: every document beneath the folder moves, inbound links are
+    /// rewritten, and the OLD FOLDER IS GONE. The N-document-moves version left
+    /// it behind, empty, in no report.
+    func test_folderRenameMovesTheFolderAndRewritesInboundLinks() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        try write(folder, "Notes.md", "---\nid: n\ntitle: Notes\n---\ny")
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\n[[Projects/Design]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        let plan = s.plan(renameFolder: folder, to: "Work")
+        XCTAssertEqual(plan.documentMoves.count, 2)
+        let report = s.apply(plan)
+
+        XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+        XCTAssertEqual(report.skipped, [])
+        XCTAssertEqual(report.movedTo?.lastPathComponent, "Work")
+        XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("[[Work/Design]]"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path),
+                       "the old folder survived the rename")
+        for name in ["Design.md", "Notes.md"] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("Work/\(name)").path), name)
+        }
+    }
+
+    /// The defect that forced the redesign: an attachment no engine claims (so
+    /// no index row, so no plan) used to be left behind in the old folder while
+    /// the note referencing it moved away. Moving the directory makes that
+    /// impossible by construction.
+    func test_unindexedFilesAndAttachmentsTravelWithTheFolder() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        let nested = folder.appendingPathComponent("assets")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\n![[diagram.png]]")
+        // Binary-ish: no engine claims `.png`, so it is a metadata-only row at
+        // best and never something `plan` could produce a move for.
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: nested.appendingPathComponent("diagram.png"))
+        try Data([0x25, 0x50, 0x44, 0x46]).write(to: nested.appendingPathComponent("spec.pdf"))
+        await s.settleForTesting(); try s.rebuild()
+
+        let report = s.apply(s.plan(renameFolder: folder, to: "Work"))
+        XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        for relative in ["Work/Design.md", "Work/assets/diagram.png", "Work/assets/spec.pdf"] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(relative).path), relative)
+        }
+    }
+
+    /// A folder with nothing indexed in it used to yield `[]` plans and a report
+    /// that could not be told apart from success. It must rename, and say so.
+    func test_folderWithNoIndexedDocumentsStillRenames() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Empty")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        await s.settleForTesting(); try s.rebuild()
+
+        let plan = s.plan(renameFolder: folder, to: "Renamed")
+        XCTAssertTrue(plan.hasNoIndexedDocuments)
+        XCTAssertNil(plan.refusal)
+        let report = s.apply(plan)
+
+        XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+        XCTAssertEqual(report.movedTo?.lastPathComponent, "Renamed",
+                       "an empty folder rename must report the move, not nothing")
+        XCTAssertTrue(report.isCompleteSuccess)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Renamed").path))
+    }
+
+    /// An existing destination is refused BEFORE anything is written — the same
+    /// mass-link-break guard single-document rename has.
+    func test_existingDestinationFolderIsRefusedBeforeAnyWrite() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Work"),
+                                               withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\n[[Projects/Design]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        let report = s.apply(s.plan(renameFolder: folder, to: "Work"))
+        XCTAssertNil(report.movedTo)
+        XCTAssertEqual(report.failed.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("[[Projects/Design]]"),
+                      "links were rewritten for a move that was refused")
+    }
+
+    /// A case-only rename resolves to the SAME directory on a case-insensitive
+    /// volume (the macOS default), so the "already exists" guard must not
+    /// mistake it for a collision.
+    func test_caseOnlyFolderRenameIsNotMistakenForACollision() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+
+        let report = s.apply(s.plan(renameFolder: folder, to: "projects"))
+        XCTAssertTrue(report.failed.isEmpty, "\(report.failed)")
+        XCTAssertEqual(report.movedTo?.lastPathComponent, "projects")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("projects/Design.md").path))
+    }
+
+    /// Task 7's protection, inherited: a tab holding unsaved edits to a file the
+    /// rename would rewrite is EXCLUDED from the write and reported in
+    /// `skipped`. The folder still moves — a partial result the caller can see
+    /// beats aborting halfway with no record.
+    func test_dirtyConflictedTabIsSkippedWhileTheFolderStillMoves() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        try write(folder, "Notes.md", "---\nid: n\ntitle: Notes\n---\ny")
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\n[[Projects/Design]]")
+        let b = try write(root, "b.md", "---\nid: b\ntitle: B\n---\n[[Projects/Notes]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        // `a.md` is open, dirty, AND in conflict — so the flush inside apply
+        // refuses and its unsaved text must be left strictly alone.
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "a.md" })
+        s.open(row)
+        let session = try XCTUnwrap(s.selectedTab)
+        let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
+        engine.note.body = "unsaved [[Projects/Design]]"
+        session.markChanged()
+        session.cancelPendingSave()
+        // Force the conflict: an external write newer than the session baseline.
+        try await Task.sleep(for: .milliseconds(1100))
+        try "---\nid: a\ntitle: A\n---\nexternal [[Projects/Design]]"
+            .write(to: a, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try session.saveNow())
+        XCTAssertTrue(session.isDirty)
+
+        let report = s.apply(s.plan(renameFolder: folder, to: "Work"))
+
+        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(report.rewritten.map(\.lastPathComponent), ["b.md"])
+        // Nothing was written to the excluded file, and the tab kept its edits.
+        XCTAssertTrue(try String(contentsOf: a, encoding: .utf8).contains("external"))
+        XCTAssertTrue(engine.note.body.contains("unsaved"))
+        XCTAssertTrue(session.isDirty)
+        // The other document's links were rewritten, and the folder still moved.
+        XCTAssertTrue(try String(contentsOf: b, encoding: .utf8).contains("[[Work/Notes]]"))
+        XCTAssertEqual(report.movedTo?.lastPathComponent, "Work")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    /// Task 7's protection, inherited: a session on a document INSIDE the folder
+    /// follows it to the new location, rather than pointing at a path that is
+    /// gone and autosaving the file back into existence there.
+    func test_openTabOnADocumentInsideTheFolderFollowsIt() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        await s.settleForTesting(); try s.rebuild()
+        let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "Design.md" })
+        s.open(row)
+        let session = try XCTUnwrap(s.selectedTab)
+
+        _ = s.apply(s.plan(renameFolder: folder, to: "Work"))
+
+        XCTAssertEqual(session.url.lastPathComponent, "Design.md")
+        XCTAssertEqual(session.url.deletingLastPathComponent().lastPathComponent, "Work")
+        XCTAssertEqual(s.tabs.count, 1)
+        // A save through the followed session must land at the NEW path and
+        // must not recreate the old one.
+        let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
+        engine.note.body = "after"
+        try session.saveNow()
+        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("Work/Design.md"),
+                                 encoding: .utf8).contains("after"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    /// Task 7's protection, inherited: a file changed on disk after the plan was
+    /// computed is skipped, never overwritten.
+    func test_fileChangedOnDiskAfterPlanningIsSkipped() async throws {
+        let (root, s) = try vault()
+        let folder = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try write(folder, "Design.md", "---\nid: d\ntitle: Design\n---\nx")
+        let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\n[[Projects/Design]]")
+        await s.settleForTesting(); try s.rebuild()
+
+        let plan = s.plan(renameFolder: folder, to: "Work")
+        try await Task.sleep(for: .milliseconds(1100))
+        let external = "---\nid: a\ntitle: A\n---\nedited elsewhere [[Projects/Design]]"
+        try external.write(to: a, atomically: true, encoding: .utf8)
+
+        let report = s.apply(plan)
+        XCTAssertEqual(report.skipped.map(\.lastPathComponent), ["a.md"])
+        XCTAssertEqual(try String(contentsOf: a, encoding: .utf8), external)
     }
 }
