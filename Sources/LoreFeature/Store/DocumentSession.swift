@@ -199,6 +199,33 @@ public final class DocumentSession: Identifiable {
         return candidate
     }
 
+    /// The document this session edits was renamed or moved on disk. Follow it.
+    ///
+    /// `url` is already mutable (`resolveBySavingCopy` adoption); this is the
+    /// same move for a different reason. The baseline MUST be refreshed too:
+    /// it describes the old file, and left stale the session's next save either
+    /// sees a "newer" file and raises a phantom conflict, or — worse — sees an
+    /// older one and writes over the move. `conflict` is cleared for the same
+    /// reason: a banner about a file that no longer exists is not actionable.
+    ///
+    /// `isDirty` is deliberately NOT cleared: unsaved edits are still unsaved,
+    /// they just belong to a file with a new name now.
+    /// An UNRESOLVED conflict survives the rename. The externally-edited
+    /// content moved along with the file, so the disagreement is still live:
+    /// clearing the flag and adopting the moved file's mtime as the baseline
+    /// would let this session's next autosave overwrite the other writer's
+    /// text silently — the rename would have laundered a conflict into a data
+    /// loss. `.distantPast` keeps `saveNow` throwing until the user picks one
+    /// of the three resolutions, exactly as before the rename.
+    public func adoptRenamed(_ newURL: URL) {
+        let unresolvedConflict = conflict && isDirty
+        url = newURL
+        baseline = unresolvedConflict ? .distantPast
+                                      : (Self.mtime(of: newURL) ?? .distantPast)
+        conflict = unresolvedConflict
+        if !unresolvedConflict { lastSaveError = nil }
+    }
+
     private func write() throws {
         coordinator.suppressWatcher(for: Self.selfWriteSuppressionWindow)
         do {

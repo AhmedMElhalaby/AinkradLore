@@ -348,4 +348,46 @@ final class FrontmatterTests: XCTestCase {
         let twice = Frontmatter.serialize(Frontmatter.parse(once, path: path))
         XCTAssertEqual(once, twice)
     }
+
+    func test_readsInlineAliases() {
+        let text = """
+        ---
+        id: a
+        title: T
+        aliases: [Design Doc, Spec]
+        ---
+        body
+        """
+        let note = Frontmatter.parse(text, path: URL(fileURLWithPath: "/tmp/a.md"))
+        XCTAssertEqual(note.aliases, ["Design Doc", "Spec"])
+    }
+
+    func test_readsBlockSequenceAliases() {
+        let text = """
+        ---
+        id: a
+        title: T
+        aliases:
+          - Design Doc
+          - Spec
+        ---
+        body
+        """
+        let note = Frontmatter.parse(text, path: URL(fileURLWithPath: "/tmp/a.md"))
+        XCTAssertEqual(note.aliases, ["Design Doc", "Spec"])
+    }
+
+    func test_readingAliasesDoesNotChangeSerialization() {
+        let text = """
+        ---
+        id: a
+        title: T
+        aliases:
+          - Design Doc
+        ---
+        body
+        """
+        let path = URL(fileURLWithPath: "/tmp/a.md")
+        XCTAssertEqual(Frontmatter.serialize(Frontmatter.parse(text, path: path)), text)
+    }
 }

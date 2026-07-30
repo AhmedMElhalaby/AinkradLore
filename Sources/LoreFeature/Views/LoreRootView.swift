@@ -6,16 +6,63 @@ struct LoreRootView: View {
     let theme: HostTheme
     @State private var query = ""
     @State private var selected: IndexRow?
+    @State private var activeTag: String?
     /// The file the user most recently asked to open. `LoreStore.openError` is
     /// only cleared by the next SUCCESSFUL open, so it can outlive the click
     /// that produced it; gating the fallback viewer on this makes sure a stale
     /// error never shadows a document that opened perfectly well.
     @State private var attempted: URL?
+    /// Rename / move / trash for both sidebar modes. Created here so the two
+    /// sidebars share one state machine and one set of modals.
+    @State private var ops: SidebarOperations
+
+    init(store: LoreStore, theme: HostTheme) {
+        self.store = store
+        self.theme = theme
+        _ops = State(initialValue: SidebarOperations(store: store))
+    }
+
+    /// A filtered tree of mostly-empty branches is worse than a list, so an
+    /// active search or tag filter always wins over the persisted tree
+    /// preference — the tree is only shown when nothing is filtering it.
+    private var effectiveSidebarMode: LoreStore.SidebarMode {
+        (query.isEmpty && activeTag == nil) ? store.sidebarMode : .all
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            NoteListView(store: store, query: $query, selected: $selected, theme: theme,
-                         onSelect: openRow, onNew: quickCapture, onDelete: deleteRow)
+            VStack(alignment: .leading, spacing: AinkradSpacing.sm) {
+                // Search and quick-capture live ABOVE the mode picker, outside
+                // both sidebars. They used to live inside `NoteListView`, which
+                // is not mounted in tree mode — so in tree mode the user could
+                // not search and could not create a note at all. Typing a query
+                // still swings the sidebar to the flat list (see
+                // `effectiveSidebarMode`); the point is that the field exists to
+                // type into either way.
+                HStack(spacing: AinkradSpacing.sm) {
+                    AinkradSearchField(text: $query, placeholder: "Search notes")
+                    AinkradIconButton(systemName: "plus", action: quickCapture)
+                        .keyboardShortcut("n", modifiers: .command)
+                }
+                .padding(.horizontal, AinkradSpacing.md)
+                .padding(.top, AinkradSpacing.md)
+
+                AinkradSegmentedPicker(
+                    items: [LoreStore.SidebarMode.tree, .all],
+                    selection: Binding(get: { store.sidebarMode },
+                                       set: { store.setSidebarMode($0) })
+                ) { mode in mode == .tree ? "Folders" : "All notes" }
+                .padding(.horizontal, AinkradSpacing.md)
+
+                if effectiveSidebarMode == .tree {
+                    FolderTreeView(store: store, theme: theme, selected: $selected,
+                                  onSelect: openRow, ops: ops)
+                } else {
+                    NoteListView(store: store, query: $query, selected: $selected, theme: theme,
+                                onSelect: openRow, onNew: quickCapture, ops: ops,
+                                activeTag: $activeTag)
+                }
+            }
                 .frame(width: 280)
             VStack(spacing: 0) {
                 if !store.tabs.isEmpty {
@@ -27,6 +74,22 @@ struct LoreRootView: View {
         }
         .background(theme.tokens.background)
         .environment(\.ainkradTheme, theme.tokens)
+        // Attached at the surface ROOT: `ainkradConfirmDialog` dims and centers
+        // within the view it modifies, so attaching it to the 280pt sidebar
+        // would scope a destructive confirmation to a narrow column.
+        .loreSidebarOperations(ops, theme: theme)
+        // A rename, a move or a delete makes a held `IndexRow` stale — its path
+        // no longer names a file. Dropped when the row set changes, so the
+        // sidebar cannot keep a selection pointing at something that is gone
+        // (and `content` cannot keep showing a fallback for it).
+        .onChange(of: store.rows.count) { _, _ in
+            if let row = selected, !store.rows.contains(where: { $0.path == row.path }) {
+                selected = nil
+            }
+            if let url = attempted, !store.rows.contains(where: { $0.path == url }) {
+                attempted = nil
+            }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -53,12 +116,6 @@ struct LoreRootView: View {
         store.open(row)
     }
 
-    private func deleteRow(_ row: IndexRow) {
-        deleteDocument(row, in: store)
-        if selected?.path == row.path { selected = nil }
-        if attempted == row.path { attempted = nil }
-    }
-
     private func quickCapture() {
         guard let note = try? store.create(title: "") else { return }
         attempted = note.path
@@ -70,20 +127,36 @@ struct LoreRootView: View {
 /// Testable core of the list's delete affordance (which moved off the old
 /// `NoteEditorPane` when that view was deleted).
 ///
-/// The tab is closed BEFORE the file is removed, and forced: a dirty session's
-/// pending save would otherwise either refuse the close or write the file back
-/// out again after the delete.
+/// Goes through `store.trash(_:)`, which owns the whole destructive sequence:
+/// flushing or REFUSING on a tab with unsaved edits, cancelling the debounced
+/// autosave (which would otherwise recreate the file the user just deleted),
+/// closing the tab, moving the file to the Trash rather than unlinking it, and
+/// dropping it from the index.
 ///
-/// The debounced autosave is cancelled explicitly and FIRST. Closing the tab
-/// already cancels it, but the file is about to be unlinked and this is the one
-/// path where a stray write does not merely resurrect stale content — it
-/// recreates a file the user deliberately deleted. Belt and braces on the
-/// destructive path.
+/// This function used to do the tab handling itself, matching `$0.url ==
+/// row.path` — a raw-versus-canonical comparison that silently found nothing
+/// for a tab opened with a non-canonical URL, leaving exactly the resurrection
+/// defect `trash` was written to close. It has no business owning that logic
+/// twice.
+///
+/// RETURNS the refusal rather than swallowing it, and nil on success.
+///
+/// This was `try? store.trash(row)`. `trash` REFUSES when an open tab still
+/// holds unsaved edits it could not flush — so the user pressed Delete, the file
+/// stayed, and nothing said why: a silent no-op indistinguishable from a broken
+/// button. `trashFailed` (a volume with no `.Trashes`) was equally invisible.
+/// `SidebarOperations.confirmTrash` puts the returned sentence in front of the
+/// user, and the sentence for `unsavedEdits` carries the way out.
 @MainActor
-func deleteDocument(_ row: IndexRow, in store: LoreStore) {
-    if let tab = store.tabs.first(where: { $0.url == row.path }) {
-        tab.cancelPendingSave()
-        store.closeTab(tab, force: true)
+@discardableResult
+func deleteDocument(_ row: IndexRow, in store: LoreStore) -> String? {
+    do {
+        _ = try store.trash(row)
+        return nil
+    } catch let error as LoreError {
+        return SidebarOperations.describe(error, row: row)
+    } catch {
+        return "“\(row.path.lastPathComponent)” could not be moved to the Trash: "
+            + error.localizedDescription
     }
-    try? store.delete(row)
 }

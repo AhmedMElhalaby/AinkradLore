@@ -25,15 +25,18 @@ public struct IndexPayload: Sendable {
     public var tags: [String]
     public var properties: [FrontmatterPair]
     public var outline: [OutlineEntry]
-    /// Outbound link targets. Always empty in M0; M1 populates it.
-    public var links: [String]
+    /// Outbound links, in document order. Populated by M1.
+    public var links: [DocumentLink]
+    /// Alternate names this document answers to, from frontmatter `aliases`.
+    public var aliases: [String]
 
     public init(title: String, plaintext: String, tags: [String] = [],
                 properties: [FrontmatterPair] = [], outline: [OutlineEntry] = [],
-                links: [String] = [], id: String? = nil) {
+                links: [DocumentLink] = [], aliases: [String] = [], id: String? = nil) {
         self.id = id
         self.title = title; self.plaintext = plaintext; self.tags = tags
         self.properties = properties; self.outline = outline; self.links = links
+        self.aliases = aliases
     }
 }
 
@@ -43,8 +46,26 @@ public struct EditorContext {
     /// Called by the editor after every user mutation. The session debounces
     /// and saves; the editor never writes files itself.
     public let onChange: @MainActor () -> Void
+    /// Candidate documents for a `[[` prefix. Defaulted to "no candidates" so
+    /// widening this struct cannot break an engine or a call site that has no
+    /// link layer to offer — an engine that ignores it behaves exactly as
+    /// before.
+    public let completions: @MainActor (String) -> [IndexRow]
+    /// Open a wikilink target the user activated in the editor.
+    public let openLink: @MainActor (String) -> Void
+    /// The text to write for a picked completion. Supplied by the shell because
+    /// only the shell can check that the target resolves back to that document
+    /// — see `LoreStore.linkTarget(for:)`. The default is the store-blind
+    /// approximation, which is right for an engine with no link layer.
+    public let linkTarget: @MainActor (IndexRow) -> String
 
-    public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void) {
+    public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
+                completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
+                openLink: @escaping @MainActor (String) -> Void = { _ in },
+                linkTarget: @escaping @MainActor (IndexRow) -> String
+                    = { LinkCompletionContext.insertableTarget(for: $0) }) {
         self.theme = theme; self.onChange = onChange
+        self.completions = completions; self.openLink = openLink
+        self.linkTarget = linkTarget
     }
 }

@@ -54,6 +54,7 @@ public enum Frontmatter {
             id: scalar("id") ?? UUID().uuidString,
             title: scalar("title") ?? deriveTitle(body, path: path),
             tags: entry("tags").map(list(of:)) ?? [],
+            aliases: entry("aliases").map(list(of:)) ?? [],
             created: entry("created").flatMap { date(from: $0.inlineValue)?.date } ?? now,
             updated: entry("updated").flatMap { date(from: $0.inlineValue)?.date } ?? now,
             body: body,
@@ -121,11 +122,16 @@ public enum Frontmatter {
     /// that an EMPTY block (`---\n---\n`) is still recognised as frontmatter.
     private static func splitBlock(_ layout: Layout) -> (header: String, headerLines: [String], body: String)? {
         let lines = layout.lines
-        guard lines.first == "---" else { return nil }
-        guard let close = lines.dropFirst().firstIndex(of: "---") else { return nil }
+        guard let close = closingFenceIndex(layout) else { return nil }
         let headerLines = Array(lines[1..<close])
         let body = lines[(close + 1)...].joined(separator: layout.ending)
         return (headerLines.joined(separator: layout.ending), headerLines, body)
+    }
+
+    /// Index of the closing `---` line, or nil when there is no frontmatter.
+    static func closingFenceIndex(_ layout: Layout) -> Int? {
+        guard layout.lines.first == "---" else { return nil }
+        return layout.lines.dropFirst().firstIndex(of: "---")
     }
 
     // MARK: - serialize
@@ -471,7 +477,7 @@ public enum Frontmatter {
         let now = Date()
         let text = layout.strippedText
         return Note(path: path, id: UUID().uuidString, title: deriveTitle(text, path: path),
-                    tags: [], created: now, updated: now, body: text, extra: [],
+                    tags: [], aliases: [], created: now, updated: now, body: text, extra: [],
                     rawFrontmatter: nil, lineEnding: layout.ending, hasByteOrderMark: layout.bom)
     }
 

@@ -11,6 +11,12 @@ public struct Note: Identifiable, Equatable, Sendable {
     public var id: String
     public var title: String
     public var tags: [String]
+    /// Alternate names this document answers to, from frontmatter `aliases`.
+    ///
+    /// Read only — `aliases` is deliberately UNMODELLED for serialization (see
+    /// `Frontmatter.modelledKeys`), so it is never patched back onto disk. It
+    /// is exposed here purely for indexing and resolution.
+    public var aliases: [String]
     public var created: Date
     public var updated: Date
     public var body: String
@@ -59,10 +65,12 @@ public struct Note: Identifiable, Equatable, Sendable {
     public var leadingMark: String { hasByteOrderMark ? "\u{FEFF}" : "" }
 
     public init(path: URL, id: String, title: String, tags: [String],
+                aliases: [String] = [],
                 created: Date, updated: Date, body: String, extra: [FrontmatterPair] = [],
                 rawFrontmatter: String? = nil, lineEnding: String = "\n",
                 hasByteOrderMark: Bool = false) {
         self.path = path; self.id = id; self.title = title; self.tags = tags
+        self.aliases = aliases
         self.created = created; self.updated = updated; self.body = body
         self.extra = extra; self.rawFrontmatter = rawFrontmatter
         self.lineEnding = lineEnding; self.hasByteOrderMark = hasByteOrderMark

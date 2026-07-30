@@ -354,6 +354,61 @@ struct LoreNoteOperationsTests {
         #expect(store.rows.isEmpty)
     }
 
+    /// `delete_note` used to call `LoreStore.delete`, which closed no tab and
+    /// cancelled no pending save: an MCP delete could permanently unlink a file
+    /// AND have the open tab's debounced autosave recreate it 500ms later. It
+    /// goes through `trash` now, which owns both.
+    @Test func deleteClosesAnOpenTabAndCancelsItsPendingSave() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let note = try store.create(title: "Doomed")
+        try store.rebuild()
+        let row = try #require(store.rows.first { $0.id == note.id })
+        store.open(row)
+        let session = try #require(store.selectedTab)
+        let engine = try #require(session.engine as? MarkdownEngine)
+        // An armed autosave: exactly what used to resurrect the file.
+        engine.note.body = "would resurrect"
+        session.markChanged()
+
+        let outcome = await run(operations, ["operation": "delete", "note": note.id])
+        #expect(outcome.isError == false)
+        #expect(store.tabs.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: note.path.path) == false)
+
+        // Well past the 500ms autosave debounce.
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(FileManager.default.fileExists(atPath: note.path.path) == false,
+                "a pending autosave resurrected a trashed note")
+    }
+
+    /// The refusal reaches the agent through the existing error-reporting shape
+    /// rather than as a thrown surprise.
+    @Test func deleteReportsARefusalWhenATabHoldsUnsavedEdits() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let note = try store.create(title: "Contested")
+        try store.rebuild()
+        let row = try #require(store.rows.first { $0.id == note.id })
+        store.open(row)
+        let session = try #require(store.selectedTab)
+        let engine = try #require(session.engine as? MarkdownEngine)
+        engine.note.body = "unsaved edit"
+        session.markChanged()
+        session.cancelPendingSave()
+
+        try await Task.sleep(for: .milliseconds(1100))
+        try "---\nid: \(note.id)\ntitle: Contested\n---\nsomebody else"
+            .write(to: note.path, atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) { try session.saveNow() }
+
+        let outcome = await run(operations, ["operation": "delete", "note": note.id])
+        #expect(outcome.isError)
+        #expect(outcome.text.contains("unsaved edits"))
+        #expect(FileManager.default.fileExists(atPath: note.path.path))
+        #expect(store.tabs.count == 1)
+    }
+
     // MARK: - identifier handling
 
     @Test func anAbsolutePathIdentifiesANoteToo() async throws {

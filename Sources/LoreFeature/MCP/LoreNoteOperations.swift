@@ -186,8 +186,19 @@ struct LoreNoteOperations {
 
     private func deleteNote(_ object: [String: Any]) throws -> AgentActionResult {
         let row = try resolve(object)
-        try store.delete(row)
-        return .success("Deleted \"\(row.title)\" (\(relative(row.path))).")
+        // `store.trash` and not the old `store.delete`: this path closed no tab
+        // and cancelled no pending save, so `delete_note` could permanently
+        // unlink a file AND have the open tab's debounced autosave recreate it
+        // 500ms later. `trash` owns all of that, and moves the file to the
+        // Trash instead of unlinking it. It can also REFUSE (a tab with
+        // unsaved edits that cannot be flushed) where `delete` never did; that
+        // arrives here as a `LoreError`, which `run`'s existing catch turns
+        // into the same `isError` result shape every other failure uses.
+        let inbound = try store.trash(row)
+        let warning = inbound == 0 ? "" :
+            " \(inbound) note\(inbound == 1 ? "" : "s") still link\(inbound == 1 ? "s" : "") "
+            + "to it; those links are now unresolved."
+        return .success("Moved \"\(row.title)\" (\(relative(row.path))) to the Trash.\(warning)")
     }
 
     // MARK: - helpers
@@ -234,10 +245,22 @@ struct LoreNoteOperations {
             return "create_note refused the title \"\(title)\": a note name cannot start with "
                 + "a dot. Retry with a plain title."
         }
+        // `.standardizedFileURL` collapses `..` lexically — that is what makes
+        // this an outcome check rather than a blocklist — but it must NOT be the
+        // thing the two sides are compared through. `stringByStandardizingPath`
+        // strips a leading `/private` only when the shortened path can be
+        // verified to resolve, i.e. only when it EXISTS: `dir` (a live vault
+        // folder) is stripped while `candidate` (a note that does not exist yet)
+        // is not, so with a canonical `vaultRoot` the two sides disagree about
+        // `/private` and every ordinary title was refused as "outside the
+        // vault". Both sides therefore go through `canonical`, the one
+        // resolution this codebase uses. The candidate's PARENT is what is
+        // canonicalized, because `realpath(3)` fails on a file that does not
+        // exist yet — the parent always does.
         let candidate = dir.appendingPathComponent("\(slug).md").standardizedFileURL
-        let folder = dir.standardizedFileURL.path
-        guard candidate.deletingLastPathComponent().path == folder,
-              candidate.path.hasPrefix(folder + "/") else {
+        let folder = VaultIndexCoordinator.canonical(dir).path
+        let parent = VaultIndexCoordinator.canonical(candidate.deletingLastPathComponent()).path
+        guard parent == folder, candidate.lastPathComponent == "\(slug).md" else {
             return "create_note refused the title \"\(title)\": it would write outside the "
                 + "vault's note folder. Retry with a title that has no slashes or \"..\" "
                 + "path components."
@@ -257,7 +280,13 @@ struct LoreNoteOperations {
         // at all, let alone become something `read_note`/`save_note`/
         // `delete_note` then treats as a note.
         if let row = noteRows.first(where: { $0.id == identifier }) { return row }
-        if let row = noteRows.first(where: { $0.path.path == identifier }) { return row }
+        // Canonicalized on both sides: row paths are canonical by invariant
+        // (see `LoreIndex.canonical(_:)`), while the assistant hands us whatever
+        // spelling its filesystem tools produced — commonly `/tmp/...` or
+        // `/var/...`. Compared raw, a correct absolute path for an existing note
+        // failed to resolve.
+        let wanted = VaultIndexCoordinator.canonical(URL(fileURLWithPath: identifier)).path
+        if let row = noteRows.first(where: { $0.path.path == wanted }) { return row }
         throw OperationError.message(
             "No note in the vault has id or path \"\(identifier)\". "
             + "Use search_notes to find the note's id.")
@@ -284,8 +313,14 @@ struct LoreNoteOperations {
     /// Vault-relative where possible: an absolute path leaks the user's home
     /// directory into the transcript for no benefit.
     private func relative(_ url: URL) -> String {
-        guard let root = store.vaultRoot?.standardizedFileURL.path else { return url.path }
-        let path = url.standardizedFileURL.path
+        // NOT `.standardizedFileURL` on either side: it strips `/private` from
+        // an existing path only, so a canonical `vaultRoot` was shortened while
+        // `url` was not, the prefix test failed, and every path the agent saw
+        // became absolute — leaking the user's home directory, which is the one
+        // thing this function exists to avoid.
+        guard let root = store.vaultRoot.map({ VaultIndexCoordinator.canonical($0).path })
+        else { return url.path }
+        let path = VaultIndexCoordinator.canonical(url).path
         guard path.hasPrefix(root + "/") else { return path }
         return String(path.dropFirst(root.count + 1))
     }
@@ -300,6 +335,12 @@ struct LoreNoteOperations {
                 + "Saving now would discard those changes. Use read_note to see the current "
                 + "contents and re-apply your edit, or call save_note_overwriting to discard "
                 + "them deliberately (that needs approval and cannot be undone)."
+        case .trashFailed(let url, let reason):
+            return "Could not move \(relative(url)) to the Trash: \(reason)"
+        case .unsavedEdits(let url, let reason):
+            return "Lore declined to delete \(relative(url)): \(reason)"
+        case .outsideVault(let url):
+            return "Lore declined to write \(relative(url)) because it is outside the vault."
         }
     }
 

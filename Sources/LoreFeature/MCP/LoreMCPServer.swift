@@ -39,8 +39,12 @@ import AinkradAppKit
 ///   to live with the flag: the tool patches (a field the caller omits is left
 ///   exactly as it was on disk, so it cannot blank a body it never sent), and
 ///   it refuses to write over changes made outside Ainkrad — see below.
-/// - `delete_note` — **true.** `LoreStore.delete` calls `removeItem`, not a
-///   move to the Trash. The file is gone.
+/// - `delete_note` — **true**, still. It now goes through `LoreStore.trash`, so
+///   the file is in the user's Trash rather than unlinked, and is restorable
+///   from Finder. That is a real reduction in blast radius but not an undo:
+///   nothing in Ainkrad can put the note back, the index entry is gone, and
+///   every inbound link to it is left deliberately unresolved. `destructive`
+///   asks "can this be undone", and the answer is still no.
 /// - `save_note_overwriting` — **true**, and it is the interesting one.
 ///
 /// ## The split pair
@@ -246,8 +250,10 @@ enum LoreMCPServer {
              injects: [GuardRule("overwritingExternalChanges", .bool(true))]),
 
         Tool("delete_note", "delete",
-             "Delete a note. The file is removed from disk, not moved to the Trash, and "
-             + "cannot be recovered.",
+             "Delete a note. The file is moved to the macOS Trash, so it can be restored "
+             + "from Finder, but nothing in Ainkrad can undo this: the note leaves the "
+             + "vault index and every link to it becomes unresolved. Refuses if the note "
+             + "is open in Lore with unsaved edits that cannot be saved.",
              destructive: true,
              schemaJSON: schema(properties: [noteIdentifier], required: ["note"])),
     ]

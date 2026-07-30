@@ -89,4 +89,79 @@ final class LoreIndexTests: XCTestCase {
         let index = try LoreIndex(path: dbURL)
         XCTAssertTrue(try index.all().isEmpty, "stale index should be discarded, not read")
     }
+
+    // MARK: - Links
+
+    private func linkedEntry(_ path: String, title: String,
+                              links: [ResolvedLink] = []) -> IndexEntry {
+        IndexEntry(url: URL(fileURLWithPath: path), type: "markdown",
+                   payload: IndexPayload(title: title, plaintext: "x"),
+                   updated: Date(), resolvedLinks: links)
+    }
+
+    func test_backlinksListDocumentsPointingAtATarget() throws {
+        let index = try makeIndex()
+        let target = URL(fileURLWithPath: "/v/Design.md")
+        try index.replaceAll(with: [
+            linkedEntry("/v/A.md", title: "A",
+                        links: [ResolvedLink(rawTarget: "Design", targetPath: target, isEmbed: false)]),
+            linkedEntry("/v/B.md", title: "B",
+                        links: [ResolvedLink(rawTarget: "Design#Overview", targetPath: target, isEmbed: false)]),
+            linkedEntry("/v/C.md", title: "C"),
+            linkedEntry("/v/Design.md", title: "Design"),
+        ])
+        XCTAssertEqual(Set(try index.backlinks(to: target).map(\.title)), ["A", "B"])
+    }
+
+    func test_unresolvedLinksAreListedPerDocument() throws {
+        let index = try makeIndex()
+        try index.replaceAll(with: [
+            linkedEntry("/v/A.md", title: "A", links: [
+                ResolvedLink(rawTarget: "Missing", targetPath: nil, isEmbed: false),
+                ResolvedLink(rawTarget: "Design", targetPath: URL(fileURLWithPath: "/v/Design.md"),
+                             isEmbed: false),
+            ]),
+            linkedEntry("/v/Design.md", title: "Design"),
+        ])
+        XCTAssertEqual(try index.unresolvedLinks(from: URL(fileURLWithPath: "/v/A.md")),
+                       [UnresolvedLink(rawTarget: "Missing", syntax: .wikilink)])
+    }
+
+    func test_outgoingLinksPreserveRawTargets() throws {
+        let index = try makeIndex()
+        let target = URL(fileURLWithPath: "/v/Design.md")
+        try index.replaceAll(with: [
+            linkedEntry("/v/A.md", title: "A",
+                        links: [ResolvedLink(rawTarget: "design", targetPath: target, isEmbed: false)]),
+        ])
+        let out = try index.outgoingLinks(from: URL(fileURLWithPath: "/v/A.md"))
+        XCTAssertEqual(out.map(\.rawTarget), ["design"])
+        XCTAssertEqual(out.first?.targetPath, target)
+    }
+
+    func test_replaceAllPrunesLinksOfRemovedDocuments() throws {
+        let index = try makeIndex()
+        let target = URL(fileURLWithPath: "/v/Design.md")
+        try index.replaceAll(with: [
+            linkedEntry("/v/A.md", title: "A",
+                        links: [ResolvedLink(rawTarget: "Design", targetPath: target, isEmbed: false)]),
+            linkedEntry("/v/Design.md", title: "Design"),
+        ])
+        try index.replaceAll(with: [linkedEntry("/v/Design.md", title: "Design")])
+        XCTAssertTrue(try index.backlinks(to: target).isEmpty)
+    }
+
+    func test_schemaVersionTwoIndexIsRebuiltNotRead() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("idx-\(UUID()).sqlite")
+        let legacy = try DatabaseQueue(path: path.path)
+        try legacy.write { db in
+            try db.execute(sql: "PRAGMA user_version = 2;")
+            try db.execute(sql: "CREATE TABLE documents(path TEXT PRIMARY KEY);")
+            try db.execute(sql: "INSERT INTO documents(path) VALUES('/v/old.md');")
+        }
+        try legacy.close()
+        let index = try LoreIndex(path: path)
+        XCTAssertTrue(try index.all().isEmpty)
+    }
 }

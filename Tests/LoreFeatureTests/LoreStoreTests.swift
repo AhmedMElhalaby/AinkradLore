@@ -37,10 +37,13 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertEqual(s.search("haystack").map(\.id), [note.id])
     }
 
-    func test_delete_removesFileAndRow() throws {
+    /// `delete(_:)` — a permanent `removeItem` with a known
+    /// autosave-resurrection defect — is gone; `trash(_:)` is the only deletion
+    /// path. It must still satisfy what this test always asserted.
+    func test_trash_removesFileAndRow() throws {
         let root = tempDir(); let s = try makeStore(root)
         let note = try s.create(title: "Trash")
-        try s.delete(s.rows.first { $0.id == note.id }!)
+        try s.trash(s.rows.first { $0.id == note.id }!)
         XCTAssertFalse(FileManager.default.fileExists(atPath: note.path.path))
         XCTAssertTrue(s.rows.isEmpty)
     }
@@ -291,5 +294,81 @@ final class LoreStoreTests: XCTestCase {
         // simulate external edit bumping mtime
         try "changed".write(to: note.path, atomically: true, encoding: .utf8)
         XCTAssertTrue(s.externalChangeDetected(for: note))
+    }
+
+    func test_scanVault_resolvesLinksBetweenDocuments() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\nlinks to [[Beta]]"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        try "---\nid: b\ntitle: Beta\n---\nno links"
+            .write(to: root.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8)
+
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        let alpha = entries.first { $0.url.lastPathComponent == "alpha.md" }
+        XCTAssertEqual(alpha?.resolvedLinks.first?.rawTarget, "Beta")
+        XCTAssertEqual(alpha?.resolvedLinks.first?.targetPath?.lastPathComponent, "beta.md")
+    }
+
+    func test_scanVault_leavesUnknownTargetsUnresolved() throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\n[[Nowhere]]"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        let entries = VaultIndexCoordinator.scanVault(at: root)
+        XCTAssertNil(entries.first?.resolvedLinks.first?.targetPath)
+        XCTAssertEqual(entries.first?.resolvedLinks.first?.rawTarget, "Nowhere")
+    }
+
+    func test_backlinksIncludeSurroundingLineAsContext() async throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\nintro\nwe discussed [[Beta]] at length\noutro"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        try "---\nid: b\ntitle: Beta\n---\n"
+            .write(to: root.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        let links = s.backlinks(to: root.appendingPathComponent("beta.md"))
+        XCTAssertEqual(links.map(\.row.title), ["Alpha"])
+        XCTAssertEqual(links.first?.context, "we discussed [[Beta]] at length")
+    }
+
+    func test_unresolvedLinksAreReported() async throws {
+        let root = tempDir()
+        try "---\nid: a\ntitle: Alpha\n---\n[[Nowhere]]"
+            .write(to: root.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        XCTAssertEqual(s.unresolvedLinks(from: root.appendingPathComponent("alpha.md")),
+                       [UnresolvedLink(rawTarget: "Nowhere", syntax: .wikilink)])
+    }
+
+    func test_openLinkOpensResolvedTargetInATab() async throws {
+        let root = tempDir()
+        try "---\nid: b\ntitle: Beta\n---\n"
+            .write(to: root.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        XCTAssertTrue(s.openLink("Beta"))
+        XCTAssertEqual(s.selectedTab?.url.lastPathComponent, "beta.md")
+    }
+
+    func test_openLinkReturnsFalseWhenUnresolved() async throws {
+        let root = tempDir()
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        XCTAssertFalse(s.openLink("Nowhere"))
+        XCTAssertNil(s.selectedTab)
+    }
+
+    func test_linkCompletionsMatchTitlesAndAliases() async throws {
+        let root = tempDir()
+        try "---\nid: b\ntitle: Beta Notes\naliases: [Bravo]\n---\n"
+            .write(to: root.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8)
+        let s = try makeStore(root)
+        await s.settleForTesting()
+        try s.rebuild()
+        XCTAssertEqual(s.linkCompletions(matching: "bet").map(\.title), ["Beta Notes"])
     }
 }

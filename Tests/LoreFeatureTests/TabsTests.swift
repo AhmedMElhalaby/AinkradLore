@@ -228,7 +228,12 @@ final class TabsTests: XCTestCase {
         XCTAssertTrue(s.tabs.isEmpty)
         XCTAssertNil(s.selectedTab)
         XCTAssertNil(s.openError)
-        XCTAssertEqual(s.vaultRoot, rootB)
+        // `vaultRoot` is CANONICAL since Task 8b (`activate` canonicalizes what
+        // it stores, so the same spelling reaches the index, `scanVault`'s
+        // enumerator and `LinkRewriter`). `rootB` is a raw
+        // `FileManager.temporaryDirectory` path, which on macOS is `/var/...`
+        // while its canonical form is `/private/var/...`.
+        XCTAssertEqual(s.vaultRoot, VaultIndexCoordinator.canonical(rootB))
         let onDisk = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("belongs to vault A"))
     }

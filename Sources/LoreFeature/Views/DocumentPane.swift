@@ -7,6 +7,12 @@ struct DocumentPane: View {
     @Bindable var store: LoreStore
     let session: DocumentSession
     let theme: HostTheme
+    /// The raw target of a Cmd-clicked link that resolved to nothing. Non-nil
+    /// only while the "create it?" prompt is up — clicking a dead link must
+    /// never create a file silently.
+    @State private var unresolved: String?
+    /// Why creating that note failed, when it did.
+    @State private var createFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +24,19 @@ struct DocumentPane: View {
             if let error = session.lastSaveError, !session.conflict { saveErrorBanner(error) }
 
             session.engine.makeEditor(
-                EditorContext(theme: theme, onChange: { session.markChanged() }))
+                EditorContext(theme: theme,
+                              onChange: { session.markChanged() },
+                              completions: { store.linkCompletions(matching: $0) },
+                              openLink: { target in
+                                  // `documentName` first: `openLink` funnels into
+                                  // `LinkResolver.basename`, which strips a
+                                  // `#fragment` but NOT an `|alias`, so
+                                  // `[[Design|why]]` would look up "Design|why"
+                                  // and never resolve.
+                                  let name = LinkCompletionContext.documentName(of: target)
+                                  if !store.openLink(name) { unresolved = name }
+                              },
+                              linkTarget: { store.linkTarget(for: $0) }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
                 // without the generation in the identity the user clicks
@@ -26,8 +44,52 @@ struct DocumentPane: View {
                 // tears the editor down and builds a fresh one, which re-runs
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
+
+            // Only markdown documents contribute to the link graph — plain-text
+            // and unclaimed documents have no links, so an empty panel there
+            // would be noise, not information.
+            if session.engine is MarkdownEngine {
+                BacklinksPanel(store: store, url: session.url, theme: theme)
+                    .frame(maxHeight: 200)
+            }
         }
         .background(theme.tokens.background)
+        .alert("Create this note?",
+               isPresented: Binding(get: { unresolved != nil },
+                                    set: { if !$0 { unresolved = nil } })) {
+            Button("Cancel", role: .cancel) { unresolved = nil }
+            Button("Create") {
+                if let target = unresolved { createUnresolved(target) }
+                unresolved = nil
+            }
+        } message: {
+            Text("\"\(unresolved ?? "")\" doesn't exist in this vault yet.")
+        }
+        // The same "Not done" sheet the sidebar uses for a refused trash. A
+        // Create button that silently does nothing on a failed write is worse
+        // than no button.
+        .sheet(isPresented: Binding(get: { createFailure != nil },
+                                    set: { if !$0 { createFailure = nil } })) {
+            MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
+        }
+    }
+
+    /// Creates the note this dead link names, via the store's single
+    /// create-from-a-link path — see `LoreStore.createAndOpenNote(forLinkTarget:)`,
+    /// which owns the alias/fragment stripping and the folder split. The view's
+    /// only job is to show a failure instead of swallowing it.
+    ///
+    /// `.wikilink` is not a guess: this alert is reachable only from
+    /// `MarkdownEditor.Coordinator.openLink(atUTF16:)`, whose target comes from
+    /// `LinkCompletionContext.target(in:at:)` — a scanner that recognises `[[`
+    /// and `]]` and nothing else. A markdown link is not clickable here, so no
+    /// percent-decoding applies.
+    private func createUnresolved(_ target: String) {
+        do {
+            try store.createAndOpenNote(forLinkTarget: target, syntax: .wikilink)
+        } catch {
+            createFailure = "Couldn't create \"\(target)\": \(error.localizedDescription)"
+        }
     }
 
     /// Persistent and non-alarming: this file is open, readable and searchable,

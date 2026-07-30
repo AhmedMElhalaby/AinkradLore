@@ -44,6 +44,49 @@ final class RootViewSmokeTests: XCTestCase {
         _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
     }
 
+    func test_backlinksPanelBuilds() throws {
+        let root = try tempVault()
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        _ = BacklinksPanel(store: store, url: root.appendingPathComponent("x.md"),
+                           theme: HostTheme(TestTokens.make()))
+    }
+
+    func test_folderTreeGroupsDocumentsByFolder() throws {
+        let root = URL(fileURLWithPath: "/v")
+        func row(_ path: String, _ title: String) -> IndexRow {
+            IndexRow(path: URL(fileURLWithPath: path), id: path, title: title, tags: [],
+                     aliases: [], updated: Date(), type: "markdown", properties: [])
+        }
+        let tree = FolderNode.tree(from: [
+            row("/v/a.md", "A"),
+            row("/v/Projects/b.md", "B"),
+            row("/v/Projects/Deep/c.md", "C"),
+        ], root: root)
+
+        XCTAssertEqual(tree.documents.map(\.title), ["A"])
+        XCTAssertEqual(tree.children.map(\.name), ["Projects"])
+        let projects = tree.children[0]
+        XCTAssertEqual(projects.documents.map(\.title), ["B"])
+        XCTAssertEqual(projects.children.map(\.name), ["Deep"])
+        XCTAssertEqual(projects.children[0].documents.map(\.title), ["C"])
+    }
+
+    func test_folderTreeViewBuilds() throws {
+        let root = try tempVault()
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        _ = FolderTreeView(store: store, theme: HostTheme(TestTokens.make()),
+                           selected: .constant(nil), onSelect: { _ in },
+                           ops: SidebarOperations(store: store))
+        _ = NoteListView(store: store, query: .constant(""), selected: .constant(nil),
+                         theme: HostTheme(TestTokens.make()), onSelect: { _ in },
+                         onNew: {}, ops: SidebarOperations(store: store),
+                         activeTag: .constant(nil))
+    }
+
     func test_fallbackViewer_builds() {
         let url = URL(fileURLWithPath: "/tmp/x.xlsx")
         _ = FallbackViewer(url: url, error: EngineError.unsupported(url),
@@ -66,7 +109,7 @@ final class RootViewSmokeTests: XCTestCase {
         store.open(url: b)
         XCTAssertEqual(store.tabs.count, 2)
 
-        let row = IndexRow(path: a, id: "a", title: "A", tags: [], updated: Date(),
+        let row = IndexRow(path: a, id: "a", title: "A", tags: [], aliases: [], updated: Date(),
                            type: MarkdownEngine.identifier, properties: [])
         deleteDocument(row, in: store)
 

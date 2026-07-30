@@ -9,11 +9,42 @@ public final class LoreStore {
     /// new notes. Empty string == the vault root itself.
     public private(set) var defaultNoteFolder: String = ""
 
+    /// Sidebar layout choice: folder tree or the flat, searchable list.
+    public enum SidebarMode: String, Sendable { case tree, all }
+
+    public private(set) var sidebarMode: SidebarMode = .tree
+    /// Folder ids (relative paths under the vault root) currently expanded in
+    /// `FolderTreeView`. Persisted so returning to a vault restores the tree
+    /// the user left open, rather than collapsing everything.
+    public private(set) var expandedFolders: Set<String> = []
+
+    /// Whether `BacklinksPanel` is expanded or collapsed, persisted the same
+    /// way as `sidebarMode`: a per-vault-host UI choice, not per-document, so
+    /// one toggle sticks across every note the user opens.
+    public private(set) var backlinksPanelExpanded: Bool = true
+
     private let documents: PluginDocumentStore
-    private let coordinator: VaultIndexCoordinator
-    private var openMTimes: [URL: Date] = [:]
+    /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
+    /// The rename applier lives in its own file to keep this one under the
+    /// 500-line ceiling.
+    let coordinator: VaultIndexCoordinator
+    /// mtime baselines for the legacy note API, keyed by CANONICAL path string
+    /// (`pathKey`), never by a raw `URL`.
+    ///
+    /// Keyed raw, `transferOpenMTime` — which both `apply` paths call with
+    /// CANONICAL URLs — found no entry for a note whose baseline had been stored
+    /// under the caller's raw `note.path`, silently no-opped, and left
+    /// `externalChangeDetected(for:)` with no baseline. That returns `false`,
+    /// which turns `save`'s external-change guard OFF for exactly the note that
+    /// was just renamed: precisely the data loss `transferOpenMTime`'s own doc
+    /// comment says it exists to prevent. One key function on both sides is what
+    /// makes that unrepresentable.
+    private var openMTimes: [String: Date] = [:]
 
     private static let defaultFolderKey = "defaultNoteFolder"
+    private static let sidebarModeKey = "sidebarMode"
+    private static let expandedFoldersKey = "expandedFolders"
+    private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -22,9 +53,42 @@ public final class LoreStore {
            let folder = String(data: data, encoding: .utf8) {
             defaultNoteFolder = folder
         }
+        if let data = documents.data(forKey: Self.sidebarModeKey),
+           let raw = String(data: data, encoding: .utf8),
+           let mode = SidebarMode(rawValue: raw) {
+            sidebarMode = mode
+        }
+        if let data = documents.data(forKey: Self.expandedFoldersKey),
+           let text = String(data: data, encoding: .utf8) {
+            expandedFolders = Set(text.split(separator: "\n").map(String.init))
+        }
+        if let data = documents.data(forKey: Self.backlinksPanelExpandedKey),
+           let raw = String(data: data, encoding: .utf8) {
+            backlinksPanelExpanded = raw == "true"
+        }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
+    }
+
+    /// Persist the sidebar's folder-tree-vs-flat-list choice.
+    public func setSidebarMode(_ mode: SidebarMode) {
+        sidebarMode = mode
+        documents.setData(mode.rawValue.data(using: .utf8), forKey: Self.sidebarModeKey)
+    }
+
+    /// Persist which folders are expanded in `FolderTreeView`.
+    public func setExpandedFolders(_ folders: Set<String>) {
+        expandedFolders = folders
+        documents.setData(folders.sorted().joined(separator: "\n").data(using: .utf8),
+                          forKey: Self.expandedFoldersKey)
+    }
+
+    /// Persist the backlinks panel's collapsed/expanded state.
+    public func setBacklinksPanelExpanded(_ expanded: Bool) {
+        backlinksPanelExpanded = expanded
+        documents.setData((expanded ? "true" : "false").data(using: .utf8),
+                          forKey: Self.backlinksPanelExpandedKey)
     }
 
     // MARK: - Index facade
@@ -33,6 +97,56 @@ public final class LoreStore {
     public var vaultRoot: URL? { coordinator.vaultRoot }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
     public func rebuild() throws { try coordinator.rebuild() }
+
+    // MARK: - Links
+
+    public struct Backlink: Identifiable, Sendable {
+        public let id: URL
+        public let row: IndexRow
+        /// The line in the source document that contains the link. Empty when
+        /// the file cannot be read — context is a nicety, never a failure.
+        public let context: String
+    }
+
+    public func backlinks(to url: URL) -> [Backlink] {
+        coordinator.backlinkRows(to: url).map { row in
+            Backlink(id: row.path, row: row, context: Self.context(in: row.path, for: url))
+        }
+    }
+
+    private static func context(in source: URL, for target: URL) -> String {
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else { return "" }
+        let needle = target.deletingPathExtension().lastPathComponent.lowercased()
+        for line in text.split(separator: "\n") where line.lowercased().contains(needle) {
+            return String(line.trimmingCharacters(in: .whitespaces).prefix(200))
+        }
+        return ""
+    }
+
+    public func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
+        coordinator.unresolvedLinks(from: url)
+    }
+
+    public func resolveLink(_ rawTarget: String) -> URL? {
+        coordinator.currentResolver().resolve(rawTarget)
+    }
+
+    @discardableResult
+    public func openLink(_ rawTarget: String) -> Bool {
+        guard let url = resolveLink(rawTarget) else { return false }
+        open(url: url)
+        return true
+    }
+
+    /// Documents whose title or an alias starts with `prefix`, for `[[` completion.
+    public func linkCompletions(matching prefix: String) -> [IndexRow] {
+        let needle = prefix.lowercased()
+        guard !needle.isEmpty else { return Array(rows.prefix(20)) }
+        return rows.filter { row in
+            row.title.lowercased().hasPrefix(needle)
+                || row.aliases.contains { $0.lowercased().hasPrefix(needle) }
+        }
+    }
     /// Releases the vault. Tabs are flushed FIRST — see `closeAllTabs` — so a
     /// teardown never costs the user unsaved work, and so the flush still has a
     /// live index to update before the coordinator drops it.
@@ -89,7 +203,11 @@ public final class LoreStore {
     public func open(_ row: IndexRow) { open(url: row.path) }
 
     public func open(url: URL) {
-        if let existing = tabs.first(where: { $0.url == url }) {
+        // Canonical on both sides. Compared raw, opening the already-open
+        // `/tmp/v/a.md` as `/private/tmp/v/a.md` (or via a canonical `row.path`)
+        // produced a SECOND session on the same file, each with its own mtime
+        // baseline and its own debounced autosave racing the other.
+        if let existing = tabs.first(where: { Self.pathKey($0.url) == Self.pathKey(url) }) {
             selectedTab = existing
             return
         }
@@ -193,25 +311,50 @@ public final class LoreStore {
     public func load(_ row: IndexRow) throws -> Note {
         let text = try String(contentsOf: row.path, encoding: .utf8)
         let note = Frontmatter.parse(text, path: row.path)
-        openMTimes[row.path] = try mtime(of: row.path)
+        openMTimes[Self.pathKey(row.path)] = try mtime(of: row.path)
         return note
     }
 
+    /// - Parameter subfolder: a path relative to the default note folder, created
+    ///   if missing. Only used by the "create the note this link points at" flow,
+    ///   where `[[Projects/Design]]` names a folder as well as a note; empty
+    ///   everywhere else, which is the pre-existing behaviour exactly.
     @discardableResult
-    public func create(title: String) throws -> Note {
+    public func create(title: String, in subfolder: String = "") throws -> Note {
         guard let root = vaultRoot, coordinator.hasIndex else { throw LoreError.noVault }
         let slug = title.isEmpty ? "untitled" : title.lowercased()
             .replacingOccurrences(of: " ", with: "-")
-        let dir = defaultNoteFolder.isEmpty
+        var dir = defaultNoteFolder.isEmpty
             ? root : root.appendingPathComponent(defaultNoteFolder, isDirectory: true)
+        // `..` and absolute segments are dropped, not rejected: this string
+        // comes from document text, so it is untrusted input, and a link must
+        // never be able to write outside the vault.
+        for part in subfolder.split(separator: "/")
+        where part != "." && part != ".." && !part.isEmpty {
+            dir.appendPathComponent(String(part), isDirectory: true)
+        }
+        // Path arithmetic alone is not containment: a SYMLINKED folder inside
+        // the vault (common in Obsidian setups) would let
+        // `withIntermediateDirectories` follow it and write outside the root.
+        // Checked before the directory is created, on the deepest EXISTING
+        // ancestor — `resolvingSymlinksInPath` cannot resolve components that
+        // do not exist yet, and the link we are worried about does exist.
+        guard Self.isContained(dir, in: root) else {
+            throw LoreError.outsideVault(dir)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = uniqueURL(in: dir, slug: slug)
+        // Re-checked after creation: now the whole chain exists, so this
+        // resolves every component rather than only the pre-existing ones.
+        guard Self.isContained(url.deletingLastPathComponent(), in: root) else {
+            throw LoreError.outsideVault(url)
+        }
         let now = Date()
         let note = Note(path: url, id: UUID().uuidString, title: title, tags: [],
                         created: now, updated: now, body: "")
         try Frontmatter.serialize(note).write(to: url, atomically: true, encoding: .utf8)
         try coordinator.indexDocument(MarkdownEngine.load(url), at: url)
-        openMTimes[url] = try mtime(of: url)
+        openMTimes[Self.pathKey(url)] = try mtime(of: url)
         return note
     }
 
@@ -244,19 +387,31 @@ public final class LoreStore {
 
         try Frontmatter.serialize(updated).write(to: note.path, atomically: true, encoding: .utf8)
         try coordinator.indexDocument(MarkdownEngine.load(note.path), at: note.path)
-        openMTimes[note.path] = try mtime(of: note.path)
+        openMTimes[Self.pathKey(note.path)] = try mtime(of: note.path)
     }
 
-    public func delete(_ row: IndexRow) throws {
-        guard coordinator.hasIndex else { throw LoreError.noVault }
-        try? FileManager.default.removeItem(at: row.path)
-        try coordinator.removeFromIndex(row.path)
-        openMTimes[row.path] = nil
+    /// Drop a deleted document from the legacy note API's mtime map. Left
+    /// behind, the entry is keyed by a path that no longer exists — harmless
+    /// until a file reappears at that exact path, at which point `save`
+    /// compares against a baseline from a different document.
+    func forgetOpenMTime(_ url: URL) { openMTimes[Self.pathKey(url)] = nil }
+
+    /// Follow a rename in the legacy note API's mtime map. Left stale, the
+    /// entry is keyed by a path that no longer exists, so
+    /// `externalChangeDetected(for:)` finds no baseline for the renamed note
+    /// and returns false — turning `save`'s external-change guard off for it.
+    /// Both keys go through `pathKey`, so the canonical URLs the rename paths
+    /// pass in match a baseline stored from a raw `note.path`.
+    func transferOpenMTime(from old: URL, to new: URL) {
+        guard let known = openMTimes[Self.pathKey(old)] else { return }
+        openMTimes[Self.pathKey(old)] = nil
+        openMTimes[Self.pathKey(new)] = known
     }
 
     /// True if the file changed on disk since we last loaded/saved it.
     public func externalChangeDetected(for note: Note) -> Bool {
-        guard let known = openMTimes[note.path], let disk = try? mtime(of: note.path) else { return false }
+        guard let known = openMTimes[Self.pathKey(note.path)],
+              let disk = try? mtime(of: note.path) else { return false }
         return disk > known
     }
 
@@ -280,4 +435,17 @@ public enum LoreError: Error, Equatable {
     /// discard those changes, so the caller must decide: reload, or overwrite
     /// via `save(_:overwritingExternalChanges: true)`.
     case externalChange(URL)
+    /// `FileManager.trashItem` failed for the given URL (network volume,
+    /// external drive with no `.Trashes`, permissions, …). NEVER silently
+    /// falls back to `removeItem` — see `LoreStore+Trash.swift`.
+    case trashFailed(URL, String)
+    /// An open tab still holds unsaved edits to this file, and flushing them
+    /// refused, so the operation was declined rather than performed over text
+    /// the user has never seen saved. The `String` is a reason phrase naming
+    /// the unsaved edits and how to clear them — see `LoreStore.trash`.
+    case unsavedEdits(URL, String)
+    /// A write would have landed outside the vault root — reached only via a
+    /// folder name taken from untrusted document text (a `[[a/b]]` link),
+    /// where a symlink inside the vault redirects the path out of it.
+    case outsideVault(URL)
 }
