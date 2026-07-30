@@ -18,6 +18,9 @@ packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
+  SwiftMarkdown:
+    url: https://github.com/swiftlang/swift-markdown
+    branch: main
 targets:
   LoreFeature:
     type: library.static
@@ -29,6 +32,8 @@ targets:
     dependencies:
       - package: GRDB
         product: GRDB
+      - package: SwiftMarkdown
+        product: Markdown
       - package: AinkradAppKit
         embed: false
   LorePlugin:
@@ -52,6 +57,8 @@ targets:
       - target: LoreFeature
       - package: GRDB
         product: GRDB
+      - package: SwiftMarkdown
+        product: Markdown
       - package: AinkradAppKit
         embed: false
     settings:
@@ -70,6 +77,8 @@ targets:
       - target: LoreFeature
       - package: GRDB
         product: GRDB
+      - package: SwiftMarkdown
+        product: Markdown
       - package: AinkradAppKit
 schemes:
   LorePlugin:
