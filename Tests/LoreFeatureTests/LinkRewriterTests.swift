@@ -456,11 +456,27 @@ final class RenameApplicationHardeningTests: XCTestCase {
         }
     }
 
-    /// The other half of the same root cause: an edit's file comes from the
-    /// index, whose spelling need not match the canonical session URL the
-    /// exclude-dirty-tabs check compares against. Keyed raw, the check never
-    /// fires and the file is rewritten out from under a tab holding unsaved
-    /// edits — defeating the protection entirely.
+    /// The other half of the same root cause: an edit's file spelling need not
+    /// match the canonical session URL the exclude-dirty-tabs check compares
+    /// against. Keyed raw, the check never fires and the file is rewritten out
+    /// from under a tab holding unsaved edits — defeating the protection
+    /// entirely. `LoreStore+Rename.swift`'s `pathKey`-keyed `editedByFile` /
+    /// session loop is what prevents it.
+    ///
+    /// ## Why the plan is hand-built (Task 8b)
+    ///
+    /// This test used to create the mixed spelling by re-indexing `a.md` through
+    /// a RAW URL — and that premise is now UNREACHABLE, because `indexDocument`
+    /// canonicalizes. Left as it was, the test passed vacuously and the
+    /// `pathKey` check had no mixed-spelling coverage at all.
+    ///
+    /// So the condition is constructed through the path that CAN still produce
+    /// it: `RenamePlan` and `LinkEdit` are both public, so Task 10's preview UI
+    /// (or any future caller) can hand `apply` an edit whose `file` carries any
+    /// spelling it likes. That is precisely the input `pathKey` exists to
+    /// normalize, and it is the only remaining way in — which is the point: the
+    /// invariant covers everything the STORE writes, not everything a caller can
+    /// construct.
     func test_dirtyTabBlocksTheRewriteEvenWhenTheIndexSpellsTheFileDifferently() async throws {
         let (root, s) = try vault()
         let a = try write(root, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Design]]")
@@ -471,13 +487,9 @@ final class RenameApplicationHardeningTests: XCTestCase {
         try XCTSkipIf(canonicalA.path == a.path,
                       "this machine's temp root is already canonical; nothing to mix")
 
-        // Re-index a.md under the RAW spelling, so the outbound link row the
-        // rename turns into an edit carries a non-canonical source_path.
-        try s.coordinator.removeFromIndex(canonicalA)
-        try s.coordinator.indexDocument(MarkdownEngine.load(a), at: a)
-
-        // The tab is opened under the CANONICAL spelling, so its session path and
-        // the indexed edit-file path disagree. It is left DIRTY but not
+        // The tab is opened under the CANONICAL spelling, and the plan's edit
+        // will name the RAW one, so its session path and the edit-file path
+        // disagree. It is left DIRTY but not
         // conflicted, so the flush inside `apply` succeeds — which is what makes
         // this test discriminating. A conflicted session would land in `skipped`
         // either way (a mismatched key also means a missing baseline, and
@@ -497,7 +509,28 @@ final class RenameApplicationHardeningTests: XCTestCase {
         session.cancelPendingSave()
         XCTAssertTrue(session.isDirty)
 
-        let report = s.apply(s.plan(rename: design, to: "Architecture"))
+        // The plan as the store computes it (edits canonically spelled, since
+        // `inboundLinks` canonicalizes what it returns), re-emitted with the edit
+        // file spelled RAW. Everything else — source, destination, unrewritable,
+        // and the CANONICALLY keyed baselines — is carried over untouched, so the
+        // only variable is the edit's spelling. Keeping the real baselines is
+        // what makes the test discriminating: with a raw baseline key too, the
+        // broken code would fail closed in `applyEdits` (a missing baseline is
+        // treated as unsafe-to-write) and land in `skipped` for the RIGHT reason
+        // while the exclude-dirty-tabs machinery never ran — the exact
+        // right-outcome-wrong-mechanism trap the previous round caught.
+        let computed = s.plan(rename: design, to: "Architecture")
+        XCTAssertEqual(computed.edits.map(\.file.path), [canonicalA.path],
+                       "the store's own plan should already be canonical")
+        let plan = RenamePlan(
+            source: computed.source, destination: computed.destination,
+            edits: computed.edits.map {
+                LinkEdit(file: a, oldTarget: $0.oldTarget, newTarget: $0.newTarget)
+            },
+            unrewritable: computed.unrewritable, baselines: computed.baselines,
+            refusal: computed.refusal)
+
+        let report = s.apply(plan)
 
         XCTAssertFalse(session.isDirty,
                        "the session was never seen by apply, so it was never flushed")

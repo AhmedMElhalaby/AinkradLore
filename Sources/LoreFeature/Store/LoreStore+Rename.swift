@@ -131,16 +131,24 @@ extension LoreStore {
 
     /// THE key for every path-keyed dictionary and set in the rename paths.
     ///
-    /// Nothing may key off a raw `url.path`. Index rows are not guaranteed
-    /// canonical — `VaultIndexCoordinator.indexDocument` upserts the URL its
-    /// caller supplied, and `activate` stores `vaultRoot` as given — while
-    /// session URLs, plan sources and destinations all arrive canonicalized.
-    /// Mixing the two spellings has produced the same failure three times in
-    /// this milestone: a set membership test misses, and the consequence is
-    /// silent (an edit dropped from the plan, a dirty tab's file written
-    /// anyway) because a missing key looks exactly like "nothing to do".
-    /// Routing both sides of every comparison through this function is what
-    /// makes that unrepresentable rather than merely fixed.
+    /// Nothing may key off a raw `url.path`. Since Task 8b, **every path stored
+    /// in the index is canonical** — the invariant is enforced at the store
+    /// boundary (`LoreIndex.canonical(_:)`, applied in `LoreIndex.write`) and
+    /// upstream in `activate`, `scanVault` and `indexDocument`, so index rows,
+    /// `vaultRoot`, session URLs, plan sources and plan destinations now all
+    /// carry ONE spelling. Read that doc comment for the mechanism
+    /// (`/tmp` vs `/private/tmp`) and the three silent M1 failures it caused.
+    ///
+    /// This function therefore is no longer load-bearing for anything the store
+    /// writes — it is deliberate belt-and-braces for what a CALLER can
+    /// construct. `RenamePlan` and `LinkEdit` are public, so Task 10's preview
+    /// UI can hand `apply` an edit file spelled however it likes; keyed raw, a
+    /// set membership test then misses and the consequence is silent (an edit
+    /// dropped from the plan, a dirty tab's file written anyway) because a
+    /// missing key looks exactly like "nothing to do". Routing both sides of
+    /// every comparison through one function keeps that unrepresentable at the
+    /// boundary the invariant does not reach.
+    /// Covered by `LinkRewriterTests.test_dirtyTabBlocksTheRewriteEvenWhenTheIndexSpellsTheFileDifferently`.
     static func pathKey(_ url: URL) -> String {
         VaultIndexCoordinator.canonical(url).path
     }
@@ -219,12 +227,12 @@ extension LoreStore {
                              movingPaths: Set<String>) -> LinkRewritePass {
         var pass = LinkRewritePass()
         var baselines = baselines
-        // Keyed by `pathKey`, NOT by `edit.file.path`: an edit's file comes from
-        // the index, whose spelling is not guaranteed to match the canonical
-        // session URLs this loop compares against. Keyed raw, a
-        // non-canonically-spelled edit file never matches its own open tab, so
-        // `blockedByUnsavedEdits` below never fires and the exclude-dirty-tabs
-        // protection quietly does nothing.
+        // Keyed by `pathKey`, NOT by `edit.file.path`. Index-sourced edits are
+        // canonical by invariant since Task 8b, but `LinkEdit` is public and a
+        // caller-built plan can spell its edit file any way it likes. Keyed raw,
+        // such an edit never matches its own open tab, so `blockedByUnsavedEdits`
+        // below never fires and the exclude-dirty-tabs protection quietly does
+        // nothing.
         let editedByFile = Dictionary(grouping: edits, by: { Self.pathKey($0.file) })
 
         // Disarm every debounced autosave that could land on top of a rewrite,

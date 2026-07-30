@@ -75,16 +75,25 @@ extension LoreStore {
         let destination = Self.canonicalizingDestination(
             parent.appendingPathComponent(newName))
 
-        // Row paths are canonicalized BEFORE the prefix comparison. They are not
-        // canonical by construction: `VaultIndexCoordinator.indexDocument`
-        // upserts the URL its caller supplied, so any document indexed outside a
-        // full rescan can be stored `/var/...` while `source` here is
-        // `/private/var/...`. Compared raw, such a row silently falls out of
-        // `moves` — no rewrite plan is produced for it, its file still travels
-        // with the directory, its inbound links break, and NOTHING lands in
-        // `failed`, `skipped` or `unchanged`, because an empty edit list is
-        // indistinguishable from having no work to do. That is the third
+        // Row paths are canonicalized before the prefix comparison. Since Task 8b
+        // they ARE canonical by construction — the invariant is enforced at the
+        // store boundary (`LoreIndex.canonical(_:)`) and upstream in `activate`,
+        // `scanVault` and `indexDocument` — so this call is now DEFENCE, kept
+        // because the failure it prevents is silent rather than because a row can
+        // currently reach here spelled differently.
+        //
+        // What it prevented, when rows could be non-canonical: such a row fell
+        // out of `moves`, no rewrite plan was produced for it, its file still
+        // travelled with the directory, its inbound links broke, and NOTHING
+        // landed in `failed`, `skipped` or `unchanged` — an empty edit list is
+        // indistinguishable from having no work to do. That was the third
         // appearance of this exact failure mode in M1.
+        //
+        // DELIBERATELY UNPINNED: no test fails if this `canonical` is removed,
+        // because no supported API can produce a non-canonical row any more.
+        // Pinning it would mean writing to the SQLite file behind the store's
+        // back. If a future change makes rows non-canonical again, the invariant
+        // is the thing to restore — not this line.
         let prefix = source.path + "/"
         let moves: [(from: URL, to: URL)] = rows
             .map { VaultIndexCoordinator.canonical($0.path) }

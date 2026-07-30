@@ -150,6 +150,18 @@ public final class LoreIndex: @unchecked Sendable {
     /// every edit. All three looked like "there is nothing to do".
     ///
     /// **If you add a write path to this file, route its paths through here.**
+    ///
+    /// ## The one place the guarantee does NOT hold
+    ///
+    /// `realpath(3)` fails on a path that does not exist, and this function then
+    /// returns the argument's path untouched — deliberately, because a rename
+    /// DESTINATION never exists yet. The consequence is that the symmetric
+    /// read/remove guarantee above applies only to a file that still exists: a
+    /// `remove(path:)` (or any read) issued with a RAW spelling AFTER the file has
+    /// been deleted, trashed or moved cannot be canonicalized, will not match the
+    /// canonical row, and will silently no-op — leaving a ghost row. So
+    /// canonicalize BEFORE the mutation and pass that value afterwards; see
+    /// `LoreStore.trash`, which does exactly this and says why.
     private static func canonical(_ url: URL) -> String {
         VaultIndexCoordinator.canonical(url).path
     }
@@ -192,6 +204,23 @@ public final class LoreIndex: @unchecked Sendable {
         // The canonical-path invariant is enforced HERE, at the single function
         // every `documents` and `links` row passes through (`upsert` and
         // `replaceAll` both delegate to it). See `canonical(_:)` above.
+        //
+        // COST, stated because it is paid inside the write transaction: one
+        // `realpath(3)` per document plus one per resolved link. A whole-vault
+        // `replaceAll` therefore pays thousands of them — which is exactly what
+        // `scanVault` canonicalizes its root ONCE to avoid, and those entries
+        // arrive here already canonical, so every call below is a redundant
+        // syscall on the hot rebuild path.
+        //
+        // Kept anyway, on purpose. The failures this invariant prevents are
+        // SILENT (an empty backlinks pane, an under-reported "N notes link here"
+        // before a delete, a rename that drops every edit), and `upsert` — the
+        // per-save path that was the live hole — has no upstream root to
+        // canonicalize once. A backstop that only the caller can be trusted to
+        // apply is not a backstop. `realpath` on a warm dentry cache is a few
+        // microseconds against a transaction already doing several SQL statements
+        // per row; if a rebuild ever profiles hot here, cache by parent directory
+        // rather than removing the enforcement.
         let path = canonical(entry.url)
         try db.execute(sql: """
             INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties)

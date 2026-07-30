@@ -85,13 +85,17 @@ extension LoreStore {
         } catch {
             throw LoreError.trashFailed(row.path, error.localizedDescription)
         }
-        // One spelling is now enough, and this is why: every path in the index
-        // is canonical by invariant (see `LoreIndex.canonical(_:)`), and
-        // `remove(path:)` canonicalizes its argument, so `row.path` and `path`
-        // address the same row. `forgetOpenMTime` keys through
-        // `LoreStore.pathKey` for the same reason. The previous dual-spelling
-        // calls were a workaround for `indexDocument` storing the caller's URL
-        // verbatim — that hole is closed.
+        // One spelling is enough, and it must be THIS one — `path`, canonicalized
+        // at the top of this function, BEFORE `trashItem` moved the file.
+        //
+        // Not because `remove(path:)` canonicalizes its argument: by here the
+        // file is gone, `realpath(3)` fails on a vanished path, and `canonical`
+        // then returns its argument untouched. Passing `row.path` would reach
+        // SQLite spelled raw and match no row — a silent ghost entry. The
+        // previous dual-spelling calls were a workaround for `indexDocument`
+        // storing the caller's URL verbatim; that hole is closed, but the
+        // ordering here is load-bearing on its own. Canonicalize before you
+        // delete, never after.
         try? coordinator.removeFromIndex(path)
         forgetOpenMTime(path)
         return inbound
