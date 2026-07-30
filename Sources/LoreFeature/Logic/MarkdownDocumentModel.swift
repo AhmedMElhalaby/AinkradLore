@@ -44,21 +44,59 @@ public struct MarkdownDocumentModel: Sendable {
         .fencedCodeBlock, .inlineCode,
     ]
 
-    /// Every style span, in walk order, in UTF-16 offsets into `fullText`.
-    /// Computed in `init` from the same walk as `codeRegions`, because the
-    /// parsed `Document` is not retained — `RawMarkup` is not `Sendable`.
-    public let styleSpans: [StyleSpan]
+    /// The string this model describes, and the string every offset it reports
+    /// indexes. Retained so wikilink spans can be derived ON DEMAND — see
+    /// `styleSpans`. The parsed `Document` is NOT retained: `RawMarkup` is not
+    /// `Sendable`.
+    public let fullText: String
 
-    public init(fullText: String) {
-        self.init(fullText: fullText, includingWikilinkSpans: true)
+    /// Style spans for the nodes the AST knows about, in walk order, in UTF-16
+    /// offsets into `fullText`. Collected in `init` by the same walk as
+    /// `codeRegions`.
+    ///
+    /// Deliberately NOT the whole story: wikilinks are not CommonMark, so this
+    /// omits them. Callers wanting what the EDITOR should style want
+    /// `styleSpans`.
+    public let astStyleSpans: [StyleSpan]
+
+    /// Wikilink spans, derived on demand rather than in `init`.
+    ///
+    /// On demand because `LinkParser` — the one scanner that knows a `[[link]]`
+    /// inside a fence is documentation, not a link — itself needs a code-region
+    /// answer, and deriving these during `init` would close a cycle: model →
+    /// parser → model → … an unbounded recursion, which is a hang rather than a
+    /// crash. Evaluating outside `init` makes the cycle unformable no matter
+    /// who calls what, so no flag and no partially-built model are needed.
+    ///
+    /// The parser is handed THIS model's already-computed regions, so the
+    /// public path parses markdown exactly once.
+    public var wikilinkSpans: [StyleSpan] {
+        WikilinkSpanBuilder.spans(in: fullText, codeRegions: injectableCodeRegions)
     }
 
-    /// - Parameter includingWikilinkSpans: `false` breaks a genuine cycle.
-    ///   Wikilink style spans come from `LinkParser`, and `LinkParser` builds a
-    ///   `MarkdownDocumentModel` to ask what is inside code — so a model that
-    ///   always asked for wikilink spans would recurse forever. `LinkParser` is
-    ///   the one caller that passes `false`; it never reads `styleSpans`.
-    init(fullText: String, includingWikilinkSpans: Bool) {
+    /// Every span the editor should style: AST nodes plus wikilinks.
+    ///
+    /// Computed, not stored, because `wikilinkSpans` must stay lazy. There is
+    /// no incomplete model to observe — this property always answers fully —
+    /// at the cost of recomputing the link scan per access. Callers on a hot
+    /// path should hold the result, not the model.
+    public var styleSpans: [StyleSpan] { astStyleSpans + wikilinkSpans }
+
+    /// This model's regions, but only when they are known to describe exactly
+    /// the string `LinkParser` will scan.
+    ///
+    /// `LinkParser` normalises CRLF before scanning. That is offset-safe for
+    /// its own CHARACTER offsets (`"\r\n"` is one Swift `Character`) but not
+    /// for UTF-16 ones: every line break past the first shifts by a unit, so
+    /// regions computed here would point at the wrong places in the string it
+    /// actually scans. For those documents we hand over nothing and let the
+    /// parser build its own model from the normalised text — correctness over
+    /// the saved parse.
+    private var injectableCodeRegions: [CodeRegion]? {
+        fullText.contains("\r\n") ? nil : codeRegions
+    }
+
+    public init(fullText: String) {
         let bodyStart = Frontmatter.bodyOffset(in: fullText)
         let body = String(fullText.dropFirst(bodyStart))
         let bodyUTF16Offset = (String(fullText.prefix(bodyStart)) as NSString).length
@@ -67,11 +105,11 @@ public struct MarkdownDocumentModel: Sendable {
         let doc = Document(parsing: body)
 
         self.offsetMap = map
+        self.fullText = fullText
         var collector = MarkdownASTCollector(map: map, text: fullText as NSString)
         collector.visit(doc)
         self.codeRegions = collector.regions
-        self.styleSpans = collector.styleSpans
-            + (includingWikilinkSpans ? WikilinkSpanBuilder.spans(in: fullText) : [])
+        self.astStyleSpans = collector.styleSpans
     }
 
     /// True if `offset` is inside ANY code region. Semantics unchanged: callers

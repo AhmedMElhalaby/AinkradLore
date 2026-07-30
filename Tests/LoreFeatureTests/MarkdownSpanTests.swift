@@ -274,4 +274,51 @@ final class MarkdownStyleSpanTests: XCTestCase {
     func test_emptyDocumentHasNoSpans() {
         XCTAssertTrue(MarkdownDocumentModel(fullText: "").styleSpans.isEmpty)
     }
+
+    /// The marker is the EARLIEST bracket pair, not the first spelling that
+    /// matches: this item is checked and merely mentions `[ ]` in its prose.
+    func test_checkboxSpanCoversTheMarkerNotLaterBracketsInTheProse() {
+        let text = "- [x] see [ ] later\n"
+        let ns = text as NSString
+        let span = MarkdownDocumentModel(fullText: text).styleSpans
+            .first { $0.kind == .checkbox(true) }
+        XCTAssertNotNil(span)
+        XCTAssertEqual(span!.range.lowerBound, ns.range(of: "[x]").location)
+    }
+
+    /// Wikilink spans are derived on demand, so no caller can observe a model
+    /// that has AST spans but silently lacks wikilinks. Every model answers
+    /// fully; `astStyleSpans` is the explicitly partial view, and its name
+    /// says so.
+    func test_everyModelReportsWikilinksNoMatterHowItWasBuilt() {
+        let model = MarkdownDocumentModel(fullText: "[[Design]]\n")
+        XCTAssertTrue(model.styleSpans.contains { $0.kind == .wikilink })
+        XCTAssertFalse(model.astStyleSpans.contains { $0.kind == .wikilink })
+    }
+
+    /// CRLF is the case where the model must NOT hand its regions to the
+    /// parser: `"\r\n"` is one Character but two UTF-16 units, so regions
+    /// computed pre-normalisation point elsewhere in the string the parser
+    /// scans. Injecting them anyway would misplace or lose this span.
+    func test_wikilinkSpansAreCorrectInCRLFDocuments() {
+        let text = "intro\r\n\r\n[[Design]]\r\n"
+        let ns = text as NSString
+        let span = MarkdownDocumentModel(fullText: text).styleSpans
+            .first { $0.kind == .wikilink }
+        XCTAssertNotNil(span)
+        XCTAssertEqual(ns.substring(with: NSRange(location: span!.range.lowerBound,
+                                                  length: span!.range.count)),
+                       "Design")
+    }
+
+    /// Injection must not change what the parser answers. Same document, one
+    /// scan with the model's regions handed over and one without.
+    func test_injectedCodeRegionsGiveTheSameLinksAsParsingAfresh() {
+        let text = "real [[A]]\n\n```\n[[B]]\n```\n\n`[[C]]` [[D]]\n"
+        let model = MarkdownDocumentModel(fullText: text)
+        XCTAssertEqual(
+            LinkParser.spans(in: text, codeRegions: model.codeRegions),
+            LinkParser.spans(in: text, codeRegions: nil))
+        XCTAssertEqual(LinkParser.links(in: text).map(\.rawTarget), ["A", "D"])
+    }
 }

@@ -82,6 +82,18 @@ public enum LinkParser {
     /// graph covers — no second, subtly different notion of "inside a code
     /// block" to keep in step.
     public static func spans(in body: String) -> [LinkSpan] {
+        spans(in: body, codeRegions: nil)
+    }
+
+    /// - Parameter codeRegions: regions the caller has ALREADY computed for
+    ///   this exact string, saving the parse this scan would otherwise do.
+    ///   `nil` — every existing caller — parses as before. The grammar, the
+    ///   kind filter and the results are identical either way; this is a
+    ///   work-saving injection point, not a behaviour switch. Passing regions
+    ///   computed for a DIFFERENT string (a pre-normalisation one, say) would
+    ///   misplace suppression, which is why `MarkdownDocumentModel` withholds
+    ///   them for CRLF documents.
+    static func spans(in body: String, codeRegions: [CodeRegion]?) -> [LinkSpan] {
         // CRLF documents — Windows-authored vaults, sync clients, `core.autocrlf`
         // checkouts — do not split on `"\n"`: Swift treats `"\r\n"` as ONE
         // Character, which is not equal to `"\n"`, so the whole file scans as a
@@ -99,10 +111,9 @@ public enum LinkParser {
         // offsets below index — so its UTF-16 offsets and our character offsets
         // describe one string, and `utf16OffsetForCharacterOffset` is the only
         // place the two units meet.
-        // `includingWikilinkSpans: false` is required, not an optimisation:
-        // the model's wikilink STYLE spans are derived from this very parser,
-        // so asking for them here would recurse without end.
-        let model = MarkdownDocumentModel(fullText: text, includingWikilinkSpans: false)
+        // Injected regions, when the caller has them, describe this same
+        // string — see the parameter's note. Otherwise parse.
+        let regions = codeRegions ?? MarkdownDocumentModel(fullText: text).codeRegions
         let utf16OffsetForCharacterOffset = utf16Offsets(for: text)
         //
         // FENCED and INLINE code only. Indented code blocks, HTML blocks and
@@ -115,9 +126,11 @@ public enum LinkParser {
         let isInsideCode: (Int) -> Bool = { characterOffset in
             guard characterOffset >= 0,
                   characterOffset < utf16OffsetForCharacterOffset.count else { return false }
-            return model.isInsideCode(
-                utf16Offset: utf16OffsetForCharacterOffset[characterOffset],
-                kinds: MarkdownDocumentModel.linkSuppressingKinds)
+            let utf16Offset = utf16OffsetForCharacterOffset[characterOffset]
+            return regions.contains {
+                MarkdownDocumentModel.linkSuppressingKinds.contains($0.kind)
+                    && NSLocationInRange(utf16Offset, $0.range)
+            }
         }
 
         var found: [LinkSpan] = []

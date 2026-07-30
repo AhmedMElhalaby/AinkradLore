@@ -90,6 +90,11 @@ extension MarkdownASTCollector {
     /// The `[ ]` / `[x]` marker on the item's FIRST line, in absolute UTF-16
     /// offsets. Searching only that line keeps a later `[` — a link, a
     /// footnote — from being mistaken for the marker.
+    ///
+    /// The EARLIEST of the three spellings wins, not the first one that
+    /// happens to match: `- [x] see [ ] later` is a CHECKED item that mentions
+    /// empty brackets, and scanning in marker order would put the span on the
+    /// prose brackets while the kind said `.checkbox(true)`.
     private func checkboxMarkerRange(in itemRange: NSRange) -> NSRange? {
         var end = itemRange.location
         let limit = min(itemRange.location + itemRange.length, text.length)
@@ -97,11 +102,10 @@ extension MarkdownASTCollector {
         guard end > itemRange.location else { return nil }
         let line = NSRange(location: itemRange.location,
                            length: end - itemRange.location)
-        for marker in ["[ ]", "[x]", "[X]"] {
-            let found = text.range(of: marker, options: [], range: line)
-            if found.location != NSNotFound { return found }
-        }
-        return nil
+        return ["[ ]", "[x]", "[X]"]
+            .map { text.range(of: $0, options: [], range: line) }
+            .filter { $0.location != NSNotFound }
+            .min { $0.location < $1.location }
     }
 
     mutating func append(_ sourceRange: SourceRange?, _ kind: StyleSpan.Kind) {
@@ -126,8 +130,11 @@ enum WikilinkSpanBuilder {
     ///   internally, which is offset-safe because `"\r\n"` is one Character —
     ///   so its character offsets still index `fullText`, and the table below
     ///   is built from `fullText` accordingly.
-    static func spans(in fullText: String) -> [StyleSpan] {
-        let linkSpans = LinkParser.spans(in: fullText)
+    /// - Parameter codeRegions: the caller's already-computed regions, when
+    ///   they describe `fullText` exactly; `nil` lets the parser compute its
+    ///   own.
+    static func spans(in fullText: String, codeRegions: [CodeRegion]?) -> [StyleSpan] {
+        let linkSpans = LinkParser.spans(in: fullText, codeRegions: codeRegions)
             .filter { $0.link.syntax == .wikilink }
         guard !linkSpans.isEmpty else { return [] }
 
