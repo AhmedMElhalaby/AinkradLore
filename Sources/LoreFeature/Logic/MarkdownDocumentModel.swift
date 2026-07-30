@@ -28,6 +28,73 @@ public struct CodeRegion: Sendable, Equatable {
     public let kind: CodeRegionKind
 }
 
+/// "Is this offset inside code?" answered in O(log n) instead of O(n).
+///
+/// The linear `codeRegions.contains { … }` it replaces was 85% of the cost of
+/// parsing a large note: `LinkParser` asks once per candidate link, so a note
+/// with L links and R regions cost O(L × R). A 230 KB note has thousands of
+/// each.
+///
+/// The trick that makes a binary search legal is that the QUESTION is about a
+/// UNION, not about individual regions: "inside any region of these kinds" is
+/// exactly "inside the union of those ranges". So the ranges are sorted and
+/// COALESCED into disjoint half-open intervals at construction, and a single
+/// binary search for the last interval starting at or before `offset` settles
+/// it. Kinds are applied by FILTERING before coalescing, which is why the
+/// kind-filtered and all-kinds questions need two different indexes rather than
+/// one index consulted differently — merging first would let an
+/// `.indentedCodeBlock` extend a `.fencedCodeBlock`'s interval and silently
+/// widen link suppression.
+///
+/// Zero-length regions are dropped: `NSLocationInRange` is false for every
+/// offset against them, so they can never have contributed an answer.
+struct CodeRegionIndex: Sendable {
+    /// Disjoint, ascending, half-open. `starts[i]..<ends[i]`.
+    private let starts: [Int]
+    private let ends: [Int]
+
+    /// - Parameter kinds: `nil` means every kind — the all-regions question.
+    init(regions: [CodeRegion], kinds: Set<CodeRegionKind>?) {
+        let intervals = regions
+            .lazy
+            .filter { kinds?.contains($0.kind) ?? true }
+            .map { ($0.range.location, $0.range.location + $0.range.length) }
+            .filter { $0.1 > $0.0 }
+            .sorted { $0.0 < $1.0 }
+
+        var starts: [Int] = []
+        var ends: [Int] = []
+        starts.reserveCapacity(intervals.count)
+        ends.reserveCapacity(intervals.count)
+        for (lower, upper) in intervals {
+            // `lower <= ends.last` merges overlapping AND touching intervals.
+            // Touching ones are safe to merge because the intervals are
+            // half-open: `[0,3)` ∪ `[3,5)` covers exactly `[0,5)`.
+            if let last = ends.last, lower <= last {
+                ends[ends.count - 1] = max(last, upper)
+            } else {
+                starts.append(lower)
+                ends.append(upper)
+            }
+        }
+        self.starts = starts
+        self.ends = ends
+    }
+
+    var isEmpty: Bool { starts.isEmpty }
+
+    func contains(_ offset: Int) -> Bool {
+        var low = 0
+        var high = starts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if starts[mid] <= offset { low = mid + 1 } else { high = mid }
+        }
+        guard low > 0 else { return false }
+        return offset < ends[low - 1]
+    }
+}
+
 /// Counts markdown parses so the editor's caching can be asserted on rather
 /// than asserted about. Test-only: the increment is `#if DEBUG`, so a release
 /// build carries neither the lock nor the call.
@@ -77,6 +144,13 @@ public struct MarkdownDocumentModel: Sendable {
     /// Every raw-text region, tagged. Ordered as the walk found them.
     public let codeRegions: [CodeRegion]
 
+    /// `codeRegions` as a searchable union — every kind.
+    private let allKindsIndex: CodeRegionIndex
+
+    /// `codeRegions` as a searchable union — `linkSuppressingKinds` only.
+    /// Built once here so the link scan does not rebuild it per call.
+    let linkSuppressionIndex: CodeRegionIndex
+
     /// Every code region's range, kind discarded. Unchanged in meaning from
     /// before kinds existed: fenced, indented, HTML block, and inline code.
     public var codeRangesUTF16: [NSRange] { codeRegions.map(\.range) }
@@ -114,7 +188,7 @@ public struct MarkdownDocumentModel: Sendable {
     /// The parser is handed THIS model's already-computed regions, so the
     /// public path parses markdown exactly once.
     public var wikilinkSpans: [StyleSpan] {
-        WikilinkSpanBuilder.spans(in: fullText, codeRegions: injectableCodeRegions)
+        WikilinkSpanBuilder.spans(in: fullText, suppression: injectableSuppressionIndex)
     }
 
     /// Every span the editor should style: AST nodes plus wikilinks.
@@ -150,8 +224,14 @@ public struct MarkdownDocumentModel: Sendable {
     /// actually scans. For those documents we hand over nothing and let the
     /// parser build its own model from the normalised text — correctness over
     /// the saved parse.
-    private var injectableCodeRegions: [CodeRegion]? {
-        fullText.contains("\r\n") ? nil : codeRegions
+    ///
+    /// Handing over the INDEX rather than the region array changes nothing
+    /// about this guard: the index is derived from the same regions and carries
+    /// the same UTF-16 offsets, so a pre-normalisation index is misplaced in
+    /// exactly the same way a pre-normalisation region array is. The guard
+    /// stays.
+    private var injectableSuppressionIndex: CodeRegionIndex? {
+        fullText.contains("\r\n") ? nil : linkSuppressionIndex
     }
 
     public init(fullText: String) {
@@ -171,19 +251,25 @@ public struct MarkdownDocumentModel: Sendable {
         collector.visit(doc)
         self.codeRegions = collector.regions
         self.astStyleSpans = collector.styleSpans
+        self.allKindsIndex = CodeRegionIndex(regions: collector.regions, kinds: nil)
+        self.linkSuppressionIndex = CodeRegionIndex(regions: collector.regions,
+                                                    kinds: Self.linkSuppressingKinds)
     }
 
     /// True if `offset` is inside ANY code region. Semantics unchanged: callers
     /// that genuinely want every raw-text region keep using this.
     public func isInsideCode(utf16Offset offset: Int) -> Bool {
-        codeRegions.contains { NSLocationInRange(offset, $0.range) }
+        allKindsIndex.contains(offset)
     }
 
     /// True if `offset` is inside a code region of one of `kinds`.
+    ///
+    /// The prebuilt index serves the one set that is on a hot path; any other
+    /// set is a test or a one-off, and pays for its own index. Both branches
+    /// answer the same question — see `CodeRegionIndex`.
     public func isInsideCode(utf16Offset offset: Int, kinds: Set<CodeRegionKind>) -> Bool {
-        codeRegions.contains {
-            kinds.contains($0.kind) && NSLocationInRange(offset, $0.range)
-        }
+        if kinds == Self.linkSuppressingKinds { return linkSuppressionIndex.contains(offset) }
+        return CodeRegionIndex(regions: codeRegions, kinds: kinds).contains(offset)
     }
 }
 

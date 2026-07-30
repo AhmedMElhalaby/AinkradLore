@@ -36,19 +36,43 @@ struct MarkdownStyleCache {
     /// path was the most expensive path in the editor — a full parse per debounce
     /// to be handed an empty array.
     mutating func reparse(_ newText: String) {
+        adopt(Self.derive(newText), for: newText)
+    }
+
+    /// Everything a parse produces, and nothing that is tied to a thread.
+    ///
+    /// `Sendable` so the parse can run OFF the main actor and the result be
+    /// carried back — see `MarkdownEditor.Coordinator.parseNow`. The struct
+    /// carries no reference to the editor, so there is nothing to race on; the
+    /// string it describes travels alongside it and is checked on arrival.
+    struct Derived: Sendable {
+        let spans: [StyleSpan]
+        let isOverHardCap: Bool
+        let isOverViewportCap: Bool
+    }
+
+    /// The pure, actor-free half of `reparse`. Safe to call from any thread.
+    static func derive(_ newText: String) -> Derived {
         guard newText.utf16.count <= MarkdownDocumentModel.stylingHardCap else {
-            text = newText
-            spans = []
-            isOverHardCap = true
-            isOverViewportCap = true
-            isStale = false
-            return
+            return Derived(spans: [], isOverHardCap: true, isOverViewportCap: true)
         }
         let model = MarkdownDocumentModel(fullText: newText)
+        return Derived(spans: model.styleSpans,
+                       isOverHardCap: model.isOverStylingHardCap,
+                       isOverViewportCap: model.isOverStylingViewportCap)
+    }
+
+    /// Installs a derivation together with the string it describes.
+    ///
+    /// `text` is set from the caller's snapshot, never from the live view: the
+    /// invariant `describes(text) ⇒ these spans index that exact string` is the
+    /// only thing standing between a stale parse and styling the wrong
+    /// characters, so the string and the spans are installed as one unit.
+    mutating func adopt(_ derived: Derived, for newText: String) {
         text = newText
-        spans = model.styleSpans
-        isOverHardCap = model.isOverStylingHardCap
-        isOverViewportCap = model.isOverStylingViewportCap
+        spans = derived.spans
+        isOverHardCap = derived.isOverHardCap
+        isOverViewportCap = derived.isOverViewportCap
         isStale = false
     }
 

@@ -151,6 +151,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// `MarkdownStyleCache` for why this is not recomputed per call.
         private(set) var styleCache = MarkdownStyleCache()
         private var parseTimer: Timer?
+        /// Bumped per off-actor parse launched. A result whose generation is no
+        /// longer the current one is discarded — see `parseNow`.
+        private var parseGeneration = 0
         private var lastViewportWindow: NSRange?
         /// The edit `shouldChangeTextIn` announced, consumed by the very next
         /// `textDidChange`. AppKit always pairs them, and anything that edits
@@ -189,6 +192,9 @@ public struct MarkdownEditor: NSViewRepresentable {
             completionPanel.hide()
             parseTimer?.invalidate()
             parseTimer = nil
+            // Any in-flight off-actor parse now belongs to a torn-down editor;
+            // bumping the generation makes its result arrive and be discarded.
+            parseGeneration += 1
             if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
             scrollObserver = nil
         }
@@ -377,11 +383,47 @@ public struct MarkdownEditor: NSViewRepresentable {
             RunLoop.main.add(timer, forMode: .common)
         }
 
+        /// Parses OFF the main actor and applies the result back on it.
+        ///
+        /// This used to be a synchronous parse on the main actor, called from a
+        /// main-run-loop timer. On a large note that is measured in whole
+        /// seconds, and a main-actor second is not lag — it is a beachball, once
+        /// per pause in typing. The parse itself is pure (`derive` touches no
+        /// AppKit and no editor state), so the only thing that must stay on the
+        /// main actor is applying the answer.
+        ///
+        /// Two guards keep a slow parse from styling the wrong characters:
+        ///
+        /// 1. `generation` — a newer parse having been started makes this one's
+        ///    result garbage, even if the text looks right.
+        /// 2. the SNAPSHOT check — the spans index `snapshot` and nothing else,
+        ///    so they are installed only if the view still holds exactly that
+        ///    string. This is the same identity rule `describes(_:)` encodes,
+        ///    applied across the hop.
+        ///
+        /// When the text HAS moved on, nothing is applied and nothing is
+        /// re-armed here: the edit that moved it went through `textDidChange`,
+        /// which armed the debounce already.
         private func parseNow() {
             parseTimer = nil
             guard let tv = textView else { return }
-            guard styleCache.isStale || !styleCache.describes(tv.string) else { return }
-            styleCache.reparse(tv.string)
+            let snapshot = tv.string
+            guard styleCache.isStale || !styleCache.describes(snapshot) else { return }
+            parseGeneration += 1
+            let generation = parseGeneration
+            Task.detached(priority: .userInitiated) {
+                let derived = MarkdownStyleCache.derive(snapshot)
+                await MainActor.run { [weak self] in
+                    self?.applyParsed(derived, of: snapshot, generation: generation)
+                }
+            }
+        }
+
+        private func applyParsed(_ derived: MarkdownStyleCache.Derived,
+                                 of snapshot: String, generation: Int) {
+            guard generation == parseGeneration,
+                  let tv = textView, tv.string == snapshot else { return }
+            styleCache.adopt(derived, for: snapshot)
             renderStyles()
         }
 

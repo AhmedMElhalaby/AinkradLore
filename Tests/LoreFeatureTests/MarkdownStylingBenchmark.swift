@@ -11,11 +11,21 @@ final class MarkdownStylingBenchmark: XCTestCase {
     /// by the number of characters typed. Before M2a the styler ran a full
     /// regex sweep per keystroke; an AST parse per keystroke would be worse.
     ///
-    /// MEASURED, Debug (unoptimised), 2026-07-30: 3.75 s average for ~230 KB.
-    /// Split by hand at the time: 0.35 s for the AST walk, 3.20 s for
-    /// `wikilinkSpans` — i.e. 85% of the cost is the on-demand link scan, not
-    /// swift-markdown. That is why the editor parses once per debounce and
-    /// never on a keystroke, and it is the number Task 7+ should attack.
+    /// MEASURED, Debug (unoptimised), 2026-07-30, ~230 KB.
+    ///
+    ///                       Task 6      Task 6b
+    ///   whole parse         3.75 s      0.406 s     9.2× faster
+    ///   AST walk            0.35 s      0.366 s     unchanged, as expected
+    ///   `wikilinkSpans`     3.20 s      0.057 s     56× faster
+    ///
+    /// The link scan was 85% of the cost and is now 14%: it asked
+    /// `isInsideCode` per candidate link and each answer walked EVERY code
+    /// region, so the scan was O(links × regions). `CodeRegionIndex` makes each
+    /// answer O(log regions). swift-markdown is now the floor, and it is a floor
+    /// the editor no longer waits on — `parseNow` runs off the main actor.
+    ///
+    /// The split is measured by `test_theASTWalkAlone` and
+    /// `test_theWikilinkScanAlone` rather than by hand, so it stays comparable.
     func test_parsingALargeDocumentIsFastEnoughToDebounce() {
         let paragraph = "Some **bold** text with a [[Link]] and `code`.\n\n"
         let body = String(repeating: paragraph, count: 5_000)   // ~230 KB
@@ -24,6 +34,24 @@ final class MarkdownStylingBenchmark: XCTestCase {
         measure {
             _ = MarkdownDocumentModel(fullText: body).styleSpans
         }
+    }
+
+    /// The AST-walk half of the split, measured on its own so the two halves
+    /// stay comparable across tasks.
+    func test_theASTWalkAlone() {
+        let body = Self.largeFixture
+        measure { _ = MarkdownDocumentModel(fullText: body).astStyleSpans }
+    }
+
+    /// The half that was 85% of the cost: the on-demand link scan.
+    func test_theWikilinkScanAlone() {
+        let body = Self.largeFixture
+        let model = MarkdownDocumentModel(fullText: body)
+        measure { _ = model.wikilinkSpans }
+    }
+
+    static var largeFixture: String {
+        String(repeating: "Some **bold** text with a [[Link]] and `code`.\n\n", count: 5_000)
     }
 
     func test_aDocumentOverTheHardCapProducesNoSpans() {
@@ -142,6 +170,77 @@ final class MarkdownStylingCacheTests: XCTestCase {
         XCTAssertEqual(MarkdownParseCounter.count, 1)
         XCTAssertFalse(cache.isOverHardCap)
         XCTAssertTrue(cache.spans.contains { $0.kind == .strong })
+    }
+
+    /// Task 6b: the debounced parse runs OFF the main actor, so its result can
+    /// arrive after the text has moved on. It must then be dropped, not applied
+    /// — spans index exactly one string, and applying them to another styles
+    /// the wrong characters, which is the defect class M2a exists to remove.
+    ///
+    /// The text is replaced wholesale immediately after arming the debounce, so
+    /// whichever order the two land in, the cache must end up describing what is
+    /// actually on screen.
+    func test_aParseWhoseTextChangedBeforeItLandedIsNotApplied() {
+        let (coordinator, tv, _) = makeEditor("plain text\n")
+        withExtendedLifetime(coordinator) {
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.insertText("# ", replacementRange: tv.selectedRange())
+            // The document was switched out from under the pending parse.
+            tv.string = "# Something Else Entirely\n\n**b**\n"
+            coordinator.applyStyles()
+
+            let settled = expectation(description: "debounce settled")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { settled.fulfill() }
+            wait(for: [settled], timeout: 2)
+
+            XCTAssertTrue(coordinator.styleCache.describes(tv.string),
+                          "the cache must describe the text on screen, not the snapshot")
+            let limit = (tv.string as NSString).length
+            for span in coordinator.cachedSpansForTesting {
+                XCTAssertLessThanOrEqual(span.range.upperBound, limit)
+            }
+            XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .strong },
+                          "and it must be the spans of THAT text")
+        }
+    }
+
+    /// The debounced parse no longer blocks the main actor. Proven by the one
+    /// observable consequence: `parseNow` returns before the spans exist.
+    func test_theDebouncedParseDoesNotBlockTheMainActor() {
+        let (coordinator, tv, _) = makeEditor("plain text\n")
+        withExtendedLifetime(coordinator) {
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.insertText("# ", replacementRange: tv.selectedRange())
+
+            let armed = expectation(description: "timer fired")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { armed.fulfill() }
+            wait(for: [armed], timeout: 2)
+            // The timer has fired and `parseNow` has returned; the answer
+            // arrives on a later main-actor turn.
+            let settled = expectation(description: "result applied")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settled.fulfill() }
+            wait(for: [settled], timeout: 2)
+            XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .heading(1) })
+        }
+    }
+
+    /// `adopt` binds spans to the string they were derived from as one unit —
+    /// the invariant the off-actor hop leans on.
+    func test_adoptBindsSpansToTheStringTheyDescribe() {
+        var cache = MarkdownStyleCache()
+        let text = "# Heading\n\n**bold**\n"
+        cache.adopt(MarkdownStyleCache.derive(text), for: text)
+        XCTAssertTrue(cache.describes(text))
+        XCTAssertFalse(cache.isStale)
+        XCTAssertTrue(cache.spans.contains { $0.kind == .strong })
+    }
+
+    /// `derive` is the pure half, so it must answer identically to `reparse`.
+    func test_deriveAndReparseAgree() {
+        let text = "# H\n\n`code` [[Link]] **b**\n\n```\n[[NotALink]]\n```\n"
+        var cache = MarkdownStyleCache()
+        cache.reparse(text)
+        XCTAssertEqual(cache.spans, MarkdownStyleCache.derive(text).spans)
     }
 
     // MARK: - Span shifting

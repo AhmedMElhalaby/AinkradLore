@@ -322,3 +322,112 @@ final class MarkdownStyleSpanTests: XCTestCase {
         XCTAssertEqual(LinkParser.links(in: text).map(\.rawTarget), ["A", "D"])
     }
 }
+
+/// Task 6b: the suppression check went from a linear scan over every region to
+/// a binary search over their coalesced union. The union is the whole argument
+/// for why that is legal, so it is checked directly rather than trusted.
+final class CodeRegionIndexTests: XCTestCase {
+
+    private func linear(_ regions: [CodeRegion], _ kinds: Set<CodeRegionKind>?,
+                        _ offset: Int) -> Bool {
+        regions.contains {
+            (kinds?.contains($0.kind) ?? true) && NSLocationInRange(offset, $0.range)
+        }
+    }
+
+    /// Exhaustive equivalence with the predicate that was replaced, over
+    /// shapes the coalescing has to survive: overlaps, touching ranges,
+    /// containment, out-of-order input, zero length, and mixed kinds.
+    func test_theIndexAnswersExactlyWhatTheLinearScanAnswered() {
+        let regions = [
+            CodeRegion(range: NSRange(location: 40, length: 5), kind: .inlineCode),
+            CodeRegion(range: NSRange(location: 0, length: 3), kind: .fencedCodeBlock),
+            CodeRegion(range: NSRange(location: 3, length: 2), kind: .fencedCodeBlock),
+            CodeRegion(range: NSRange(location: 10, length: 8), kind: .indentedCodeBlock),
+            CodeRegion(range: NSRange(location: 12, length: 2), kind: .inlineCode),
+            CodeRegion(range: NSRange(location: 20, length: 0), kind: .inlineCode),
+            CodeRegion(range: NSRange(location: 25, length: 6), kind: .htmlBlock),
+            CodeRegion(range: NSRange(location: 28, length: 10), kind: .fencedCodeBlock),
+        ]
+        let kindSets: [Set<CodeRegionKind>?] = [
+            nil,
+            MarkdownDocumentModel.linkSuppressingKinds,
+            [.htmlBlock],
+            [.indentedCodeBlock, .htmlBlock],
+            [],
+        ]
+        for kinds in kindSets {
+            let index = CodeRegionIndex(regions: regions, kinds: kinds)
+            for offset in -5...60 {
+                XCTAssertEqual(index.contains(offset), linear(regions, kinds, offset),
+                               "offset \(offset), kinds \(String(describing: kinds))")
+            }
+        }
+    }
+
+    func test_anEmptyIndexContainsNothing() {
+        let index = CodeRegionIndex(regions: [], kinds: nil)
+        XCTAssertTrue(index.isEmpty)
+        for offset in -1...10 { XCTAssertFalse(index.contains(offset)) }
+    }
+
+    /// Kinds are filtered BEFORE coalescing. Merging first would let the
+    /// indented block below extend the fenced one and widen link suppression
+    /// over `[[X]]`, which the milestone's ruling forbids.
+    func test_filteringHappensBeforeCoalescing() {
+        let regions = [
+            CodeRegion(range: NSRange(location: 0, length: 5), kind: .fencedCodeBlock),
+            CodeRegion(range: NSRange(location: 5, length: 5), kind: .indentedCodeBlock),
+        ]
+        let index = CodeRegionIndex(regions: regions,
+                                    kinds: MarkdownDocumentModel.linkSuppressingKinds)
+        XCTAssertTrue(index.contains(4))
+        XCTAssertFalse(index.contains(5), "an indented block must not suppress")
+    }
+}
+
+/// The character→UTF-16 map gained an allocation-free identity case. It must
+/// agree with the table it replaced, character for character.
+final class CharacterOffsetMapTests: XCTestCase {
+
+    private func table(_ text: String) -> [Int] {
+        var offsets: [Int] = []
+        var running = 0
+        for character in text { offsets.append(running); running += character.utf16.count }
+        offsets.append(running)
+        return offsets
+    }
+
+    private func assertAgrees(_ text: String, file: StaticString = #filePath,
+                              line: UInt = #line) {
+        let expected = table(text)
+        let map = CharacterOffsetMap.make(for: text)
+        XCTAssertEqual(map.count, expected.count, text.debugDescription,
+                       file: file, line: line)
+        for i in 0..<expected.count {
+            XCTAssertEqual(map[i], expected[i], "\(text.debugDescription) at \(i)",
+                           file: file, line: line)
+        }
+    }
+
+    func test_itAgreesWithTheExplicitTable() {
+        assertAgrees("")
+        assertAgrees("plain ascii [[Link]] `code`\n")
+        assertAgrees("emoji 🙂 and [[Ünï]]\n")
+        assertAgrees("combining e\u{0301} tail")
+        assertAgrees("family 👨‍👩‍👧‍👦 tail")
+        assertAgrees("crlf\r\nlines\r\n")
+        assertAgrees("lone \r carriage return")
+    }
+
+    /// The fast path is only taken where it is exact. CRLF is ASCII by both
+    /// counts but is one Character carrying two UTF-16 units.
+    func test_crlfDoesNotTakeTheIdentityPath() {
+        guard case .table = CharacterOffsetMap.make(for: "a\r\nb") else {
+            return XCTFail("CRLF must not use the identity map")
+        }
+        guard case .identity = CharacterOffsetMap.make(for: "a\nb") else {
+            return XCTFail("plain ASCII should use the identity map")
+        }
+    }
+}

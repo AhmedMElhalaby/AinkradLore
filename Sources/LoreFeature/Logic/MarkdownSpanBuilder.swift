@@ -130,22 +130,25 @@ enum WikilinkSpanBuilder {
     ///   internally, which is offset-safe because `"\r\n"` is one Character —
     ///   so its character offsets still index `fullText`, and the table below
     ///   is built from `fullText` accordingly.
-    /// - Parameter codeRegions: the caller's already-computed regions, when
-    ///   they describe `fullText` exactly; `nil` lets the parser compute its
+    /// - Parameter suppression: the caller's already-built suppression index,
+    ///   when it describes `fullText` exactly; `nil` lets the parser compute its
     ///   own.
-    static func spans(in fullText: String, codeRegions: [CodeRegion]?) -> [StyleSpan] {
-        let linkSpans = LinkParser.spans(in: fullText, codeRegions: codeRegions)
-            .filter { $0.link.syntax == .wikilink }
+    ///
+    /// The character→UTF-16 table comes BACK from the scan rather than being
+    /// built here a second time — it is the same table over the same string, and
+    /// building it twice was one `count`-sized allocation and one grapheme walk
+    /// of pure duplication per parse.
+    ///
+    /// EXCEPT for CRLF documents, where the scan's table describes the
+    /// NORMALISED string and `fullText`'s UTF-16 offsets are what the editor
+    /// indexes. There the table is rebuilt from `fullText`, exactly as before.
+    static func spans(in fullText: String, suppression: CodeRegionIndex?) -> [StyleSpan] {
+        let scan = LinkParser.scan(fullText, suppression: suppression)
+        let linkSpans = scan.spans.filter { $0.link.syntax == .wikilink }
         guard !linkSpans.isEmpty else { return [] }
 
-        var utf16Offsets: [Int] = []
-        utf16Offsets.reserveCapacity(fullText.count + 1)
-        var running = 0
-        for character in fullText {
-            utf16Offsets.append(running)
-            running += character.utf16.count
-        }
-        utf16Offsets.append(running)
+        let utf16Offsets = scan.normalised
+            ? CharacterOffsetMap.make(for: fullText) : scan.offsets
 
         return linkSpans.compactMap { span in
             guard span.targetRange.lowerBound >= 0,

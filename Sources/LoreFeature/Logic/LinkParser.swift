@@ -94,13 +94,36 @@ public enum LinkParser {
     ///   misplace suppression, which is why `MarkdownDocumentModel` withholds
     ///   them for CRLF documents.
     static func spans(in body: String, codeRegions: [CodeRegion]?) -> [LinkSpan] {
+        spans(in: body, suppression: codeRegions.map {
+            CodeRegionIndex(regions: $0, kinds: MarkdownDocumentModel.linkSuppressingKinds)
+        })
+    }
+
+    /// The same injection point, pre-indexed. Callers that hold a
+    /// `MarkdownDocumentModel` already have the index and should not rebuild it.
+    static func spans(in body: String, suppression: CodeRegionIndex?) -> [LinkSpan] {
+        scan(body, suppression: suppression).spans
+    }
+
+    /// The scan, plus the character→UTF-16 table it had to build anyway.
+    ///
+    /// Exposed because `WikilinkSpanBuilder` needs exactly that table to convert
+    /// the spans it gets back, and building a second identical one was a second
+    /// `count`-sized allocation and a second grapheme walk per parse.
+    ///
+    /// - Returns: `normalised` is true when the body contained CRLF and the
+    ///   offsets therefore describe the NORMALISED string rather than `body` —
+    ///   the caller must not use the table against `body`'s UTF-16 offsets.
+    static func scan(_ body: String, suppression: CodeRegionIndex?)
+        -> (spans: [LinkSpan], offsets: CharacterOffsetMap, normalised: Bool) {
         // CRLF documents — Windows-authored vaults, sync clients, `core.autocrlf`
         // checkouts — do not split on `"\n"`: Swift treats `"\r\n"` as ONE
         // Character, which is not equal to `"\n"`, so the whole file scans as a
         // single line and every fence goes undetected. Normalising first fixes
         // that, and it is offset-SAFE precisely because `"\r\n"` is one
         // Character: every span offset still indexes the caller's own string.
-        let text = body.contains("\r\n")
+        let normalised = body.contains("\r\n")
+        let text = normalised
             ? body.replacingOccurrences(of: "\r\n", with: "\n") : body
 
         // Code regions now come from the ONE markdown parse, not from a second
@@ -113,8 +136,8 @@ public enum LinkParser {
         // place the two units meet.
         // Injected regions, when the caller has them, describe this same
         // string — see the parameter's note. Otherwise parse.
-        let regions = codeRegions ?? MarkdownDocumentModel(fullText: text).codeRegions
-        let utf16OffsetForCharacterOffset = utf16Offsets(for: text)
+        let index = suppression ?? MarkdownDocumentModel(fullText: text).linkSuppressionIndex
+        let utf16OffsetForCharacterOffset = CharacterOffsetMap.make(for: text)
         //
         // FENCED and INLINE code only. Indented code blocks, HTML blocks and
         // HTML comments deliberately do NOT suppress: the old hand-written
@@ -123,14 +146,14 @@ public enum LinkParser {
         // HTML block runs to the next BLANK line, so `text\n<div>\n[[A]]\n
         // </div>\ntext [[R]]` swallows `[[R]]` — a link in an ordinary prose
         // line — which a rename would then silently stop rewriting.
+        //
+        // The kind filter now lives in the INDEX, applied when it was built —
+        // `MarkdownDocumentModel.linkSuppressionIndex`, or the conversion in
+        // `spans(in:codeRegions:)` above. Same set, same answer, O(log n).
         let isInsideCode: (Int) -> Bool = { characterOffset in
             guard characterOffset >= 0,
                   characterOffset < utf16OffsetForCharacterOffset.count else { return false }
-            let utf16Offset = utf16OffsetForCharacterOffset[characterOffset]
-            return regions.contains {
-                MarkdownDocumentModel.linkSuppressingKinds.contains($0.kind)
-                    && NSLocationInRange(utf16Offset, $0.range)
-            }
+            return index.contains(utf16OffsetForCharacterOffset[characterOffset])
         }
 
         var found: [LinkSpan] = []
@@ -145,25 +168,7 @@ public enum LinkParser {
                                            offsetBy: lineStartCharacterOffset,
                                            isInsideCode: isInsideCode))
         }
-        return found
-    }
-
-    /// Character offset → UTF-16 offset, computed once per scan.
-    ///
-    /// `LinkSpan.targetRange` is in CHARACTERS (it indexes the string handed to
-    /// this parser); `MarkdownDocumentModel` answers in UTF-16 units. Mixing
-    /// them silently misplaces every span in a document containing an emoji.
-    /// The table has one extra trailing entry so the end offset is addressable.
-    private static func utf16Offsets(for text: String) -> [Int] {
-        var offsets: [Int] = []
-        offsets.reserveCapacity(text.count + 1)
-        var running = 0
-        for character in text {
-            offsets.append(running)
-            running += character.utf16.count
-        }
-        offsets.append(running)
-        return offsets
+        return (found, utf16OffsetForCharacterOffset, normalised)
     }
 
     /// - Parameter isInsideCode: takes an ABSOLUTE character offset into the
@@ -266,5 +271,63 @@ public enum LinkParser {
                          targetRange: range(of: target, within: slice,
                                             startingAt: base + i + 2)),
                 j + 1)
+    }
+}
+
+/// Character offset → UTF-16 offset for one string.
+///
+/// `LinkSpan.targetRange` is in CHARACTERS (it indexes the string handed to
+/// `LinkParser`); `MarkdownDocumentModel` answers in UTF-16 units. Mixing them
+/// silently misplaces every span in a document containing an emoji, so the two
+/// units meet here and nowhere else.
+///
+/// The table used to be built unconditionally: `count + 1` `Int`s, allocated and
+/// grapheme-walked on EVERY parse, twice over (once here, once in
+/// `WikilinkSpanBuilder`). For an all-ASCII string the map is the identity, and
+/// prose notes are overwhelmingly all-ASCII in the relevant sense, so the common
+/// case now allocates nothing at all.
+///
+/// The ASCII test is `utf8.count == utf16.count` — true exactly when every
+/// scalar is < U+0080 — PLUS the absence of any CR. The CR exclusion is not
+/// paranoia: `"\r\n"` is ASCII in both counts but is ONE `Character` carrying
+/// TWO UTF-16 units, which is precisely the case the identity map gets wrong.
+/// Both checks read contiguous code units, so neither pays for grapheme
+/// breaking.
+enum CharacterOffsetMap: Sendable {
+    /// Character offset equals UTF-16 offset. Payload is the character count.
+    case identity(characters: Int)
+    case table([Int])
+
+    static func make(for text: String) -> CharacterOffsetMap {
+        let utf16Count = text.utf16.count
+        if text.utf8.count == utf16Count, !text.utf8.contains(0x0D) {
+            return .identity(characters: utf16Count)
+        }
+        var offsets: [Int] = []
+        offsets.reserveCapacity(text.count + 1)
+        var running = 0
+        for character in text {
+            offsets.append(running)
+            running += character.utf16.count
+        }
+        offsets.append(running)
+        return .table(offsets)
+    }
+
+    /// Addressable offsets: one per character, plus a trailing entry so an END
+    /// offset can be looked up. Unchanged from the array it replaced, which is
+    /// what the callers' `< count` bounds checks are written against.
+    var count: Int {
+        switch self {
+        case .identity(let characters): return characters + 1
+        case .table(let table): return table.count
+        }
+    }
+
+    subscript(characterOffset: Int) -> Int {
+        switch self {
+        case .identity: return characterOffset
+        case .table(let table): return table[characterOffset]
+        }
     }
 }
