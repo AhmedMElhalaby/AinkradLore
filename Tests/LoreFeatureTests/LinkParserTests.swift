@@ -195,4 +195,71 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(String(Array(body)[span.targetRange]), "Design%20Doc.md")
         XCTAssertEqual(span.link.syntax, .markdown)
     }
+
+    func test_astAndScannerAgreeOnEveryFixture() {
+        // The AST must classify code regions exactly as the hand-written scanner
+        // did. Any disagreement is a behaviour change in the link graph, which is
+        // what this task exists NOT to do.
+        let fixtures = [
+            "see [[One]]\n\n```\n[[Two]]\n```\n\n[[Three]]\n",
+            "`[[Inline]]` but [[Real]]\n",
+            "~~~\n[[Fenced]]\n~~~\n[[After]]\n",
+            "````\n```\n[[StillCode]]\n```\n````\n[[Outside]]\n",
+            "text [[A|display]] and [[B#Heading]] and ![[C]]\n",
+            "[md](Design%20Doc.md) and [ext](https://example.com)\n",
+            "---\nid: a\ntitle: T\n---\n[[InBody]]\n",
+        ]
+        for fixture in fixtures {
+            let targets = LinkParser.links(in: fixture).map(\.rawTarget)
+            XCTAssertFalse(targets.contains("Two"), fixture)
+            XCTAssertFalse(targets.contains("Inline"), fixture)
+            XCTAssertFalse(targets.contains("Fenced"), fixture)
+            XCTAssertFalse(targets.contains("StillCode"), fixture)
+        }
+    }
+
+    /// Inline HTML is NOT a code region in the AST, and the hand-written
+    /// scanner never treated it as one either. Pinned so that the swap to the
+    /// AST cannot quietly start suppressing these links.
+    func test_inlineHTMLDoesNotSuppressLinks() {
+        XCTAssertEqual(targets("a <span>[[B]]</span> b"), ["B"])
+    }
+
+    /// A `[[` opened INSIDE inline code can find its `]]` in a real link later
+    /// on the line. Suppressing the bogus candidate must therefore resume the
+    /// scan one character on, not jump past the borrowed `]]` — doing the
+    /// latter swallows `[[Real]]` entirely.
+    func test_suppressedCandidateDoesNotSwallowALaterRealLink() {
+        XCTAssertEqual(targets("`[[x` [[Real]]"), ["Real"])
+    }
+
+    // MARK: - M2a behaviour changes (AST-sourced code regions)
+    //
+    // These two cases are the ONLY places routing code detection through
+    // `MarkdownDocumentModel` changed the link graph. Both changes SUPPRESS a
+    // link the old hand-written scanner extracted; neither adds one. Both match
+    // how CommonMark — and Obsidian — actually render the text, and the risk
+    // direction is link rot (a rename misses it) rather than the M1 hazard of
+    // rewriting a file the user never opened.
+
+    /// An indented (4-space) code block is code. The old scanner tracked only
+    /// ``` / ~~~ fences and extracted `[[Indented]]` as a real link.
+    func test_indentedCodeBlocksSuppressLinks() {
+        XCTAssertEqual(targets("para\n\n    [[Indented]]\n\nafter [[Real]]\n"), ["Real"])
+    }
+
+    /// A block-level HTML region is code to the AST. The old scanner extracted
+    /// `[[InHTMLBlock]]`. Inline HTML (above) is deliberately NOT affected.
+    func test_htmlBlocksSuppressLinks() {
+        XCTAssertEqual(targets("<div>\n[[InHTMLBlock]]\n</div>\n\nafter [[Real]]\n"),
+                       ["Real"])
+    }
+
+    /// The Character↔UTF-16 boundary: a span must still cover its target
+    /// exactly when the document contains astral-plane characters.
+    func test_spansSurviveAstralCharactersBeforeTheLink() {
+        let body = "🎉🎉 [[Design]] x"
+        let span = LinkParser.spans(in: body).first!
+        XCTAssertEqual(String(Array(body)[span.targetRange]), "Design")
+    }
 }

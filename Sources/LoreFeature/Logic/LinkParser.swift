@@ -82,12 +82,6 @@ public enum LinkParser {
     /// graph covers — no second, subtly different notion of "inside a code
     /// block" to keep in step.
     public static func spans(in body: String) -> [LinkSpan] {
-        var found: [LinkSpan] = []
-        var fence: (char: Character, length: Int)?
-        // Character offset of the current line's first character. Maintained
-        // incrementally: computing it with `distance(from:to:)` per line would
-        // make the scan quadratic in document length.
-        var lineStart = 0
         // CRLF documents — Windows-authored vaults, sync clients, `core.autocrlf`
         // checkouts — do not split on `"\n"`: Swift treats `"\r\n"` as ONE
         // Character, which is not equal to `"\n"`, so the whole file scans as a
@@ -97,91 +91,91 @@ public enum LinkParser {
         let text = body.contains("\r\n")
             ? body.replacingOccurrences(of: "\r\n", with: "\n") : body
 
+        // Code regions now come from the ONE markdown parse, not from a second
+        // hand-written fence tracker living here. The bracket grammar below is
+        // unchanged; only the answer to "is this position inside code?" moved.
+        //
+        // The model is built from `text` — the SAME string the character
+        // offsets below index — so its UTF-16 offsets and our character offsets
+        // describe one string, and `utf16OffsetForCharacterOffset` is the only
+        // place the two units meet.
+        let model = MarkdownDocumentModel(fullText: text)
+        let utf16OffsetForCharacterOffset = utf16Offsets(for: text)
+        let isInsideCode: (Int) -> Bool = { characterOffset in
+            guard characterOffset >= 0,
+                  characterOffset < utf16OffsetForCharacterOffset.count else { return false }
+            return model.isInsideCode(
+                utf16Offset: utf16OffsetForCharacterOffset[characterOffset])
+        }
+
+        var found: [LinkSpan] = []
+        // Character offset of the current line's first character. Maintained
+        // incrementally: computing it with `distance(from:to:)` per line would
+        // make the scan quadratic in document length.
+        var lineStartCharacterOffset = 0
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            defer { lineStart += line.count + 1 }   // +1 for the "\n" removed by split
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let indent = leadingSpaceCount(line)
-            if let open = fence {
-                // A closing fence must use the same character, be at least as
-                // long as the opener, be indented no more than 3 spaces, and
-                // (per CommonMark) carry no info string of its own.
-                if indent <= 3, let run = fenceRun(trimmed, char: open.char),
-                   run.length >= open.length, run.rest.isEmpty {
-                    fence = nil
-                }
-                continue
-            }
-            if indent <= 3, let run = fenceOpener(trimmed) {
-                fence = (run.char, run.length)
-                continue
-            }
-            found.append(contentsOf: spans(inLine: String(line), offsetBy: lineStart))
+            // +1 for the "\n" removed by split
+            defer { lineStartCharacterOffset += line.count + 1 }
+            found.append(contentsOf: spans(inLine: String(line),
+                                           offsetBy: lineStartCharacterOffset,
+                                           isInsideCode: isInsideCode))
         }
         return found
     }
 
-    private static func leadingSpaceCount(_ line: Substring) -> Int {
-        var count = 0
-        for char in line {
-            if char == " " { count += 1 } else { break }
+    /// Character offset → UTF-16 offset, computed once per scan.
+    ///
+    /// `LinkSpan.targetRange` is in CHARACTERS (it indexes the string handed to
+    /// this parser); `MarkdownDocumentModel` answers in UTF-16 units. Mixing
+    /// them silently misplaces every span in a document containing an emoji.
+    /// The table has one extra trailing entry so the end offset is addressable.
+    private static func utf16Offsets(for text: String) -> [Int] {
+        var offsets: [Int] = []
+        offsets.reserveCapacity(text.count + 1)
+        var running = 0
+        for character in text {
+            offsets.append(running)
+            running += String(character).utf16.count
         }
-        return count
+        offsets.append(running)
+        return offsets
     }
 
-    /// A fence line is a run of 3+ backticks or 3+ tildes, per CommonMark.
-    /// Returns the run's character, its length, and whatever follows it
-    /// (the info string, if any).
-    private static func fenceRun(_ trimmed: String, char: Character) -> (length: Int, rest: Substring)? {
-        guard trimmed.first == char else { return nil }
-        let run = trimmed.prefix(while: { $0 == char })
-        guard run.count >= 3 else { return nil }
-        return (run.count, trimmed[run.endIndex...])
-    }
-
-    /// ``` or ~~~ (three or more), per CommonMark. An info string (e.g.
-    /// ```swift) is permitted after the opener only.
-    private static func fenceOpener(_ trimmed: String) -> (char: Character, length: Int)? {
-        for marker: Character in ["`", "~"] {
-            if let run = fenceRun(trimmed, char: marker) { return (marker, run.length) }
-        }
-        return nil
-    }
-
-    private static func spans(inLine line: String, offsetBy base: Int) -> [LinkSpan] {
+    /// - Parameter isInsideCode: takes an ABSOLUTE character offset into the
+    ///   scanned string (not a line-relative one).
+    private static func spans(inLine line: String, offsetBy base: Int,
+                              isInsideCode: (Int) -> Bool) -> [LinkSpan] {
         var result: [LinkSpan] = []
         let chars = Array(line)
         var i = 0
         while i < chars.count {
-            // Inline code spans swallow everything to the closing backtick —
-            // but only when a closer actually exists later on the line. A
-            // dangling/unbalanced backtick is ordinary text, not code, so
-            // scanning must continue past it rather than eating the rest of
-            // the line (which would silently drop any link that follows).
-            if chars[i] == "`" {
-                var j = i + 1
-                while j < chars.count, chars[j] != "`" { j += 1 }
-                if j < chars.count {
-                    i = j + 1
-                    continue
-                }
-                i += 1
-                continue
-            }
             if chars[i] == "[", i + 1 < chars.count, chars[i + 1] == "[" {
                 let isEmbed = i > 0 && chars[i - 1] == "!"
                 if let close = closingBrackets(chars, from: i + 2) {
                     let inner = String(chars[(i + 2)..<close])
-                    if let span = wikilink(inner, isEmbed: isEmbed, innerStart: i + 2,
-                                           offsetBy: base) {
-                        result.append(span)
+                    let span = wikilink(inner, isEmbed: isEmbed, innerStart: i + 2,
+                                        offsetBy: base)
+                    if let span, isInsideCode(span.targetRange.lowerBound) {
+                        // Suppressed: step ONE character rather than past the
+                        // closing brackets. A `[[` that opened inside inline
+                        // code can pair with a `]]` belonging to a REAL link
+                        // later on the line (`` `[[x` [[Real]] ``); jumping
+                        // past `close` would swallow that real link.
+                        i += 1
+                        continue
                     }
+                    if let span { result.append(span) }
                     i = close + 2
                     continue
                 }
             }
             if chars[i] == "[", let found = markdownLink(chars, from: i, offsetBy: base) {
-                result.append(found.span)
-                i = found.end
+                if !isInsideCode(found.span.targetRange.lowerBound) {
+                    result.append(found.span)
+                    i = found.end
+                    continue
+                }
+                i += 1
                 continue
             }
             i += 1
