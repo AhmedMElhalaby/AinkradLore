@@ -115,6 +115,24 @@ struct MarkdownStyleCache {
     }
 }
 
+/// The scroll-to-offset entry point `OutlineSection` drives, kept here rather
+/// than in `MarkdownEditor.swift` to leave that file's AppKit wiring alone —
+/// see that file's line-count note.
+extension MarkdownEditor.Coordinator {
+    /// Moves the caret to `offset` (UTF-16, into the editor's text) and
+    /// scrolls it on screen. Clamped rather than guarded: an outline entry
+    /// computed against a slightly stale model (edit landed between parse and
+    /// click) should still land somewhere sane, not be silently dropped.
+    @MainActor func scrollToOffset(_ offset: Int) {
+        guard let tv = textView else { return }
+        let length = (tv.string as NSString).length
+        let clamped = max(0, min(offset, length))
+        let range = NSRange(location: clamped, length: 0)
+        tv.setSelectedRange(range)
+        tv.scrollRangeToVisible(range)
+    }
+}
+
 /// Turns style spans into text attributes.
 ///
 /// Split out of `MarkdownEditor` so that file stays about the editor's AppKit

@@ -431,3 +431,25 @@ final class CharacterOffsetMapTests: XCTestCase {
         }
     }
 }
+
+final class MarkdownOutlineTests: XCTestCase {
+    func test_listsHeadingsWithLevels() {
+        let outline = MarkdownDocumentModel(fullText: "# One\n\n## Two\n\n### Three\n").outline
+        XCTAssertEqual(outline.map(\.level), [1, 2, 3])
+        XCTAssertEqual(outline.map(\.text), ["One", "Two", "Three"])
+    }
+
+    func test_aHashInsideAFenceIsNotAHeading() {
+        // Shipping bug: `MarkdownEngine.outline` counted this as a heading and
+        // it reached the index.
+        let outline = MarkdownDocumentModel(fullText: "# Real\n\n```\n# Not a heading\n```\n").outline
+        XCTAssertEqual(outline.map(\.text), ["Real"])
+    }
+
+    func test_offsetsPointAtTheHeadingInTheFullText() {
+        let text = "---\nid: a\n---\n# Title\n"
+        let outline = MarkdownDocumentModel(fullText: text).outline
+        let ns = text as NSString
+        XCTAssertEqual(outline.first?.utf16Offset, ns.range(of: "# Title").location)
+    }
+}

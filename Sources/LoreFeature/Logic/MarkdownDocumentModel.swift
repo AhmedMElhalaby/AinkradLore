@@ -176,6 +176,14 @@ public struct MarkdownDocumentModel: Sendable {
     /// `styleSpans`.
     public let astStyleSpans: [StyleSpan]
 
+    /// Headings, in document order, with UTF-16 offsets into `fullText`.
+    /// Collected in `init` by the SAME walk as `astStyleSpans` and
+    /// `codeRegions` — see `MarkdownASTCollector.visitHeading`. A `Heading`
+    /// inside a fenced code block is never visited at all (the parser never
+    /// produced one there), so an offset heading comment cannot appear here —
+    /// unlike the line scanner this replaces.
+    public let outline: [OutlineEntry]
+
     /// Wikilink spans, derived on demand rather than in `init`.
     ///
     /// On demand because `LinkParser` — the one scanner that knows a `[[link]]`
@@ -251,6 +259,7 @@ public struct MarkdownDocumentModel: Sendable {
         collector.visit(doc)
         self.codeRegions = collector.regions
         self.astStyleSpans = collector.styleSpans
+        self.outline = collector.outline
         self.allKindsIndex = CodeRegionIndex(regions: collector.regions, kinds: nil)
         self.linkSuppressionIndex = CodeRegionIndex(regions: collector.regions,
                                                     kinds: Self.linkSuppressingKinds)
@@ -293,6 +302,7 @@ struct MarkdownASTCollector: MarkupWalker {
     let text: NSString
     var regions: [CodeRegion] = []
     var styleSpans: [StyleSpan] = []
+    var outline: [OutlineEntry] = []
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
         guard let ns = resolve(codeBlock.range) else { return }

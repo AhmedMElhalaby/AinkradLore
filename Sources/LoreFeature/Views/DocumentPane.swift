@@ -13,6 +13,10 @@ struct DocumentPane: View {
     @State private var unresolved: String?
     /// Why creating that note failed, when it did.
     @State private var createFailure: String?
+    /// Handed back by the markdown editor via `registerScrollHandler` — the
+    /// only channel `OutlineSection` has to reach an editor it is a SIBLING
+    /// of, not a parent of. `nil` until the editor has appeared once.
+    @State private var scrollHandler: ((Int) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +40,8 @@ struct DocumentPane: View {
                                   let name = LinkCompletionContext.documentName(of: target)
                                   if !store.openLink(name) { unresolved = name }
                               },
-                              linkTarget: { store.linkTarget(for: $0) }))
+                              linkTarget: { store.linkTarget(for: $0) },
+                              registerScrollHandler: { handler in scrollHandler = handler }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
                 // without the generation in the identity the user clicks
@@ -45,10 +50,13 @@ struct DocumentPane: View {
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
 
-            // Only markdown documents contribute to the link graph — plain-text
-            // and unclaimed documents have no links, so an empty panel there
-            // would be noise, not information.
-            if session.engine is MarkdownEngine {
+            // Only markdown documents contribute to the link graph, or have
+            // headings at all — plain-text and unclaimed documents would show
+            // an empty panel, which is noise, not information.
+            if let markdownEngine = session.engine as? MarkdownEngine {
+                OutlineSection(store: store, outline: markdownEngine.indexPayload.outline,
+                              theme: theme) { offset in scrollHandler?(offset) }
+                    .frame(maxHeight: 200)
                 BacklinksPanel(store: store, url: session.url, theme: theme)
                     .frame(maxHeight: 200)
             }

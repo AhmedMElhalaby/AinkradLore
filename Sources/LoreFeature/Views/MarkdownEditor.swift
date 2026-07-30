@@ -13,15 +13,22 @@ public struct MarkdownEditor: NSViewRepresentable {
     let onOpenLink: (@MainActor (String) -> Void)?
     /// What a picked row inserts. Defaults to the store-blind approximation.
     let linkTarget: @MainActor (IndexRow) -> String
+    /// A UTF-16 offset (into `text`) to scroll the caret to and select. Set by
+    /// a caller — `OutlineSection` — and cleared back to `nil` once handled,
+    /// so re-clicking the same heading still fires: `updateNSView` only acts
+    /// on a non-nil value, never on "the value changed".
+    let scrollTarget: Binding<Int?>
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
-                    = { LinkCompletionContext.insertableTarget(for: $0) }) {
+                    = { LinkCompletionContext.insertableTarget(for: $0) },
+                scrollTarget: Binding<Int?> = .constant(nil)) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
         self.linkTarget = linkTarget
+        self.scrollTarget = scrollTarget
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -105,6 +112,13 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
         context.coordinator.tokens = tokens
         context.coordinator.applyStyles()
+        if let offset = scrollTarget.wrappedValue {
+            context.coordinator.scrollToOffset(offset)
+            // Scheduled, not written synchronously: `updateNSView` is inside a
+            // view-update pass, and writing a `Binding` from there is the
+            // "modifying state during view update" trap.
+            DispatchQueue.main.async { scrollTarget.wrappedValue = nil }
+        }
         // Deliberately no completion recompute here: `updateNSView` runs on
         // every ancestor redraw (theme change, banner appearing, window
         // resize), and querying the index on a redraw is both wasted work and

@@ -23,6 +23,10 @@ public final class LoreStore {
     /// one toggle sticks across every note the user opens.
     public private(set) var backlinksPanelExpanded: Bool = true
 
+    /// Whether `OutlineSection` is expanded or collapsed. Same shape and same
+    /// reasoning as `backlinksPanelExpanded`.
+    public private(set) var outlinePanelExpanded: Bool = true
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -45,6 +49,7 @@ public final class LoreStore {
     private static let sidebarModeKey = "sidebarMode"
     private static let expandedFoldersKey = "expandedFolders"
     private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
+    private static let outlinePanelExpandedKey = "outlinePanelExpanded"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -65,6 +70,10 @@ public final class LoreStore {
         if let data = documents.data(forKey: Self.backlinksPanelExpandedKey),
            let raw = String(data: data, encoding: .utf8) {
             backlinksPanelExpanded = raw == "true"
+        }
+        if let data = documents.data(forKey: Self.outlinePanelExpandedKey),
+           let raw = String(data: data, encoding: .utf8) {
+            outlinePanelExpanded = raw == "true"
         }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
@@ -89,6 +98,13 @@ public final class LoreStore {
         backlinksPanelExpanded = expanded
         documents.setData((expanded ? "true" : "false").data(using: .utf8),
                           forKey: Self.backlinksPanelExpandedKey)
+    }
+
+    /// Persist the outline panel's collapsed/expanded state.
+    public func setOutlinePanelExpanded(_ expanded: Bool) {
+        outlinePanelExpanded = expanded
+        documents.setData((expanded ? "true" : "false").data(using: .utf8),
+                          forKey: Self.outlinePanelExpandedKey)
     }
 
     // MARK: - Index facade

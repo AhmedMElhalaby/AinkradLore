@@ -45,8 +45,16 @@ public struct StyleSpan: Equatable, Sendable {
 /// destructive.
 extension MarkdownASTCollector {
 
+    /// Same walk as the style span, not a second one: `outline` and
+    /// `astStyleSpans` are two views of the one `Heading` visit, and a node
+    /// whose range fails to map is dropped from BOTH rather than guessed for
+    /// either.
     mutating func visitHeading(_ heading: Heading) {
-        append(heading.range, .heading(heading.level))
+        if let ns = resolve(heading.range) {
+            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .heading(heading.level)))
+            outline.append(OutlineEntry(level: heading.level, text: heading.plainText,
+                                        utf16Offset: ns.location))
+        }
         descendInto(heading)
     }
 
