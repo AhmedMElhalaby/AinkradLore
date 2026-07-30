@@ -117,6 +117,38 @@ final class MarkdownDocumentModelTests: XCTestCase {
         XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
     }
 
+    /// `CodeBlock.range` starts at the block's CONTENT, past any indent, so an
+    /// indented block whose content is itself a fence looks fence-shaped from
+    /// its start offset. The bare closing run inside its own content is what
+    /// gives it away.
+    func test_tagsAnIndentedBlockOfBackticksAsIndented() {
+        let model = MarkdownDocumentModel(fullText: "para\n\n    ```\n    x\n    ```\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.indentedCodeBlock])
+    }
+
+    func test_tagsAnIndentedBlockOpeningWithAnInfoStringAsIndented() {
+        let model = MarkdownDocumentModel(
+            fullText: "para\n\n    ```swift\n    x\n    ```\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.indentedCodeBlock])
+    }
+
+    /// A fence pushed past column 4 by list nesting is still fenced.
+    func test_tagsAListNestedFenceAsFenced() {
+        let model = MarkdownDocumentModel(fullText: "- a\n  - b\n\n    ```\n    x\n    ```\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
+    }
+
+    func test_tagsABlockquotedFenceAsFenced() {
+        let model = MarkdownDocumentModel(fullText: "> ```\n> x\n> ```\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
+    }
+
+    /// A shorter or non-bare run inside the content is not a closer.
+    func test_tagsAFenceWithNonClosingRunsInItsContentAsFenced() {
+        let model = MarkdownDocumentModel(fullText: "````\n```text\nx\n````\n")
+        XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])
+    }
+
     func test_tagsTildeFencesAsFenced() {
         let model = MarkdownDocumentModel(fullText: "~~~\nx\n~~~\n")
         XCTAssertEqual(model.codeRegions.map(\.kind), [.fencedCodeBlock])

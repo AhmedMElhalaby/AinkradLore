@@ -291,6 +291,72 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(targets("<div>\n[t](InHTML.md)\n</div>\n"), ["InHTML.md"])
     }
 
+    /// An indented code block whose CONTENT begins with a fence marker is still
+    /// INDENTED code, and must not suppress.
+    ///
+    /// `CodeBlock.range` starts at the content, past the 4-space indent, so the
+    /// block looks fence-shaped from its start offset. The block is recognised
+    /// by the bare closing run in its own content — impossible inside a real
+    /// fence, since it would have terminated it.
+    func test_indentedBlockWhoseContentIsAFenceDoesNotSuppress() {
+        XCTAssertEqual(targets("para\n\n    ```\n    [[X]]\n    ```\n\nafter [[R]]"),
+                       ["X", "R"])
+        XCTAssertEqual(targets("para\n\n    ~~~\n    [[X]]\n    ~~~\n\nafter [[R]]"),
+                       ["X", "R"])
+    }
+
+    /// Same, but the indented block opens with an INFO-STRING fence line, which
+    /// is not itself a closer — the bare closer only appears two lines down.
+    func test_indentedBlockOpeningWithAnInfoStringFenceDoesNotSuppress() {
+        XCTAssertEqual(targets("para\n\n    ```swift\n    [[X]]\n    ```\n\nafter [[R]]"),
+                       ["X", "R"])
+    }
+
+    func test_markdownLinkInAnIndentedBlockOfBackticksIsKept() {
+        XCTAssertEqual(targets("para\n\n    ```\n    [t](X.md)\n    ```\n\n[t2](R.md)"),
+                       ["X.md", "R.md"])
+    }
+
+    // MARK: - Fences the old scanner MISSED (indent > 3 on the raw line)
+
+    /// A fence indented four or more columns by LIST NESTING is a real fence.
+    /// The old scanner required `indent <= 3` on the raw line and so scanned
+    /// straight through it, putting `[[X]]` into the graph as a phantom link.
+    func test_fenceIndentedFourByListNestingSuppresses() {
+        XCTAssertEqual(targets("- a\n  - b\n\n    ```\n    [[X]]\n    ```\n\n[[R]]"), ["R"])
+        XCTAssertEqual(targets("- a\n  - b\n\n    ~~~\n    [[X]]\n    ~~~\n\n[[R]]"), ["R"])
+    }
+
+    func test_fenceInsideABlockquoteSuppresses() {
+        XCTAssertEqual(targets("> ```\n> [[X]]\n> ```\n\n[[R]]"), ["R"])
+    }
+
+    func test_fenceInsideABlockquoteInsideAListSuppresses() {
+        XCTAssertEqual(targets("- a\n\n  > ```\n  > [[X]]\n  > ```\n\n[[R]]"), ["R"])
+    }
+
+    func test_markdownLinksInMissedFencesAreAlsoSuppressed() {
+        XCTAssertEqual(targets("- a\n  - b\n\n    ```\n    [t](X.md)\n    ```\n\n[t2](R.md)"),
+                       ["R.md"])
+        XCTAssertEqual(targets("> ```\n> [t](X.md)\n> ```\n\n[t2](R.md)"), ["R.md"])
+        XCTAssertEqual(targets("- a\n\n  > ```\n  > [t](X.md)\n  > ```\n\n[t2](R.md)"),
+                       ["R.md"])
+    }
+
+    /// A CRLF vault must get the same answer for the list-nested fence.
+    func test_crlfListNestedFenceSuppresses() {
+        XCTAssertEqual(
+            targets("- a\r\n  - b\r\n\r\n    ```\r\n    [[X]]\r\n    ```\r\n\r\n[[R]]"),
+            ["R"])
+    }
+
+    /// A fence whose content opens with a SHORTER or non-bare run of the same
+    /// character is still a fence — the closer test must not fire on those.
+    func test_fenceContentWithNonClosingBacktickRunsStillSuppresses() {
+        XCTAssertEqual(targets("````\n```text\n[[X]]\n````\n\n[[R]]"), ["R"])
+        XCTAssertEqual(targets("```\n```text\n[[X]]\n```\n\n[[R]]"), ["R"])
+    }
+
     /// An indented fence is still a fence (up to 3 spaces), and still suppresses.
     func test_indentedFenceStillSuppresses() {
         XCTAssertEqual(targets("para\n\n   ```\n   [[Fenced]]\n   ```\n\n[[Real]]\n"),
