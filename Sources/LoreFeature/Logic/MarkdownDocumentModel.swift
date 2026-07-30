@@ -44,7 +44,21 @@ public struct MarkdownDocumentModel: Sendable {
         .fencedCodeBlock, .inlineCode,
     ]
 
+    /// Every style span, in walk order, in UTF-16 offsets into `fullText`.
+    /// Computed in `init` from the same walk as `codeRegions`, because the
+    /// parsed `Document` is not retained — `RawMarkup` is not `Sendable`.
+    public let styleSpans: [StyleSpan]
+
     public init(fullText: String) {
+        self.init(fullText: fullText, includingWikilinkSpans: true)
+    }
+
+    /// - Parameter includingWikilinkSpans: `false` breaks a genuine cycle.
+    ///   Wikilink style spans come from `LinkParser`, and `LinkParser` builds a
+    ///   `MarkdownDocumentModel` to ask what is inside code — so a model that
+    ///   always asked for wikilink spans would recurse forever. `LinkParser` is
+    ///   the one caller that passes `false`; it never reads `styleSpans`.
+    init(fullText: String, includingWikilinkSpans: Bool) {
         let bodyStart = Frontmatter.bodyOffset(in: fullText)
         let body = String(fullText.dropFirst(bodyStart))
         let bodyUTF16Offset = (String(fullText.prefix(bodyStart)) as NSString).length
@@ -53,9 +67,11 @@ public struct MarkdownDocumentModel: Sendable {
         let doc = Document(parsing: body)
 
         self.offsetMap = map
-        var collector = CodeRangeCollector(map: map, text: fullText as NSString)
+        var collector = MarkdownASTCollector(map: map, text: fullText as NSString)
         collector.visit(doc)
         self.codeRegions = collector.regions
+        self.styleSpans = collector.styleSpans
+            + (includingWikilinkSpans ? WikilinkSpanBuilder.spans(in: fullText) : [])
     }
 
     /// True if `offset` is inside ANY code region. Semantics unchanged: callers
@@ -72,7 +88,8 @@ public struct MarkdownDocumentModel: Sendable {
     }
 }
 
-/// Walks the AST collecting the source ranges of code.
+/// Walks the AST ONCE, collecting the source ranges of code and — in the same
+/// pass, see `MarkdownSpanBuilder.swift` for the prose visits — the style spans.
 ///
 /// A node whose `range` is nil contributes nothing rather than guessing — a
 /// dropped range means a link inside that code is treated as a real link, which
@@ -84,23 +101,27 @@ public struct MarkdownDocumentModel: Sendable {
 /// `CommonMarkConverter.range(_:)`), so `upperBound.column` is passed straight
 /// through to `SourceOffsetMap.utf16Range`, which also treats `toColumn` as
 /// exclusive. Adding a further +1 here would overrun every node by one unit.
-struct CodeRangeCollector: MarkupWalker {
+struct MarkdownASTCollector: MarkupWalker {
     let map: SourceOffsetMap
-    /// The FULL text, used only to tell a fenced code block from an indented
-    /// one — see `isFenced(at:code:)`.
+    /// The FULL text, used to tell a fenced code block from an indented one
+    /// (see `isFenced(at:code:)`) and to locate a task item's checkbox marker.
     let text: NSString
     var regions: [CodeRegion] = []
+    var styleSpans: [StyleSpan] = []
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) {
         guard let ns = resolve(codeBlock.range) else { return }
         regions.append(CodeRegion(range: ns,
                                   kind: isFenced(at: ns, code: codeBlock.code)
                                       ? .fencedCodeBlock : .indentedCodeBlock))
+        styleSpans.append(StyleSpan(range: swiftRange(ns),
+                                    kind: .codeBlock(language: codeBlock.language)))
     }
 
     mutating func visitInlineCode(_ inlineCode: InlineCode) {
         guard let ns = resolve(inlineCode.range) else { return }
         regions.append(CodeRegion(range: ns, kind: .inlineCode))
+        styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .inlineCode))
     }
 
     mutating func visitHTMLBlock(_ html: HTMLBlock) {
@@ -199,7 +220,7 @@ struct CodeRangeCollector: MarkupWalker {
         return (first, run.count, rest.allSatisfy { $0 == " " || $0 == "\t" || $0 == "\r" })
     }
 
-    private func resolve(_ sourceRange: SourceRange?) -> NSRange? {
+    func resolve(_ sourceRange: SourceRange?) -> NSRange? {
         guard let r = sourceRange else { return nil }
         return map.utf16Range(fromLine: r.lowerBound.line,
                               fromColumn: r.lowerBound.column,

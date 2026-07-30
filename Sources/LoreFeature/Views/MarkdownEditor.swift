@@ -276,25 +276,33 @@ public struct MarkdownEditor: NSViewRepresentable {
                 .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
                 .foregroundColor: NSColor(tokens.foreground)
             ], range: full)
-            for span in MarkdownStyler.spans(in: tv.string) {
+            // Spans now come from the ONE markdown parse, not the regex styler:
+            // `**bold**` and links written inside a fence are no longer styled,
+            // because the AST never called them bold or links. Appearance is
+            // Task 6's concern; this switch only keeps the existing look.
+            for span in MarkdownDocumentModel(fullText: tv.string).styleSpans {
                 let r = NSRange(location: span.range.lowerBound, length: span.range.count)
+                guard NSMaxRange(r) <= full.length else { continue }
                 switch span.kind {
                 case .heading(let lvl):
                     storage.addAttribute(.font, value: NSFont.boldSystemFont(
                         ofSize: max(14, 26 - CGFloat(lvl) * 2)), range: r)
                     storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
-                case .bold:
+                case .strong:
                     storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 14), range: r)
-                case .italic:
+                case .emphasis:
                     storage.addAttribute(.font, value: NSFontManager.shared.convert(
                         .systemFont(ofSize: 14), toHaveTrait: .italicFontMask), range: r)
-                case .code:
+                case .inlineCode, .codeBlock:
                     storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
-                case .link:
+                case .link, .wikilink:
                     storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
                     storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: r)
                 case .checkbox:
                     storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
+                case .listItem, .blockQuote:
+                    // Deliberately unstyled for now — Task 6 owns their look.
+                    break
                 }
             }
             storage.endEditing()

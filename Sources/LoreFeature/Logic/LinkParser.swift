@@ -99,7 +99,10 @@ public enum LinkParser {
         // offsets below index — so its UTF-16 offsets and our character offsets
         // describe one string, and `utf16OffsetForCharacterOffset` is the only
         // place the two units meet.
-        let model = MarkdownDocumentModel(fullText: text)
+        // `includingWikilinkSpans: false` is required, not an optimisation:
+        // the model's wikilink STYLE spans are derived from this very parser,
+        // so asking for them here would recurse without end.
+        let model = MarkdownDocumentModel(fullText: text, includingWikilinkSpans: false)
         let utf16OffsetForCharacterOffset = utf16Offsets(for: text)
         //
         // FENCED and INLINE code only. Indented code blocks, HTML blocks and
