@@ -19,8 +19,35 @@ packages:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
   SwiftMarkdown:
+    # PINNED BY REVISION, not `branch: main`, and not `from:` — swift-markdown
+    # publishes no semver tags, so `revision:` is the only exact pin the package
+    # allows. It is also the idiom already used above for AinkradAppKit; GRDB's
+    # `from:` is reserved for packages that actually tag releases.
+    #
+    # The pin is a CORRECTNESS requirement, not hygiene. `MarkdownASTCollector`
+    # passes `SourceRange.upperBound.column` straight to
+    # `SourceOffsetMap.utf16Range`, which treats `toColumn` as EXCLUSIVE. That
+    # is only right because swift-markdown's `CommonMarkConverter.range(_:)`
+    # already converts cmark's INCLUSIVE end column by adding 1. If a future
+    # `main` drops or moves that +1, every span, every code region and therefore
+    # every link-suppression answer shifts by one unit — silently, on a real
+    # vault, with no test failing upstream to warn us.
+    #
+    # `build/` and `*.xcodeproj/` are gitignored, and SwiftPM only writes
+    # `Package.resolved` inside the generated project, so there is no lockfile
+    # to track. This line IS the lockfile for this dependency.
+    #
+    # NOT FULLY CLOSED, and deliberately so. swift-markdown's own manifest depends
+    # on swift-cmark by BRANCH (`gfm`), and cmark is what actually emits the
+    # line/column positions `SourceOffsetMap` converts — so one level down, the
+    # same assumption still floats. Pinning it here was TRIED and SwiftPM refuses:
+    # "swift-cmark is required using two different revision-based requirements
+    # (0101bf2c… and gfm), which is not supported". A root requirement does not
+    # override a transitive branch requirement; closing it needs a fork or a
+    # vendored checkout, which is a milestone of its own. The resolved revision as
+    # of this pin is 0101bf2c6ff6a218f93150f340fe5ccf76d9f3aa.
     url: https://github.com/swiftlang/swift-markdown
-    branch: main
+    revision: 27b7fc1a19068bcea3d2072db0ce86360d1400ed
 targets:
   LoreFeature:
     type: library.static

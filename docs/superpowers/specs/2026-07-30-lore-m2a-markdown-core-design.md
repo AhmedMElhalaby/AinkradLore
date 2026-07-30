@@ -84,6 +84,37 @@ found*. It must not change *what counts as a link* or *what is written back*.
 **Every existing `LinkParser` test must pass unchanged.** That is the regression
 gate on the parser swap.
 
+#### Accepted divergences (added after Task 4, by owner ruling)
+
+The gate held — no existing `LinkParser` assertion was edited, and the suite's
+counts are identical. But the sentence above turned out to be false as an
+absolute, in **both** directions, and a later milestone reading only the
+paragraph above would be misled. What actually shipped:
+
+- **Code regions are KIND-AWARE.** Only *fenced* and *inline* code suppress
+  links. Indented code blocks, HTML blocks and HTML comments do **not**. This
+  matches the old hand-written scanner's intent. Widening the net was measured
+  to delete real links: a CommonMark type-6 HTML block runs to the next *blank
+  line*, so ordinary prose after a `</div>` would stop being linked at all.
+- **Two ADDs** — text the old scanner suppressed and the AST now reads as a
+  live link: escaped backticks (`` \`[[X]]\` ``) and unmatched backtick runs
+  (`` `[[A]]`` ``). CommonMark produces no code span in either case, so Obsidian
+  renders a clickable link there; the old scanner's greedy line-local backtick
+  pairing was over-suppressing. Accepted: the M1 hazard was *phantom* links, and
+  these are not phantoms.
+- **Four regressions (Group D)** — link rot, accepted as vanishingly rare. An
+  *indented* block whose first line is fence-shaped **with an info string** and
+  which never contains a line that would close that run still reads as fenced
+  and suppresses. Requires 4-space indent + info-string fence opener + no bare
+  closing run. Every bare-opener indented block self-detects, so this is the
+  whole hole. See `MarkdownASTCollector.isFenced`'s doc comment for the five
+  measured members.
+
+The final inventory was 53 fixtures: 35 identical, 14 improvements, 4 accepted
+regressions, 2 accepted ADDs. Because extraction changed, `LoreIndex`'s
+`schemaVersion` was bumped to 6 so a persisted M1 graph is discarded and rebuilt
+rather than being read by M2a code.
+
 ### `SourceOffsetMap`
 
 `swift-markdown` reports positions as `SourceRange` — 1-based line and column.

@@ -105,18 +105,20 @@ extension MarkdownEditor.Coordinator {
         }
         let ns = tv.string as NSString
 
-        for span in styleCache.spans {
-            guard case .checkbox = span.kind else { continue }
+        // ONE locator, shared with nothing that could disagree with it — see
+        // `TaskCheckbox`. `items` already validates each cached span against
+        // the LIVE text, so a span that has drifted is simply absent here.
+        for item in TaskCheckbox.items(in: styleCache.spans, text: ns) {
             // The interior boundaries of `[x]` only: `characterIndexForInsertion`
-            // snaps to the nearest boundary, so `lower + 1 ... upper - 1` is
-            // "the pointer was over the marker character, or over the inner
-            // half of a bracket". `lower` and `upper` stay available for
-            // placing the caret beside the marker.
-            guard index >= span.range.lowerBound + 1,
-                  index <= span.range.upperBound - 1 else { continue }
-            // The cached span is only a candidate; the live text decides.
-            guard let marker = TaskCheckbox.markerRange(forBracketSpan: span.range, in: ns),
-                  let replacement = TaskCheckbox.toggled(ns.substring(with: marker))
+            // snaps to the nearest boundary, so the marker's own offset and the
+            // one just past it are "the pointer was over the marker character,
+            // or over the inner half of a bracket". The bracket offsets stay
+            // available for placing the caret beside the marker.
+            guard index >= item.markerRangeUTF16.location,
+                  index <= item.markerRangeUTF16.location + 1 else { continue }
+            // Located from a cached span; the live text still decides what the
+            // character becomes.
+            guard let (marker, replacement) = TaskCheckbox.replacement(for: item, in: ns)
             else { continue }
 
             guard tv.shouldChangeText(in: marker, replacementString: replacement) else {

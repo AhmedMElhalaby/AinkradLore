@@ -83,7 +83,15 @@ public final class LoreIndex: @unchecked Sendable {
     /// every existing row to `wikilink` would silently mis-handle every
     /// percent-encoded markdown link until the next full rescan — so the file
     /// is discarded and rebuilt, which is what a version bump already does.
-    static let schemaVersion: Int32 = 5
+    ///
+    /// 6: M2a replaced the hand-written link scanner with the swift-markdown
+    /// AST, and link EXTRACTION changed with it — two accepted ADDs (escaped
+    /// backticks and unmatched backtick runs no longer suppress) and four
+    /// accepted regressions (link rot inside unclosable indented blocks). A
+    /// version-5 index therefore holds an M1 link graph while the code answers
+    /// M2a, and `LinkRewriter` reads that index when renaming. Discard and
+    /// rebuild — the mechanism this constant exists for.
+    static let schemaVersion: Int32 = 6
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it

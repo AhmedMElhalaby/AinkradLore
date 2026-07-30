@@ -199,6 +199,22 @@ public struct MarkdownDocumentModel: Sendable {
         WikilinkSpanBuilder.spans(in: fullText, suppression: injectableSuppressionIndex)
     }
 
+    /// Every link this document contributes to the graph, from THIS parse.
+    ///
+    /// The index-building half of `indexPayload` used to call
+    /// `LinkParser.links(in:)` with nothing injected, so it built a second,
+    /// identical model of the same string purely to answer "inside code?" —
+    /// two full AST parses per payload. This is the same seam `wikilinkSpans`
+    /// uses, and it answers identically: `LinkParser`'s grammar, kind filter
+    /// and results do not depend on whether the index was injected or rebuilt.
+    ///
+    /// NOT gated on `isOverStylingHardCap`. The caps govern STYLING — what the
+    /// editor draws — and dropping links above one would silently amputate the
+    /// link graph of a large note and let a rename stop rewriting it.
+    public var links: [DocumentLink] {
+        LinkParser.spans(in: fullText, suppression: injectableSuppressionIndex).map(\.link)
+    }
+
     /// Every span the editor should style: AST nodes plus wikilinks.
     ///
     /// Computed, not stored, because `wikilinkSpans` must stay lazy. There is

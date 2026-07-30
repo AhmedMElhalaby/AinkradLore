@@ -55,15 +55,37 @@ public final class MarkdownEngine: DocumentEngine {
         MarkdownDocumentModel(body: note.body).outline
     }
 
+    /// The title is a stored field of the parsed frontmatter — no markdown
+    /// parse involved. Overriding the protocol's `indexPayload.title` default
+    /// is what keeps `DocumentSession`'s four title refreshes free; see
+    /// `DocumentEngine.indexTitle`.
+    public var indexTitle: String { note.title }
+
+    /// ONE parse, feeding both halves.
+    ///
+    /// This used to read `outline` (a `MarkdownDocumentModel`) and then call
+    /// `LinkParser.links(in:)`, which builds a SECOND, identical model of the
+    /// same body to answer "is this offset inside code?". Nothing was shared,
+    /// so every `indexPayload` cost two full AST parses — on the main actor in
+    /// the save path, and once per note across a whole-vault rebuild.
+    ///
+    /// The seam already existed: the model can hand `LinkParser` the
+    /// suppression index it just built (`MarkdownDocumentModel.links`), which
+    /// is exactly what `wikilinkSpans` does for the styling path. CRLF bodies
+    /// still cost two, deliberately — the model withholds its index there
+    /// because `LinkParser` normalises before scanning and pre-normalisation
+    /// UTF-16 offsets would misplace suppression. Correctness over the saved
+    /// parse; see `injectableSuppressionIndex`.
     public var indexPayload: IndexPayload {
-        IndexPayload(title: note.title,
-                     plaintext: note.body,
-                     tags: note.tags,
-                     properties: note.extra,
-                     outline: outline,
-                     links: LinkParser.links(in: note.body),
-                     aliases: note.aliases,
-                     id: note.id)
+        let model = MarkdownDocumentModel(body: note.body)
+        return IndexPayload(title: note.title,
+                            plaintext: note.body,
+                            tags: note.tags,
+                            properties: note.extra,
+                            outline: model.outline,
+                            links: model.links,
+                            aliases: note.aliases,
+                            id: note.id)
     }
 
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {

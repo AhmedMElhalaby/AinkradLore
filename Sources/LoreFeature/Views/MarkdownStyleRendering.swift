@@ -183,25 +183,90 @@ enum MarkdownStyleRenderer {
         storage.endEditing()
     }
 
+    // MARK: - Font composition
+
+    /// Rewrites the `.font` attribute over `r` as a FUNCTION of the font
+    /// already there, run by run.
+    ///
+    /// Spans arrive parent-first (`MarkdownSpanBuilder` appends a node then
+    /// `descendInto`s it) and `apply` walks them in array order, so a child's
+    /// font landed on top of its parent's and REPLACED it: `# A **B** C` drew
+    /// `B` at the base 14 pt inside a 24 pt heading, `**bold _and_ italic**`
+    /// drew the inner run italic-and-not-bold, and inline code in a heading
+    /// dropped to base size. Composition has to accumulate, so each kind now
+    /// states a DELTA — "add bold", "keep the size, switch to monospace" — and
+    /// reads the rest from what the ancestors already put there.
+    ///
+    /// The runs are collected BEFORE any are written: mutating attributes from
+    /// inside `enumerateAttribute`'s block mutates the thing being enumerated.
+    private static func composeFont(in r: NSRange, storage: NSTextStorage,
+                                    _ transform: (NSFont) -> NSFont) {
+        var runs: [(NSRange, NSFont)] = []
+        storage.enumerateAttribute(.font, in: r) { value, sub, _ in
+            runs.append((sub, (value as? NSFont) ?? baseFont))
+        }
+        for (sub, font) in runs {
+            storage.addAttribute(.font, value: transform(font), range: sub)
+        }
+    }
+
+    /// The traits a child span must carry over from its ancestors. Bold and
+    /// italic only — those are the two the markdown kinds compose. Anything
+    /// else (a condensed or expanded face) is not something this renderer sets,
+    /// so re-applying it would be inventing state.
+    private static func inheritedTraits(of font: NSFont) -> NSFontTraitMask {
+        let traits = NSFontManager.shared.traits(of: font)
+        var inherited: NSFontTraitMask = []
+        if traits.contains(.boldFontMask) { inherited.insert(.boldFontMask) }
+        if traits.contains(.italicFontMask) { inherited.insert(.italicFontMask) }
+        return inherited
+    }
+
+    /// `convert` returns the font UNCHANGED when the family has no such face,
+    /// so an unavailable monospaced-italic degrades to upright rather than
+    /// falling back to a different family and changing the metrics mid-line.
+    private static func applying(_ traits: NSFontTraitMask, to font: NSFont) -> NSFont {
+        var result = font
+        if traits.contains(.boldFontMask) {
+            result = NSFontManager.shared.convert(result, toHaveTrait: .boldFontMask)
+        }
+        if traits.contains(.italicFontMask) {
+            result = NSFontManager.shared.convert(result, toHaveTrait: .italicFontMask)
+        }
+        return result
+    }
+
     /// Syntax markers stay VISIBLE — this is Live Preview, not WYSIWYG — so
     /// every case styles the span's whole source range, markers included.
     private static func add(_ kind: StyleSpan.Kind, in r: NSRange,
                             to storage: NSTextStorage, tokens: HostThemeTokens) {
         switch kind {
         case .heading(let level):
-            storage.addAttribute(.font, value: NSFont.boldSystemFont(
-                ofSize: max(baseSize, 26 - CGFloat(level) * 2)), range: r)
+            let size = max(baseSize, 26 - CGFloat(level) * 2)
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
+                              to: .systemFont(ofSize: size))
+            }
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
 
         case .strong:
-            storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: r)
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
+                              to: .systemFont(ofSize: current.pointSize))
+            }
 
         case .emphasis:
-            storage.addAttribute(.font, value: NSFontManager.shared.convert(
-                .systemFont(ofSize: baseSize), toHaveTrait: .italicFontMask), range: r)
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current).union(.italicFontMask),
+                              to: .systemFont(ofSize: current.pointSize))
+            }
 
         case .inlineCode:
-            storage.addAttribute(.font, value: baseFont, range: r)
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current),
+                              to: .monospacedSystemFont(ofSize: current.pointSize,
+                                                        weight: .regular))
+            }
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
             storage.addAttribute(.backgroundColor,
                                  value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
@@ -218,7 +283,11 @@ enum MarkdownStyleRenderer {
             // code visually identical to a blockquote save for the
             // background, which is a worse outcome than the tint's own
             // "changes every existing note" cost — so it stays.
-            storage.addAttribute(.font, value: baseFont, range: r)
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current),
+                              to: .monospacedSystemFont(ofSize: current.pointSize,
+                                                        weight: .regular))
+            }
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
             storage.addAttribute(.backgroundColor,
                                  value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
