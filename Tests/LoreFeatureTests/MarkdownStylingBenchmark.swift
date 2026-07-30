@@ -118,6 +118,32 @@ final class MarkdownStylingCacheTests: XCTestCase {
         }
     }
 
+    /// Above the hard cap the editor must not parse AT ALL. Serving `[]` from a
+    /// full parse would make "styling off" the most expensive path there is —
+    /// the exact opposite of what the cap exists for.
+    func test_aDocumentOverTheHardCapIsNeverParsed() {
+        let huge = String(repeating: "x", count: MarkdownDocumentModel.stylingHardCap + 1)
+        var cache = MarkdownStyleCache()
+        MarkdownParseCounter.reset()
+        cache.reparse(huge)
+        XCTAssertEqual(MarkdownParseCounter.count, 0,
+                       "an over-cap document must cost zero parses")
+        XCTAssertTrue(cache.spans.isEmpty)
+        XCTAssertTrue(cache.isOverHardCap, "the editor must still say styling is off")
+        XCTAssertTrue(cache.describes(huge),
+                      "the cache must claim currency, or every redraw re-enters this path")
+    }
+
+    /// The guard must not swallow ordinary documents.
+    func test_aDocumentUnderTheHardCapIsStillParsed() {
+        var cache = MarkdownStyleCache()
+        MarkdownParseCounter.reset()
+        cache.reparse("# Heading\n\n**bold**\n")
+        XCTAssertEqual(MarkdownParseCounter.count, 1)
+        XCTAssertFalse(cache.isOverHardCap)
+        XCTAssertTrue(cache.spans.contains { $0.kind == .strong })
+    }
+
     // MARK: - Span shifting
 
     func test_spansAfterTheEditShiftByTheDelta() {

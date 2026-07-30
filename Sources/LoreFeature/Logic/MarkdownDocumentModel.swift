@@ -35,16 +35,18 @@ public struct CodeRegion: Sendable, Equatable {
 /// Not an actor: `MarkdownDocumentModel.init` is synchronous and `Sendable`, and
 /// making the count `await`-able would change every call site to prove a
 /// property no shipping code reads.
-public enum MarkdownParseCounter {
+/// Internal, not public: nothing outside this module has any business reading
+/// it, and `@testable import` reaches it exactly as it is.
+enum MarkdownParseCounter {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var stored = 0
 
-    public static var count: Int {
+    static var count: Int {
         lock.lock(); defer { lock.unlock() }
         return stored
     }
 
-    public static func reset() {
+    static func reset() {
         lock.lock(); defer { lock.unlock() }
         stored = 0
     }

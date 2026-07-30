@@ -25,7 +25,25 @@ struct MarkdownStyleCache {
 
     func describes(_ candidate: String) -> Bool { text == candidate }
 
+    /// Refreshes the spans from a real parse — EXCEPT above the hard cap, where
+    /// the answer is `[]` and no parse is needed to say so.
+    ///
+    /// The guard has to be here, not in `MarkdownDocumentModel.init`: that
+    /// initialiser also builds `codeRegions`, which the LINK GRAPH consumes, and
+    /// making it skip work above a size would silently change which links
+    /// resolve. The editor is the only consumer of style spans, so the editor is
+    /// where "too big to style" is cheap to answer. Without this, the styling-OFF
+    /// path was the most expensive path in the editor — a full parse per debounce
+    /// to be handed an empty array.
     mutating func reparse(_ newText: String) {
+        guard newText.utf16.count <= MarkdownDocumentModel.stylingHardCap else {
+            text = newText
+            spans = []
+            isOverHardCap = true
+            isOverViewportCap = true
+            isStale = false
+            return
+        }
         let model = MarkdownDocumentModel(fullText: newText)
         text = newText
         spans = model.styleSpans
