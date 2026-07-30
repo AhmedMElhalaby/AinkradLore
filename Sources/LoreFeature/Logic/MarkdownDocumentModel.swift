@@ -242,25 +242,49 @@ public struct MarkdownDocumentModel: Sendable {
         fullText.contains("\r\n") ? nil : linkSuppressionIndex
     }
 
-    /// - Parameter bodyAlreadyStripped: `true` when `fullText` is KNOWN to
-    ///   already exclude frontmatter — a `Note.body`, say — so no further
-    ///   `Frontmatter.bodyOffset` scan should run over it.
+    /// For a string that may still CARRY frontmatter — a whole file as it sits
+    /// on disk. Its `---` block is located once, with `Frontmatter.bodyOffset`,
+    /// and excluded from the parse.
     ///
-    ///   Without this, a body that legitimately OPENS with something that
-    ///   merely looks like a frontmatter fence (an `---` horizontal rule
-    ///   followed, anywhere later, by another bare `---` line) gets a SECOND,
-    ///   spurious strip: `Frontmatter.bodyOffset` would treat everything up to
-    ///   that second `---` as frontmatter and exclude it from
-    ///   `Document(parsing:)` entirely — not shifted, DROPPED. A heading
-    ///   between the two `---` lines would silently vanish from the outline.
-    ///   `MarkdownEngine.outline` passes `true` for exactly this reason: its
-    ///   input is already `note.body`, which `Frontmatter.parse` has already
-    ///   separated from any real frontmatter once.
-    public init(fullText: String, bodyAlreadyStripped: Bool = false) {
+    /// Callers holding a string that is ALREADY a body must use `init(body:)`,
+    /// not this. Running the frontmatter scan over a body is not a no-op: a
+    /// body that legitimately OPENS with something fence-shaped (an `---`
+    /// horizontal rule followed, anywhere later, by another bare `---` line)
+    /// has everything up to that second `---` misread as frontmatter and
+    /// excluded from `Document(parsing:)` entirely — not shifted, DROPPED. A
+    /// heading in that region vanishes from the outline; a `[[link]]` inside a
+    /// fence there vanishes from the SUPPRESSION index and becomes a phantom
+    /// link that a rename will rewrite.
+    public init(fullText: String) {
+        self.init(text: fullText, bodyStart: Frontmatter.bodyOffset(in: fullText))
+    }
+
+    /// For a string that is ENTIRELY body — there is nothing left to strip, so
+    /// nothing is: every offset this model reports indexes `body` from its
+    /// first character.
+    ///
+    /// "Body" is a claim about provenance, not about content. `Note.body` (the
+    /// frontmatter was separated by `Frontmatter.parse`), the editor's own
+    /// buffer (which is what it is asked to style, whole), and the
+    /// already-offset slice `LinkRewriter` scans all qualify. A plain-text file
+    /// qualifies too: it has no frontmatter to have, so all of it is body.
+    ///
+    /// A separate initialiser rather than a `Bool` parameter on the one above
+    /// because the boolean was how this defect family arose — three call sites,
+    /// three chances to pass the wrong value, and a default that was silently
+    /// wrong for two of them. An argument LABEL states the provenance at the
+    /// call site and cannot be defaulted away.
+    public init(body: String) {
+        self.init(text: body, bodyStart: 0)
+    }
+
+    /// - Parameter bodyStart: CHARACTER offset in `text` where the body begins.
+    ///   Already decided by the caller; this initialiser does not second-guess
+    ///   it, which is the whole point of having two public doors.
+    private init(text fullText: String, bodyStart: Int) {
         #if DEBUG
         MarkdownParseCounter.record()
         #endif
-        let bodyStart = bodyAlreadyStripped ? 0 : Frontmatter.bodyOffset(in: fullText)
         let body = String(fullText.dropFirst(bodyStart))
         let bodyUTF16Offset = (String(fullText.prefix(bodyStart)) as NSString).length
 

@@ -137,7 +137,15 @@ public enum LinkParser {
         // place the two units meet.
         // Injected regions, when the caller has them, describe this same
         // string — see the parameter's note. Otherwise parse.
-        let index = suppression ?? MarkdownDocumentModel(fullText: text).linkSuppressionIndex
+        // `init(body:)`, never `init(fullText:)`. Every caller of this scan
+        // hands over a body already: `MarkdownEngine` passes `note.body`,
+        // `LinkRewriter` passes the slice past `Frontmatter.bodyOffset`, and
+        // `WikilinkSpanBuilder` passes the string its model already indexes.
+        // A frontmatter scan HERE would fire on any body opening with an `---`
+        // rule and drop that whole region from the suppression index — turning
+        // a `[[link]]` documented inside a fence there into a real graph edge
+        // that a rename then rewrites, in a file the user never opened.
+        let index = suppression ?? MarkdownDocumentModel(body: text).linkSuppressionIndex
         let utf16OffsetForCharacterOffset = CharacterOffsetMap.make(for: text)
         //
         // FENCED and INLINE code only. Indented code blocks, HTML blocks and

@@ -56,7 +56,16 @@ struct MarkdownStyleCache {
         guard newText.utf16.count <= MarkdownDocumentModel.stylingHardCap else {
             return Derived(spans: [], isOverHardCap: true, isOverViewportCap: true)
         }
-        let model = MarkdownDocumentModel(fullText: newText)
+        // `init(body:)`: the editor styles exactly the string it was given,
+        // whole. For markdown that string is `note.body` (bound in
+        // `MarkdownDocumentEditor`), already frontmatter-free; for plain text
+        // there is no frontmatter to have. Either way a `Frontmatter.bodyOffset`
+        // scan here can only mis-fire, and when it does the region above the
+        // second `---` is simply left UNSTYLED — no bold, no headings, no
+        // code-block background. Surviving spans still land correctly, because
+        // `SourceOffsetMap` re-bases them; the defect is omission, not
+        // misplacement.
+        let model = MarkdownDocumentModel(body: newText)
         return Derived(spans: model.styleSpans,
                        isOverHardCap: model.isOverStylingHardCap,
                        isOverViewportCap: model.isOverStylingViewportCap)

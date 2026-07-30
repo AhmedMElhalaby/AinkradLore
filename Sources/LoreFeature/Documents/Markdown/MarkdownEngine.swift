@@ -38,13 +38,13 @@ public final class MarkdownEngine: DocumentEngine {
     /// construction, not by convention. See `OutlineEntry.utf16Offset`'s doc
     /// comment for the general contract this is an instance of.
     ///
-    /// `bodyAlreadyStripped: true` because `note.body` has ALREADY had any
-    /// real frontmatter separated out by `Frontmatter.parse`. Passing `false`
-    /// here would run `Frontmatter.bodyOffset` a second time over text that is
-    /// no longer frontmatter-prefixed, and a body that happens to open with
-    /// something fence-shaped (an `---` rule, later followed by another bare
-    /// `---`) would have that whole span misread as frontmatter and dropped
-    /// from the parse — see `MarkdownDocumentModel.init`'s parameter doc.
+    /// `init(body:)` because `note.body` has ALREADY had any real frontmatter
+    /// separated out by `Frontmatter.parse`. `init(fullText:)` would run
+    /// `Frontmatter.bodyOffset` a second time over text that is no longer
+    /// frontmatter-prefixed, and a body that happens to open with something
+    /// fence-shaped (an `---` rule, later followed by another bare `---`) would
+    /// have that whole span misread as frontmatter and dropped from the parse —
+    /// see `MarkdownDocumentModel.init(body:)`.
     ///
     /// A dedicated accessor, not folded into `indexPayload`: `DocumentPane`
     /// wants the outline on its own, on a cadence tighter than a full
@@ -52,7 +52,7 @@ public final class MarkdownEngine: DocumentEngine {
     /// Reaching through `indexPayload` for just the outline would also run
     /// `LinkParser.links(in:)` — a second, unrelated scan — for no reason.
     public var outline: [OutlineEntry] {
-        MarkdownDocumentModel(fullText: note.body, bodyAlreadyStripped: true).outline
+        MarkdownDocumentModel(body: note.body).outline
     }
 
     public var indexPayload: IndexPayload {

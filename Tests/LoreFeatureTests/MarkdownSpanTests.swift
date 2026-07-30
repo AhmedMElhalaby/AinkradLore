@@ -432,6 +432,34 @@ final class CharacterOffsetMapTests: XCTestCase {
     }
 }
 
+final class MarkdownStyleCacheDeriveTests: XCTestCase {
+    /// The editor styles exactly the string it is given — `note.body` for
+    /// markdown, the whole file for plain text — so `derive` must not run a
+    /// frontmatter scan over it. When it did, a buffer opening with an `---`
+    /// thematic break and carrying another bare `---` later had everything
+    /// between them excluded from the parse, and that region came back
+    /// UNSTYLED: no heading, no bold, no code-block attributes.
+    ///
+    /// The symptom is omission, not misplacement: `SourceOffsetMap` re-bases
+    /// the spans that DO survive, so the styling above the second `---` simply
+    /// disappeared rather than landing on the wrong characters. The second half
+    /// of this test pins that — the surviving heading below the break stays
+    /// where it always was.
+    func test_derive_stylesADashOpeningBufferAboveTheSecondBreak() {
+        // Blank lines around the second `---` on purpose: `text\n---` is a
+        // SETEXT heading in CommonMark, which would change what is being
+        // measured. `Frontmatter.closingFenceIndex` is line-based and finds it
+        // either way.
+        let text = "---\n# Above\n\n**bold**\n\n---\n\n# Below\n"
+        let derived = MarkdownStyleCache.derive(text)
+        XCTAssertTrue(derived.spans.contains { $0.kind == .heading(1) &&
+            $0.range.lowerBound == (text as NSString).range(of: "# Above").location })
+        XCTAssertTrue(derived.spans.contains { $0.kind == .strong })
+        XCTAssertTrue(derived.spans.contains { $0.kind == .heading(1) &&
+            $0.range.lowerBound == (text as NSString).range(of: "# Below").location })
+    }
+}
+
 final class MarkdownOutlineTests: XCTestCase {
     func test_listsHeadingsWithLevels() {
         let outline = MarkdownDocumentModel(fullText: "# One\n\n## Two\n\n### Three\n").outline

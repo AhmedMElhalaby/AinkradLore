@@ -445,6 +445,35 @@ final class LinkParserTests: XCTestCase {
         XCTAssertEqual(targets("a `code\n[[NotALink]]` b\n\n[[Real]]\n"), ["Real"])
     }
 
+    /// THE PHANTOM LINK. `LinkParser` is fed a BODY — frontmatter has already
+    /// been separated off by `Frontmatter.parse` (or by `LinkRewriter`'s own
+    /// `bodyOffset` slice). When that body legitimately OPENS with an `---`
+    /// thematic break and another bare `---` appears later, a second
+    /// frontmatter scan misreads the whole span between them as frontmatter and
+    /// excludes it from the parse — so the fenced block living there produces
+    /// NO code region, and the `[[Phantom]]` documented inside it is emitted as
+    /// a real link.
+    ///
+    /// That is the worst outcome in this codebase: the phantom enters the
+    /// graph, shows up in another document's backlinks, and is REWRITTEN by a
+    /// rename — silently editing a file the user never opened, with no undo.
+    /// The assertion is the property itself, not the size of the index: the
+    /// phantom must not be a link, and the real link beside it must survive.
+    func test_fenceInsideDashOpeningBodyStillSuppresses_noPhantomLink() {
+        let body = """
+        ---
+        ```text
+        [[Phantom]]
+        ```
+        ---
+
+        # Real
+
+        See [[Actual]].
+        """
+        XCTAssertEqual(targets(body), ["Actual"])
+    }
+
     /// The Character↔UTF-16 boundary: a span must still cover its target
     /// exactly when the document contains astral-plane characters.
     func test_spansSurviveAstralCharactersBeforeTheLink() {
