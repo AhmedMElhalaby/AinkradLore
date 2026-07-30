@@ -28,7 +28,11 @@ targets:
     sources: [Sources/LoreFeature]
     settings:
       base:
-        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/GRDB.swift/Sources/CSQLite/module.modulemap"
+        # Explicit-module builds cannot see the C modules behind these SwiftPM
+        # products, so their module maps are named directly — the same
+        # workaround CSQLite already needed. swift-markdown's `Markdown`
+        # module sits on cmark_gfm, cmark_gfm_extensions and CAtomic.
+        OTHER_SWIFT_FLAGS: "-Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/GRDB.swift/Sources/CSQLite/module.modulemap -Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/swift-cmark/src/include/module.modulemap -Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/swift-cmark/extensions/include/module.modulemap -Xcc -fmodule-map-file=$(SRCROOT)/build/SourcePackages/checkouts/swift-markdown/Sources/CAtomic/include/module.modulemap -Xcc -I$(SRCROOT)/build/SourcePackages/checkouts/swift-cmark/src/include"
     dependencies:
       - package: GRDB
         product: GRDB
