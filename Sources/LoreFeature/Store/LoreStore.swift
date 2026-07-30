@@ -9,6 +9,15 @@ public final class LoreStore {
     /// new notes. Empty string == the vault root itself.
     public private(set) var defaultNoteFolder: String = ""
 
+    /// Sidebar layout choice: folder tree or the flat, searchable list.
+    public enum SidebarMode: String, Sendable { case tree, all }
+
+    public private(set) var sidebarMode: SidebarMode = .tree
+    /// Folder ids (relative paths under the vault root) currently expanded in
+    /// `FolderTreeView`. Persisted so returning to a vault restores the tree
+    /// the user left open, rather than collapsing everything.
+    public private(set) var expandedFolders: Set<String> = []
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -28,6 +37,8 @@ public final class LoreStore {
     private var openMTimes: [String: Date] = [:]
 
     private static let defaultFolderKey = "defaultNoteFolder"
+    private static let sidebarModeKey = "sidebarMode"
+    private static let expandedFoldersKey = "expandedFolders"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -36,9 +47,31 @@ public final class LoreStore {
            let folder = String(data: data, encoding: .utf8) {
             defaultNoteFolder = folder
         }
+        if let data = documents.data(forKey: Self.sidebarModeKey),
+           let raw = String(data: data, encoding: .utf8),
+           let mode = SidebarMode(rawValue: raw) {
+            sidebarMode = mode
+        }
+        if let data = documents.data(forKey: Self.expandedFoldersKey),
+           let text = String(data: data, encoding: .utf8) {
+            expandedFolders = Set(text.split(separator: "\n").map(String.init))
+        }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
+    }
+
+    /// Persist the sidebar's folder-tree-vs-flat-list choice.
+    public func setSidebarMode(_ mode: SidebarMode) {
+        sidebarMode = mode
+        documents.setData(mode.rawValue.data(using: .utf8), forKey: Self.sidebarModeKey)
+    }
+
+    /// Persist which folders are expanded in `FolderTreeView`.
+    public func setExpandedFolders(_ folders: Set<String>) {
+        expandedFolders = folders
+        documents.setData(folders.sorted().joined(separator: "\n").data(using: .utf8),
+                          forKey: Self.expandedFoldersKey)
     }
 
     // MARK: - Index facade

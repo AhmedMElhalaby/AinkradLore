@@ -6,16 +6,40 @@ struct LoreRootView: View {
     let theme: HostTheme
     @State private var query = ""
     @State private var selected: IndexRow?
+    @State private var activeTag: String?
     /// The file the user most recently asked to open. `LoreStore.openError` is
     /// only cleared by the next SUCCESSFUL open, so it can outlive the click
     /// that produced it; gating the fallback viewer on this makes sure a stale
     /// error never shadows a document that opened perfectly well.
     @State private var attempted: URL?
 
+    /// A filtered tree of mostly-empty branches is worse than a list, so an
+    /// active search or tag filter always wins over the persisted tree
+    /// preference — the tree is only shown when nothing is filtering it.
+    private var effectiveSidebarMode: LoreStore.SidebarMode {
+        (query.isEmpty && activeTag == nil) ? store.sidebarMode : .all
+    }
+
     var body: some View {
         HStack(spacing: 0) {
-            NoteListView(store: store, query: $query, selected: $selected, theme: theme,
-                         onSelect: openRow, onNew: quickCapture, onDelete: deleteRow)
+            VStack(alignment: .leading, spacing: AinkradSpacing.sm) {
+                AinkradSegmentedPicker(
+                    items: [LoreStore.SidebarMode.tree, .all],
+                    selection: Binding(get: { store.sidebarMode },
+                                       set: { store.setSidebarMode($0) })
+                ) { mode in mode == .tree ? "Folders" : "All notes" }
+                .padding(.horizontal, AinkradSpacing.md)
+                .padding(.top, AinkradSpacing.md)
+
+                if effectiveSidebarMode == .tree {
+                    FolderTreeView(store: store, theme: theme, selected: $selected,
+                                  onSelect: openRow)
+                } else {
+                    NoteListView(store: store, query: $query, selected: $selected, theme: theme,
+                                onSelect: openRow, onNew: quickCapture, onDelete: deleteRow,
+                                activeTag: $activeTag)
+                }
+            }
                 .frame(width: 280)
             VStack(spacing: 0) {
                 if !store.tabs.isEmpty {

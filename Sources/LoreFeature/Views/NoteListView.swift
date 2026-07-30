@@ -11,8 +11,10 @@ struct NoteListView: View {
     /// Delete affordance, inherited from the old `NoteEditorPane`: it lives on
     /// the row's context menu now that the editor pane is engine-owned.
     let onDelete: (IndexRow) -> Void
+    /// Lifted to `LoreRootView` so it can decide whether an active tag filter
+    /// should force the flat list even while the sidebar is in tree mode.
+    @Binding var activeTag: String?
 
-    @State private var activeTag: String?
     /// The row a delete was requested for. Deleting a file is destructive and
     /// irreversible, so it keeps its confirmation.
     @State private var pendingDelete: IndexRow?

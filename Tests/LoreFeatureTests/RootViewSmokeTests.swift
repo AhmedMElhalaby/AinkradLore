@@ -44,6 +44,35 @@ final class RootViewSmokeTests: XCTestCase {
         _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
     }
 
+    func test_folderTreeGroupsDocumentsByFolder() throws {
+        let root = URL(fileURLWithPath: "/v")
+        func row(_ path: String, _ title: String) -> IndexRow {
+            IndexRow(path: URL(fileURLWithPath: path), id: path, title: title, tags: [],
+                     aliases: [], updated: Date(), type: "markdown", properties: [])
+        }
+        let tree = FolderNode.tree(from: [
+            row("/v/a.md", "A"),
+            row("/v/Projects/b.md", "B"),
+            row("/v/Projects/Deep/c.md", "C"),
+        ], root: root)
+
+        XCTAssertEqual(tree.documents.map(\.title), ["A"])
+        XCTAssertEqual(tree.children.map(\.name), ["Projects"])
+        let projects = tree.children[0]
+        XCTAssertEqual(projects.documents.map(\.title), ["B"])
+        XCTAssertEqual(projects.children.map(\.name), ["Deep"])
+        XCTAssertEqual(projects.children[0].documents.map(\.title), ["C"])
+    }
+
+    func test_folderTreeViewBuilds() throws {
+        let root = try tempVault()
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        _ = FolderTreeView(store: store, theme: HostTheme(TestTokens.make()),
+                           selected: .constant(nil), onSelect: { _ in })
+    }
+
     func test_fallbackViewer_builds() {
         let url = URL(fileURLWithPath: "/tmp/x.xlsx")
         _ = FallbackViewer(url: url, error: EngineError.unsupported(url),
