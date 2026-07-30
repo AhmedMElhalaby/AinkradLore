@@ -44,6 +44,15 @@ final class RootViewSmokeTests: XCTestCase {
         _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
     }
 
+    func test_backlinksPanelBuilds() throws {
+        let root = try tempVault()
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        _ = BacklinksPanel(store: store, url: root.appendingPathComponent("x.md"),
+                           theme: HostTheme(TestTokens.make()))
+    }
+
     func test_folderTreeGroupsDocumentsByFolder() throws {
         let root = URL(fileURLWithPath: "/v")
         func row(_ path: String, _ title: String) -> IndexRow {

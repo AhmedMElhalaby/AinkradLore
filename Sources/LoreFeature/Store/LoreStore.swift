@@ -18,6 +18,11 @@ public final class LoreStore {
     /// the user left open, rather than collapsing everything.
     public private(set) var expandedFolders: Set<String> = []
 
+    /// Whether `BacklinksPanel` is expanded or collapsed, persisted the same
+    /// way as `sidebarMode`: a per-vault-host UI choice, not per-document, so
+    /// one toggle sticks across every note the user opens.
+    public private(set) var backlinksPanelExpanded: Bool = true
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -39,6 +44,7 @@ public final class LoreStore {
     private static let defaultFolderKey = "defaultNoteFolder"
     private static let sidebarModeKey = "sidebarMode"
     private static let expandedFoldersKey = "expandedFolders"
+    private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -56,6 +62,10 @@ public final class LoreStore {
            let text = String(data: data, encoding: .utf8) {
             expandedFolders = Set(text.split(separator: "\n").map(String.init))
         }
+        if let data = documents.data(forKey: Self.backlinksPanelExpandedKey),
+           let raw = String(data: data, encoding: .utf8) {
+            backlinksPanelExpanded = raw == "true"
+        }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
@@ -72,6 +82,13 @@ public final class LoreStore {
         expandedFolders = folders
         documents.setData(folders.sorted().joined(separator: "\n").data(using: .utf8),
                           forKey: Self.expandedFoldersKey)
+    }
+
+    /// Persist the backlinks panel's collapsed/expanded state.
+    public func setBacklinksPanelExpanded(_ expanded: Bool) {
+        backlinksPanelExpanded = expanded
+        documents.setData((expanded ? "true" : "false").data(using: .utf8),
+                          forKey: Self.backlinksPanelExpandedKey)
     }
 
     // MARK: - Index facade

@@ -26,6 +26,14 @@ struct DocumentPane: View {
                 // tears the editor down and builds a fresh one, which re-runs
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
+
+            // Only markdown documents contribute to the link graph — plain-text
+            // and unclaimed documents have no links, so an empty panel there
+            // would be noise, not information.
+            if session.engine is MarkdownEngine {
+                BacklinksPanel(store: store, url: session.url, theme: theme)
+                    .frame(maxHeight: 200)
+            }
         }
         .background(theme.tokens.background)
     }
