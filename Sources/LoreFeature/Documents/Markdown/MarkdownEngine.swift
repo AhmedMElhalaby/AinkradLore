@@ -96,7 +96,11 @@ private struct MarkdownDocumentEditor: View {
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
                            completions: ctx.completions, onOpenLink: ctx.openLink,
-                           linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget)
+                           linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
+                           // Task checkboxes are markdown, and only a session
+                           // that can actually be written may offer to flip
+                           // one — see `EditorContext.isReadOnly`.
+                           allowsTaskToggle: !ctx.isReadOnly)
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
         }
         .background(ctx.theme.tokens.background)

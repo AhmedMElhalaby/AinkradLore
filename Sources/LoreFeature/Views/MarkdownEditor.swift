@@ -18,17 +18,24 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// so re-clicking the same heading still fires: `updateNSView` only acts
     /// on a non-nil value, never on "the value changed".
     let scrollTarget: Binding<Int?>
+    /// Whether clicking a `[ ]` marker flips it. Off by default, so a document
+    /// type that has no task lists — and, crucially, a READ-ONLY session, whose
+    /// `markChanged()` is a no-op and whose saves are refused — offers no
+    /// affordance it cannot honour. See `MarkdownEditorClicks.swift`.
+    let allowsTaskToggle: Bool
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
-                scrollTarget: Binding<Int?> = .constant(nil)) {
+                scrollTarget: Binding<Int?> = .constant(nil),
+                allowsTaskToggle: Bool = false) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
+        self.allowsTaskToggle = allowsTaskToggle
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -60,6 +67,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.onCommandClick = { [weak coordinator = context.coordinator] index in
             coordinator?.openLink(atUTF16: index) ?? false
         }
+        tv.onPlainClick = { [weak coordinator = context.coordinator] index in
+            coordinator?.toggleTask(atUTF16: index) ?? false
+        }
         // Losing first responder INSIDE the same window — clicking the title
         // field, the sidebar, another pane — is not covered by
         // `hidesOnDeactivate`, and would otherwise leave a `.popUpMenu`-level
@@ -77,6 +87,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.observeScrolling(of: scroll.contentView)
 
         context.coordinator.textView = tv
+        context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
         tv.string = text
         context.coordinator.applyStyles()
@@ -107,6 +118,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.completions = completions
         context.coordinator.onOpenLink = onOpenLink
         context.coordinator.linkTarget = linkTarget
+        context.coordinator.allowsTaskToggle = allowsTaskToggle
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
@@ -151,6 +163,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         var onOpenLink: (@MainActor (String) -> Void)?
         var linkTarget: @MainActor (IndexRow) -> String
             = { LinkCompletionContext.insertableTarget(for: $0) }
+        /// See `MarkdownEditor.allowsTaskToggle`.
+        var allowsTaskToggle = false
         weak var textView: NSTextView?
         /// Shown only above the hard cap — the editor saying, in words, that it
         /// has stopped styling rather than leaving the user to wonder.
@@ -449,41 +463,6 @@ public struct MarkdownEditor: NSViewRepresentable {
             let window = MarkdownStyleRenderer.viewportWindow(of: tv)
             if let last = lastViewportWindow, NSEqualRanges(last, window) { return }
             renderStyles()
-        }
-    }
-}
-
-/// `NSTextView` that reports Cmd-clicks.
-///
-/// Cmd-click, not a plain click: inside an editor the primary meaning of a
-/// click is "put the caret here". Hijacking a plain click on a `[[…]]` span
-/// would make the link text the one run of characters in the document the user
-/// cannot click into to fix a typo. Cmd-click is also what every other
-/// editor-with-links on this platform uses, and it leaves the pointer's normal
-/// behaviour — selection, drag, double-click-to-word — completely intact.
-final class LinkTextView: NSTextView {
-    /// Receives the clicked UTF-16 offset and reports whether it opened a link.
-    /// The Bool matters: a Cmd-click that hits no link — or a document with no
-    /// link handler at all, i.e. plain text — must fall through to AppKit so
-    /// the caret still lands where the user clicked.
-    var onCommandClick: (@MainActor (Int) -> Bool)?
-    /// Fires whenever focus leaves this view, including the routes that do not
-    /// produce a `textDidEndEditing`.
-    var onResignFirstResponder: (@MainActor () -> Void)?
-
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned { onResignFirstResponder?() }
-        return resigned
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard event.modifierFlags.contains(.command), let onCommandClick else {
-            super.mouseDown(with: event); return
-        }
-        let point = convert(event.locationInWindow, from: nil)
-        if !onCommandClick(characterIndexForInsertion(at: point)) {
-            super.mouseDown(with: event)
         }
     }
 }

@@ -84,6 +84,13 @@ public struct EditorContext {
     /// only channel between the two. Defaulted to a no-op so an engine with no
     /// outline (or no editor that supports scrolling at all) needs no changes.
     public let registerScrollHandler: @MainActor (@escaping @MainActor (Int) -> Void) -> Void
+    /// The session refuses to write this document, so `onChange` cannot lead
+    /// anywhere: `DocumentSession.markChanged()` returns immediately for a
+    /// read-only session and `saveNow()` throws. An editor uses this to
+    /// withhold affordances that would otherwise PROMISE persistence — today
+    /// the task-checkbox toggle. Defaulted to writable so an engine or a test
+    /// that does not care behaves exactly as before.
+    public let isReadOnly: Bool
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
@@ -91,10 +98,12 @@ public struct EditorContext {
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 registerScrollHandler: @escaping @MainActor (@escaping @MainActor (Int) -> Void) -> Void
-                    = { _ in }) {
+                    = { _ in },
+                isReadOnly: Bool = false) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler
+        self.isReadOnly = isReadOnly
     }
 }
