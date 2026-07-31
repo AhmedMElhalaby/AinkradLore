@@ -130,9 +130,10 @@ extension MarkdownEditing {
     static func toggleWrap(text: String, selection: NSRange, with delimiter: String) -> EditResult {
         let ns = text as NSString
         let d = (delimiter as NSString).length
+
+        // Selection sits strictly INSIDE the delimiters: "make **|bold|** now".
         let before = NSRange(location: selection.location - d, length: d)
         let after = NSRange(location: selection.location + selection.length, length: d)
-
         if before.location >= 0, after.location + after.length <= ns.length,
            ns.substring(with: before) == delimiter, ns.substring(with: after) == delimiter {
             let whole = NSRange(location: before.location,
@@ -141,6 +142,22 @@ extension MarkdownEditing {
             return EditResult(text: ns.replacingCharacters(in: whole, with: inner),
                               selection: NSRange(location: before.location,
                                                  length: selection.length))
+        }
+
+        // Selection INCLUDES the delimiters: "make |**bold**| now" — a
+        // drag-select or triple-click across a bolded span produces exactly
+        // this shape, and it must unwrap too, not double-wrap.
+        if selection.length >= 2 * d {
+            let innerStart = NSRange(location: selection.location, length: d)
+            let innerEnd = NSRange(location: selection.location + selection.length - d, length: d)
+            if ns.substring(with: innerStart) == delimiter, ns.substring(with: innerEnd) == delimiter {
+                let innerRange = NSRange(location: selection.location + d,
+                                         length: selection.length - 2 * d)
+                let inner = ns.substring(with: innerRange)
+                return EditResult(text: ns.replacingCharacters(in: selection, with: inner),
+                                  selection: NSRange(location: selection.location,
+                                                     length: (inner as NSString).length))
+            }
         }
 
         let inner = ns.substring(with: selection)

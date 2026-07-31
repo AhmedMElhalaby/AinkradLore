@@ -89,11 +89,23 @@ extension MarkdownEditingTests {
     }
 
     /// The same keystroke unwraps — a toggle, not an "add more asterisks".
+    /// Selection sits strictly INSIDE the delimiters: "make **|bold|** now".
     func test_cmdBOnAlreadyBoldTextUnwrapsIt() {
         let r = MarkdownEditing.toggleWrap(text: "make **bold** now",
                                            selection: NSRange(location: 7, length: 4),
                                            with: "**")
         XCTAssertEqual(r.text, "make bold now")
+    }
+
+    /// Selection INCLUDES the delimiters: "make |**bold**| now" — the shape a
+    /// drag-select or triple-click across a bolded span produces. This must
+    /// also unwrap, not re-wrap into "****bold****".
+    func test_cmdBOnASelectionThatIncludesTheDelimitersUnwrapsIt() {
+        let r = MarkdownEditing.toggleWrap(text: "make **bold** now",
+                                           selection: NSRange(location: 5, length: 8),
+                                           with: "**")
+        XCTAssertEqual(r.text, "make bold now")
+        XCTAssertEqual(r.selection, NSRange(location: 5, length: 4))
     }
 
     func test_cmdBWithNoSelectionInsertsAnEmptyPairWithTheCaretInside() {
