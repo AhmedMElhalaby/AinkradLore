@@ -209,6 +209,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// whole performance contract of the reveal path, and an earlier
         /// version of this file made it without the code supporting it.
         var revealIndexBuilds = 0
+        /// How many BLOCKS the incremental reveal path has re-attributed. The
+        /// caret contract is O(1) blocks per boundary crossing — two, the one
+        /// leaving reveal and the one entering it — and "O(1)" is only a claim
+        /// until something counts. Reset by the benchmark, never by the editor.
+        var restyledBlockCount = 0
         /// The edit `shouldChangeTextIn` announced, consumed by the very next
         /// `textDidChange`. AppKit always pairs them, and anything that edits
         /// the storage WITHOUT the pair leaves the cache describing a stale

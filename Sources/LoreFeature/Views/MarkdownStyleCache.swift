@@ -85,6 +85,43 @@ struct MarkdownStyleCache {
         isStale = false
     }
 
+    /// Below this much text the editor parses on the OPEN path synchronously;
+    /// above it, off the main actor.
+    ///
+    /// Not a performance hedge but an honest trade of two different bad
+    /// experiences. A synchronous parse blocks the main actor — ~0.4 s Debug on
+    /// a 230 KB note, which is a beachball on every document switch. An
+    /// off-actor one returns instantly but shows the note UNSTYLED for as long
+    /// as the parse takes, because there are no cached spans to shift from: a
+    /// freshly opened document has no previous text. For a hand-written note
+    /// that flash would be the more visible defect of the two, and the parse it
+    /// replaces is a couple of milliseconds. So: small documents pay the
+    /// millisecond, large ones take the flash.
+    ///
+    /// 16 KB rather than the viewport cap because the two answer different
+    /// questions — that one is about how much can be ATTRIBUTED per frame, this
+    /// one about how long a parse may hold the main actor. At 16 KB the
+    /// measured Debug parse is under 30 ms and the Release one is a few.
+    static let synchronousParseCap = 16 * 1024
+
+    /// Claims currency for `newText` WITHOUT parsing it, so the editor can
+    /// render immediately and let the real parse land off-actor.
+    ///
+    /// `isStale` is the load-bearing part: it is how `parseNow` knows this is a
+    /// promise rather than an answer, and re-parses instead of returning early
+    /// on the `describes(_:)` check. Without it the document would keep these
+    /// empty spans forever.
+    ///
+    /// The caps are still exact — they are a function of the LENGTH, not of the
+    /// parse — so an over-cap document still shows its notice at once.
+    mutating func adoptProvisional(_ newText: String) {
+        text = newText
+        spans = []
+        isOverHardCap = newText.utf16.count > MarkdownDocumentModel.stylingHardCap
+        isOverViewportCap = newText.utf16.count > MarkdownDocumentModel.stylingViewportCap
+        isStale = true
+    }
+
     /// Moves every cached span to where the edit put it, rather than dropping
     /// the styling until the next parse.
     ///

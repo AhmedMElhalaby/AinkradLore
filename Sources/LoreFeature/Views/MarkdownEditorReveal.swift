@@ -144,9 +144,29 @@ extension MarkdownEditor.Coordinator {
     /// the one on screen — which, after a keystroke, they do not, because
     /// `textDidChange` has already shifted them. A redraw therefore costs a
     /// render and nothing else.
+    /// A LARGE document arriving here — the open path, a document switch, an
+    /// external write — no longer parses on the main actor. It claims currency
+    /// provisionally, renders unstyled, and `parseNow` fills the spans in from
+    /// off-actor with the same snapshot-and-check discipline the debounce uses:
+    /// the result is adopted only if the view still holds exactly the string it
+    /// was derived from. Adopting a stale parse would style the wrong
+    /// characters, which is the defect class M2a exists to remove.
+    ///
+    /// Small documents still parse inline — see
+    /// `MarkdownStyleCache.synchronousParseCap` for why the flash, not the
+    /// milliseconds, is the thing being avoided there.
     func applyStyles() {
         guard let tv = textView else { return }
-        if !styleCache.describes(tv.string) { styleCache.reparse(tv.string) }
+        if !styleCache.describes(tv.string) {
+            if tv.string.utf16.count <= MarkdownStyleCache.synchronousParseCap {
+                styleCache.reparse(tv.string)
+            } else {
+                styleCache.adoptProvisional(tv.string)
+                renderStyles()
+                parseNow()
+                return
+            }
+        }
         renderStyles()
     }
 
@@ -254,6 +274,7 @@ extension MarkdownEditor.Coordinator {
     /// this block is touched.
     private func restyleBlock(_ block: Int, revealed: Bool, in storage: NSTextStorage) {
         guard block >= 0, block < revealIndex.blocks.count else { return }
+        restyledBlockCount += 1
         let range = revealIndex.blocks[block]
         let ns = NSRange(location: range.lowerBound, length: range.count)
         MarkdownStyleRenderer.restyle(styleCache.spans,
@@ -326,6 +347,11 @@ extension MarkdownEditor.Coordinator {
     /// re-armed here: the edit that moved it went through `textDidChange`,
     /// which armed the debounce already.
     func parseNow() {
+        // Invalidated, not merely dropped: `applyStyles` calls this DIRECTLY on
+        // the open path, so there may be a debounce timer still armed, and a
+        // released-but-live `Timer` would fire into a parse that has already
+        // been launched.
+        parseTimer?.invalidate()
         parseTimer = nil
         guard let tv = textView else { return }
         let snapshot = tv.string

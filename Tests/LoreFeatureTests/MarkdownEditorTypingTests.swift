@@ -68,6 +68,64 @@ final class MarkdownEditorTypingTests: XCTestCase {
         XCTAssertFalse(tv.undoManager?.canUndo ?? false)
     }
 
+    // MARK: - The minimal edit (Task 11)
+
+    /// `changedRange` is the whole safety argument for narrowing the edit: it
+    /// must reconstruct the new text EXACTLY. Asserted as the round trip
+    /// rather than as specific offsets, because the offsets are an
+    /// implementation detail and the round trip is the contract.
+    private func assertRoundTrip(_ old: String, _ new: String,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        let oldNS = old as NSString
+        let (range, replacement) = MarkdownEditorTyping.changedRange(from: oldNS,
+                                                                    to: new as NSString)
+        let rebuilt = oldNS.replacingCharacters(in: range, with: replacement)
+        XCTAssertEqual(rebuilt, new, "round trip must be exact", file: file, line: line)
+        XCTAssertLessThanOrEqual(NSMaxRange(range), oldNS.length,
+                                 "the range must be inside the old string",
+                                 file: file, line: line)
+    }
+
+    func test_changedRangeRoundTripsForEveryEditShape() {
+        assertRoundTrip("- first", "- first\n- ")            // insertion at the end
+        assertRoundTrip("- first\n- second", "- first\n- \n- second")  // in the middle
+        assertRoundTrip("    - a", "- a")                    // deletion at the start
+        assertRoundTrip("abc", "abc")                        // no change at all
+        assertRoundTrip("", "x")                             // from empty
+        assertRoundTrip("x", "")                             // to empty
+        assertRoundTrip("aaa", "aaaa")                       // ambiguous repetition
+        assertRoundTrip("- a\n- b\n- c", "  - a\n  - b\n  - c")  // multi-line indent
+    }
+
+    /// A surrogate pair must never be split: the prefix scan can legitimately
+    /// stop between an emoji's two UTF-16 units, and handing AppKit that range
+    /// replaces half a character.
+    func test_changedRangeNeverSplitsACharacter() {
+        let old = "- 👍👍 tail"
+        let new = "- 👍👍 tail\n- "
+        assertRoundTrip(old, new)
+        assertRoundTrip("a👍b", "a👍👍b")
+        assertRoundTrip("e\u{0301}x", "e\u{0301}yx")   // combining acute
+
+        // And the range's own bounds sit on composed-sequence boundaries.
+        let ns = "a👍b" as NSString
+        let (range, _) = MarkdownEditorTyping.changedRange(from: ns, to: "a👍👍b" as NSString)
+        XCTAssertEqual(ns.rangeOfComposedCharacterSequence(at: range.location).location,
+                       range.location)
+    }
+
+    /// The point of the whole exercise: pressing Enter in a long list must not
+    /// announce an edit covering the document.
+    func test_theAnnouncedEditIsProportionalToTheChangeNotTheDocument() {
+        let long = String(repeating: "- item\n", count: 1_000)
+        let (range, replacement) =
+            MarkdownEditorTyping.changedRange(from: long as NSString,
+                                              to: ("- item\n- \n" + String(repeating: "- item\n",
+                                                                          count: 999)) as NSString)
+        XCTAssertLessThan(range.length, 16)
+        XCTAssertLessThan(replacement.count, 16)
+    }
+
     // MARK: - doCommandBy routing
 
     func test_enterInAListIsHandled() {
