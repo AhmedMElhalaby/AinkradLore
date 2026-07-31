@@ -2,128 +2,6 @@ import AppKit
 import SwiftUI
 import AinkradAppKit
 
-/// The editor's style spans, and the text they describe.
-///
-/// The cache exists because `MarkdownDocumentModel.styleSpans` is a full parse
-/// PLUS a link scan PLUS a `fullText.count`-sized offset table, and the editor's
-/// `applyStyles()` runs on every keystroke and on every ancestor redraw — a
-/// theme change, a banner appearing, a window resize. Before this cache a single
-/// keystroke cost up to four parses. Identity of the text is the whole
-/// invalidation rule: spans describe exactly one string, and `describes(_:)`
-/// answers whether they still describe the one on screen.
-struct MarkdownStyleCache {
-    /// The string `spans` were derived from, or shifted to match.
-    private(set) var text = ""
-    private(set) var spans: [StyleSpan] = []
-    /// Set from the model, so the renderer need not re-measure the string.
-    private(set) var isOverHardCap = false
-    private(set) var isOverViewportCap = false
-    /// True when `spans` have been SHIFTED since the last parse — they are
-    /// positioned correctly but may no longer be the right KINDS, because typing
-    /// `*` can turn prose into emphasis. Only a parse settles that.
-    private(set) var isStale = false
-
-    func describes(_ candidate: String) -> Bool { text == candidate }
-
-    /// Refreshes the spans from a real parse — EXCEPT above the hard cap, where
-    /// the answer is `[]` and no parse is needed to say so.
-    ///
-    /// The guard has to be here, not in `MarkdownDocumentModel.init`: that
-    /// initialiser also builds `codeRegions`, which the LINK GRAPH consumes, and
-    /// making it skip work above a size would silently change which links
-    /// resolve. The editor is the only consumer of style spans, so the editor is
-    /// where "too big to style" is cheap to answer. Without this, the styling-OFF
-    /// path was the most expensive path in the editor — a full parse per debounce
-    /// to be handed an empty array.
-    mutating func reparse(_ newText: String) {
-        adopt(Self.derive(newText), for: newText)
-    }
-
-    /// Everything a parse produces, and nothing that is tied to a thread.
-    ///
-    /// `Sendable` so the parse can run OFF the main actor and the result be
-    /// carried back — see `MarkdownEditor.Coordinator.parseNow`. The struct
-    /// carries no reference to the editor, so there is nothing to race on; the
-    /// string it describes travels alongside it and is checked on arrival.
-    struct Derived: Sendable {
-        let spans: [StyleSpan]
-        let isOverHardCap: Bool
-        let isOverViewportCap: Bool
-    }
-
-    /// The pure, actor-free half of `reparse`. Safe to call from any thread.
-    static func derive(_ newText: String) -> Derived {
-        guard newText.utf16.count <= MarkdownDocumentModel.stylingHardCap else {
-            return Derived(spans: [], isOverHardCap: true, isOverViewportCap: true)
-        }
-        // `init(body:)`: the editor styles exactly the string it was given,
-        // whole. For markdown that string is `note.body` (bound in
-        // `MarkdownDocumentEditor`), already frontmatter-free; for plain text
-        // there is no frontmatter to have. Either way a `Frontmatter.bodyOffset`
-        // scan here can only mis-fire, and when it does the region above the
-        // second `---` is simply left UNSTYLED — no bold, no headings, no
-        // code-block background. Surviving spans still land correctly, because
-        // `SourceOffsetMap` re-bases them; the defect is omission, not
-        // misplacement.
-        let model = MarkdownDocumentModel(body: newText)
-        return Derived(spans: model.styleSpans,
-                       isOverHardCap: model.isOverStylingHardCap,
-                       isOverViewportCap: model.isOverStylingViewportCap)
-    }
-
-    /// Installs a derivation together with the string it describes.
-    ///
-    /// `text` is set from the caller's snapshot, never from the live view: the
-    /// invariant `describes(text) ⇒ these spans index that exact string` is the
-    /// only thing standing between a stale parse and styling the wrong
-    /// characters, so the string and the spans are installed as one unit.
-    mutating func adopt(_ derived: Derived, for newText: String) {
-        text = newText
-        spans = derived.spans
-        isOverHardCap = derived.isOverHardCap
-        isOverViewportCap = derived.isOverViewportCap
-        isStale = false
-    }
-
-    /// Moves every cached span to where the edit put it, rather than dropping
-    /// the styling until the next parse.
-    ///
-    /// Dropping would be correct and horrible: every keystroke would flash the
-    /// document back to plain text for the length of the debounce. Shifting
-    /// keeps the picture stable and is wrong only in the ways a parse 150 ms
-    /// later fixes.
-    ///
-    /// One uniform rule, applied to both ends of every span: an offset at or
-    /// before the edit stays put, an offset after it moves by the delta. That
-    /// makes a span entirely after the edit slide, a span entirely before it
-    /// hold still, and a span the caret is INSIDE grow — which is what typing
-    /// inside `**bold**` should look like.
-    ///
-    /// - Parameter delta: replacement length minus `editedRange.length`, in
-    ///   UTF-16 units.
-    mutating func shift(editedRange: NSRange, delta: Int, newText: String) {
-        let start = editedRange.location
-        let limit = (newText as NSString).length
-        text = newText
-        isStale = true
-        guard delta != 0 || editedRange.length != 0 else { return }
-
-        spans = spans.compactMap { span in
-            let lower = moved(span.range.lowerBound, start: start, delta: delta, limit: limit)
-            let upper = moved(span.range.upperBound, start: start, delta: delta, limit: limit)
-            // A deletion can collapse a span onto itself; an empty range styles
-            // nothing, and an inverted one traps.
-            guard upper > lower else { return nil }
-            return StyleSpan(range: lower..<upper, kind: span.kind)
-        }
-    }
-
-    private func moved(_ offset: Int, start: Int, delta: Int, limit: Int) -> Int {
-        guard offset > start else { return min(offset, limit) }
-        return min(max(start, offset + delta), limit)
-    }
-}
-
 /// The scroll-to-offset entry point `OutlineSection` drives, kept here rather
 /// than in `MarkdownEditor.swift` to leave that file's AppKit wiring alone —
 /// see that file's line-count note.
@@ -166,19 +44,71 @@ enum MarkdownStyleRenderer {
     /// over the full range collapses the storage to one run, so the clear is
     /// cheap regardless of how much was styled before.
     static func apply(_ spans: [StyleSpan], to storage: NSTextStorage,
-                      tokens: HostThemeTokens, limitedTo window: NSRange?) {
+                      tokens: HostThemeTokens, theme: MarkdownTheme,
+                      limitedTo window: NSRange?) {
         let full = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.setAttributes([
             .font: baseFont,
-            .foregroundColor: NSColor(tokens.foreground)
+            .foregroundColor: NSColor(tokens.foreground),
+            // Body rhythm as the FLOOR, so line height and paragraph spacing
+            // exist for ordinary prose — which is most of a note — and each
+            // block kind then overrides only what it needs.
+            .paragraphStyle: MarkdownParagraphStyles.style(for: .body, theme: theme)
         ], range: full)
 
-        for span in spans {
+        // Derived over ALL spans, before any windowing: nesting depth is a
+        // property of the document, and counting only the spans that survive
+        // the viewport window would make an indent change with the scroll.
+        let depths = MarkdownListDepth.depths(of: spans)
+
+        for (index, span) in spans.enumerated() {
             let r = NSRange(location: span.range.lowerBound, length: span.range.count)
             guard r.length > 0, NSMaxRange(r) <= full.length else { continue }
             if let window, NSIntersectionRange(r, window).length == 0 { continue }
-            add(span.kind, in: r, to: storage, tokens: tokens)
+            add(span.kind, in: r, to: storage, tokens: tokens, theme: theme,
+                listDepth: depths[index])
+        }
+        storage.endEditing()
+    }
+
+    /// Re-attributes ONE range — a single reveal block — from the spans that
+    /// live in it, without touching a character outside it.
+    ///
+    /// This is the caret path. `apply` clears the whole document before it
+    /// styles, deliberately, so that an attribute can never outlive the text
+    /// that earned it; running it because the user pressed the down arrow means
+    /// re-attributing the entire note every time the caret crosses a blank
+    /// line, which on a long note is exactly the lag this milestone exists to
+    /// remove. Reveal changes what is COLLAPSED inside two blocks, so only two
+    /// blocks need rebuilding.
+    ///
+    /// Safe because a reveal block is bounded by blank lines and every markdown
+    /// span sits inside one: the spans handed in are the block's own, and
+    /// nothing they style — including the paragraph ranges the block kinds
+    /// expand to — can reach past the block's ends.
+    ///
+    /// - Parameter spanIndices: positions into `spans`, so the caller's cached
+    ///   per-block index and its globally-derived `depths` stay aligned.
+    static func restyle(_ spans: [StyleSpan], at spanIndices: [Int],
+                        depths: [Int], in range: NSRange, to storage: NSTextStorage,
+                        tokens: HostThemeTokens, theme: MarkdownTheme) {
+        let clamped = NSIntersectionRange(range,
+                                          NSRange(location: 0, length: storage.length))
+        guard clamped.length > 0 else { return }
+        storage.beginEditing()
+        storage.setAttributes([
+            .font: baseFont,
+            .foregroundColor: NSColor(tokens.foreground),
+            .paragraphStyle: MarkdownParagraphStyles.style(for: .body, theme: theme)
+        ], range: clamped)
+        for index in spanIndices {
+            guard index < spans.count else { continue }
+            let span = spans[index]
+            let r = NSRange(location: span.range.lowerBound, length: span.range.count)
+            guard r.length > 0, NSMaxRange(r) <= storage.length else { continue }
+            add(span.kind, in: r, to: storage, tokens: tokens, theme: theme,
+                listDepth: index < depths.count ? depths[index] : 0)
         }
         storage.endEditing()
     }
@@ -239,15 +169,22 @@ enum MarkdownStyleRenderer {
     /// Syntax markers stay VISIBLE — this is Live Preview, not WYSIWYG — so
     /// every case styles the span's whole source range, markers included.
     private static func add(_ kind: StyleSpan.Kind, in r: NSRange,
-                            to storage: NSTextStorage, tokens: HostThemeTokens) {
+                            to storage: NSTextStorage, tokens: HostThemeTokens,
+                            theme: MarkdownTheme, listDepth: Int) {
         switch kind {
         case .heading(let level):
-            let size = max(baseSize, 26 - CGFloat(level) * 2)
+            // Foreground, not accentPrimary. Size and weight carry hierarchy;
+            // colour is reserved for what is clickable. Reversing M2a here is
+            // deliberate: a note should read as text, not as coloured bands.
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
-                              to: .systemFont(ofSize: size))
+                              to: .systemFont(ofSize: theme.headingSize(level)))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.foreground), range: r)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .heading(level),
+                                                                      theme: theme),
+                                 range: r)
 
         case .strong:
             composeFont(in: r, storage: storage) { current in
@@ -267,31 +204,39 @@ enum MarkdownStyleRenderer {
                               to: .monospacedSystemFont(ofSize: current.pointSize,
                                                         weight: .regular))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
+            // No accent tint. Mono plus a background already says "code", and
+            // the tint is what made every `code` span read as a coloured word
+            // in the middle of a sentence.
             storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
+                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.6),
                                  range: r)
 
         case .codeBlock(let language):
-            // Task 9's scope: monospace, a background, a language label. NO
-            // per-token colouring — that would reintroduce exactly the
-            // hand-rolled scanning this milestone removed. The uniform
-            // `accentSecondary` tint over the WHOLE block (kept from Task 6)
-            // is not that: it is one colour for one span, same as
-            // `.inlineCode`, and it is what makes a fence read as code at a
-            // glance rather than as indented prose. Removing it would leave
-            // code visually identical to a blockquote save for the
-            // background, which is a worse outcome than the tint's own
-            // "changes every existing note" cost — so it stays.
+            // REVISITED, not ignored. M2a defended an `accentSecondary` tint
+            // over the whole block on the grounds that without it a fence would
+            // read as a blockquote. `MarkdownBlockBackgrounds` now draws a
+            // full-width panel for code and a bar for quotes, so the two are
+            // unmistakable by shape and that argument no longer holds — and the
+            // tint's own cost (it repainted every note into coloured bands) is
+            // exactly what this milestone exists to undo. A per-glyph
+            // `.backgroundColor` is not used here either: it stops at the end of
+            // each line, giving a ragged staircase instead of a panel.
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),
                               to: .monospacedSystemFont(ofSize: current.pointSize,
                                                         weight: .regular))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentSecondary), range: r)
-            storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.45),
-                                 range: r)
+            // Over the PARAGRAPH, for the same reason the list case is — and
+            // now for a reason that is reachable rather than theoretical. A
+            // fence INSIDE a list item is indented, so its paragraph's first
+            // character is the item's leading whitespace, which carries the
+            // listItem style; `endEditing` then extends that over the fence and
+            // the code style loses. Nothing made that possible until list items
+            // started writing a paragraph style at all.
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .codeBlock,
+                                                                      theme: theme),
+                                 range: (storage.string as NSString).paragraphRange(for: r))
             if let language, !language.isEmpty {
                 styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
             }
@@ -311,9 +256,15 @@ enum MarkdownStyleRenderer {
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.foreground).withAlphaComponent(0.65),
                                  range: r)
-            let style = NSMutableParagraphStyle()
-            style.headIndent = 16
-            storage.addAttribute(.paragraphStyle, value: style, range: r)
+            // The indent leaves room for the bar `MarkdownBlockBackgrounds`
+            // draws in the margin; the bar is what says "quote". Paragraph
+            // scoped for the same reason as the code case above: a quote nested
+            // in a list item is indented, and its paragraph's first character
+            // belongs to the item.
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .blockQuote,
+                                                                      theme: theme),
+                                 range: (storage.string as NSString).paragraphRange(for: r))
 
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
@@ -321,8 +272,70 @@ enum MarkdownStyleRenderer {
         case .listItem:
             // Foreground unchanged by design: a list item is most of a note, and
             // tinting it would tint the note. Its children still style.
+            //
+            // The INDENT is the whole of a list's appearance, and until now
+            // nothing supplied a depth, so `MarkdownParagraphStyles`' list case
+            // was unreachable in practice. `listDepth` comes from containment —
+            // see `MarkdownListDepth` — and because spans are applied
+            // parent-first a nested item's deeper indent lands on top of its
+            // parent's, over its own range only.
+            //
+            // Applied over the PARAGRAPH, not the span. A nested item's range
+            // begins at its bullet, after the line's leading indent — but
+            // `NSTextStorage.endEditing` fixes paragraph attributes by
+            // extending the style of each paragraph's FIRST character across
+            // the whole paragraph. The leading spaces belong only to the
+            // ancestor's span, so the ancestor's shallower indent won every
+            // nested line and lists rendered flat no matter what depth said.
+            let full = storage.string as NSString
+            let paragraph = full.paragraphRange(for: r)
+            // The HANG is derived, not assumed. A nested item's source
+            // indentation is real, visible characters that no marker collapses,
+            // so its first line starts at `firstLineHeadIndent` PLUS the width
+            // of that whitespace — and a fixed `headIndent` therefore put every
+            // wrapped nested line to the LEFT of the text it should hang under.
+            let leading = leadingIndentWidth(from: paragraph.location,
+                                             upTo: r.location, in: full)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.listItemStyle(
+                                    depth: listDepth, leadingIndent: leading,
+                                    theme: theme),
+                                 range: paragraph)
+
+        case .marker:
+            // Deliberately inert HERE. Marker spans exist so a later task can
+            // dim or collapse syntax characters; giving them an appearance now
+            // would change every note's look ahead of that decision, and the
+            // rendering above already styles the whole source range including
+            // its markers.
             break
         }
+    }
+
+    /// The rendered width of the whitespace between a paragraph's start and
+    /// `end` — i.e. how far a nested list item's bullet has been pushed right
+    /// by source indentation alone.
+    ///
+    /// Measured, not counted: the base font is monospaced, so one space's
+    /// advance times the count is exact, and caching that advance keeps this
+    /// off the per-span allocation path. A non-whitespace character before
+    /// `end` means this is not leading indentation and the answer is zero.
+    private static let spaceAdvance: CGFloat =
+        (" " as NSString).size(withAttributes: [.font: baseFont]).width
+
+    private static func leadingIndentWidth(from start: Int, upTo end: Int,
+                                           in text: NSString) -> CGFloat {
+        guard end > start, end <= text.length else { return 0 }
+        var count = 0
+        for offset in start..<end {
+            let unit = text.character(at: offset)
+            // A tab counts as one indent unit here rather than being expanded:
+            // tab stops are a paragraph-style concern this does not own, and
+            // under-counting hangs the line slightly left rather than wrongly.
+            guard unit == 0x20 || unit == 0x09 else { return 0 }
+            count += 1
+        }
+        return CGFloat(count) * spaceAdvance
     }
 
     /// Styles the info string (`swift` in an opening ```` ```swift ```` line)
@@ -351,6 +364,61 @@ enum MarkdownStyleRenderer {
         guard NSMaxRange(labelRange) <= full.length else { return }
         storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
         storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
+    }
+
+    // MARK: - Collapsing hidden markers
+
+    /// Merges overlapping and adjacent ranges into a minimal covering set.
+    ///
+    /// Marker ranges are NOT disjoint. A nested blockquote `>> a` emits an
+    /// outer `">> "` marker and an inner `"> "` marker that overlap, and two
+    /// abutting markers (`**` immediately followed by `*`) produce ranges that
+    /// touch. Applying attributes range-by-range would still be correct for
+    /// `.font`, but the overlap makes the work quadratic in the worst case and
+    /// makes any future non-idempotent attribute (a width reservation, a
+    /// count) silently wrong. Coalescing first removes the whole class.
+    ///
+    /// Adjacent ranges are merged too (`<=`, not `<`): `a..<b` and `b..<c`
+    /// describe one contiguous stretch of hidden syntax.
+    static func coalesce(_ ranges: [Range<Int>]) -> [Range<Int>] {
+        let sorted = ranges.filter { !$0.isEmpty }.sorted {
+            $0.lowerBound == $1.lowerBound ? $0.upperBound < $1.upperBound
+                                           : $0.lowerBound < $1.lowerBound
+        }
+        var merged: [Range<Int>] = []
+        for range in sorted {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    /// Makes `ranges` take no visual space, WITHOUT altering the text.
+    ///
+    /// A near-zero font rather than a zero font: AppKit treats a zero-point
+    /// font as invalid and substitutes the system default, which would make
+    /// hidden markers render at FULL size — the opposite of the intent.
+    ///
+    /// The document string is never touched. Collapsing is attributes and
+    /// visibility only, so every offset the search index, the link graph and
+    /// the MCP tools hold stays valid by construction. If this ever starts
+    /// deleting or rewriting characters, a display concern has reached the
+    /// document — after fourteen data-loss defects in M0/M1, that is the one
+    /// trade this codebase does not make.
+    static func collapse(_ ranges: [Range<Int>], in storage: NSTextStorage) {
+        let length = storage.length
+        let collapsedFont = NSFont.systemFont(ofSize: 0.01)
+        storage.beginEditing()
+        for range in coalesce(ranges) {
+            let ns = NSRange(location: range.lowerBound, length: range.count)
+            guard ns.location >= 0, ns.location + ns.length <= length else { continue }
+            storage.addAttribute(.font, value: collapsedFont, range: ns)
+            storage.addAttribute(.kern, value: CGFloat(0), range: ns)
+        }
+        storage.endEditing()
     }
 
     /// The visible character range plus a margin.

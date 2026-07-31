@@ -59,11 +59,26 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
+        // Markdown source, not prose. macOS's automatic substitutions turn `"`
+        // into typographic quotes and `--` into an em dash, which corrupts the
+        // very characters the parser reads — and, for `"`, gives the key two
+        // owners, since `MarkdownEditing.pairs` also auto-pairs it. Which one
+        // won depended on a System Settings toggle; now neither does.
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
-        tv.textContainerInset = NSSize(width: 16, height: 16)
+        // Margins and measure come from the theme, and are a function of the
+        // view's width — see `MarkdownEditorLayout`. Set once here for the
+        // initial size, then maintained by `onWidthChange`.
+        tv.textContainerInset = MarkdownEditorLayout.containerInset(
+            forViewWidth: tv.bounds.width, theme: MarkdownTheme(tokens: tokens))
+        tv.onWidthChange = { [weak coordinator = context.coordinator] width in
+            coordinator?.applyContainerInset(forWidth: width)
+        }
         tv.onCommandClick = { [weak coordinator = context.coordinator] index in
             coordinator?.openLink(atUTF16: index) ?? false
         }
@@ -177,12 +192,36 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         /// The spans on screen and the string they describe. See
         /// `MarkdownStyleCache` for why this is not recomputed per call.
-        private(set) var styleCache = MarkdownStyleCache()
-        private var parseTimer: Timer?
+        ///
+        /// Internal rather than `private(set)` only because the styling
+        /// pipeline that mutates it now lives in `MarkdownEditorReveal.swift`,
+        /// and Swift has no cross-file `private`. Nothing outside these two
+        /// files writes it.
+        var styleCache = MarkdownStyleCache()
+        var parseTimer: Timer?
         /// Bumped per off-actor parse launched. A result whose generation is no
         /// longer the current one is discarded — see `parseNow`.
-        private var parseGeneration = 0
-        private var lastViewportWindow: NSRange?
+        var parseGeneration = 0
+        var lastViewportWindow: NSRange?
+        /// Block ranges, per-block span buckets and list depths for the CURRENT
+        /// text. Rebuilt only when the text is re-rendered — never on a caret
+        /// move, because `MarkdownReveal.blocks(in:)` scans the whole string.
+        /// See `MarkdownEditorReveal.Index`.
+        var revealIndex = MarkdownEditorReveal.Index.empty
+        /// The INDICES of the blocks whose markers are currently revealed. The
+        /// reveal state in full: if a caret move leaves this unchanged there is
+        /// nothing to redraw, which is what keeps arrowing free of styling work.
+        var revealedBlockIndices: Range<Int> = 0..<0
+        /// How many times the index has been built. Exists so a test can pin
+        /// the claim that a caret move never rebuilds it — the claim is the
+        /// whole performance contract of the reveal path, and an earlier
+        /// version of this file made it without the code supporting it.
+        var revealIndexBuilds = 0
+        /// How many BLOCKS the incremental reveal path has re-attributed. The
+        /// caret contract is O(1) blocks per boundary crossing — two, the one
+        /// leaving reveal and the one entering it — and "O(1)" is only a claim
+        /// until something counts. Reset by the benchmark, never by the editor.
+        var restyledBlockCount = 0
         /// The edit `shouldChangeTextIn` announced, consumed by the very next
         /// `textDidChange`. AppKit always pairs them, and anything that edits
         /// the storage WITHOUT the pair leaves the cache describing a stale
@@ -267,6 +306,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// index-free: it can only ever dismiss, never open, so it never asks
         /// the store for rows.
         public func textViewDidChangeSelection(_ notification: Notification) {
+            // Live Preview's other half: which markers are hidden depends on
+            // where the caret IS, not only on what was typed. Cheap by
+            // construction — see `revealForSelectionChange`, which parses
+            // nothing and usually does no work at all.
+            revealForSelectionChange()
             guard completionPanel.isVisible, let tv = textView else { return }
             if activePrefix(in: tv) == nil { completionPanel.hide() }
         }
@@ -280,7 +324,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         // MARK: - Keys the popup owns, and only while it is open
 
         public func textView(_ tv: NSTextView, doCommandBy selector: Selector) -> Bool {
-            guard completionPanel.isVisible else { return false }
+            // The panel owns Enter, Tab, the arrows and Escape WHILE IT IS
+            // OPEN. Only once it is closed do Enter and Tab mean "continue this
+            // list" and "indent it" — see `MarkdownEditorTyping`.
+            guard completionPanel.isVisible else {
+                return MarkdownEditorTyping.handle(selector, in: tv)
+            }
             switch selector {
             case #selector(NSResponder.moveUp(_:)):
                 completionPanel.moveSelection(by: -1); return true
@@ -342,9 +391,13 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completionPanel.hide(); return
             }
             let insertion = linkTarget(row) + "]]"
-            let caretUTF16 = tv.selectedRange().location
-            let range = NSRange(location: caretUTF16 - prefix.utf16.count,
-                                length: prefix.utf16.count)
+            // The `]]` may ALREADY be there: `[` auto-pairs, so typing `[[`
+            // leaves `[[]]` with the caret in the middle. `linkInsertionRange`
+            // absorbs an existing closer into the replaced range, which is what
+            // stops an accepted completion reading `[[Target]]]]`.
+            let range = MarkdownEditing.linkInsertionRange(
+                text: tv.string, caret: tv.selectedRange().location,
+                prefixLength: prefix.utf16.count)
             // Through `shouldChangeText`/`didChangeText` so the edit is one
             // undo step and the delegate still fires.
             if tv.shouldChangeText(in: range, replacementString: insertion) {
@@ -371,98 +424,8 @@ public struct MarkdownEditor: NSViewRepresentable {
             return true
         }
 
-        // MARK: - Styling
-
-        /// The one entry point for callers that do not know whether the text
-        /// changed: `makeNSView`, and `updateNSView` on every ancestor redraw.
-        ///
-        /// Parses ONLY when the cached spans describe a different string than
-        /// the one on screen — which, after a keystroke, they do not, because
-        /// `textDidChange` has already shifted them. A redraw therefore costs a
-        /// render and nothing else.
-        func applyStyles() {
-            guard let tv = textView else { return }
-            if !styleCache.describes(tv.string) { styleCache.reparse(tv.string) }
-            renderStyles()
-        }
-
-        /// Applies the cached spans. No parse, ever.
-        private func renderStyles() {
-            guard let tv = textView, let storage = tv.textStorage else { return }
-            let window = styleCache.isOverViewportCap
-                ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
-            lastViewportWindow = window
-            MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
-                                        tokens: tokens, limitedTo: window)
-            stylingNotice?.isHidden = !styleCache.isOverHardCap
-            stylingNotice?.textColor = NSColor(tokens.accentSecondary)
-        }
-
-        /// Re-arms the debounce. Only its firing parses, so a burst of typing
-        /// costs one parse rather than one per character.
-        private func scheduleParse() {
-            parseTimer?.invalidate()
-            let timer = Timer(timeInterval: Self.parseDebounce, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.parseNow() }
-            }
-            parseTimer = timer
-            // `.common` so the parse still lands while the user is scrolling or
-            // holding a menu open, rather than after they stop.
-            RunLoop.main.add(timer, forMode: .common)
-        }
-
-        /// Parses OFF the main actor and applies the result back on it.
-        ///
-        /// This used to be a synchronous parse on the main actor, called from a
-        /// main-run-loop timer. On a large note that is measured in whole
-        /// seconds, and a main-actor second is not lag — it is a beachball, once
-        /// per pause in typing. The parse itself is pure (`derive` touches no
-        /// AppKit and no editor state), so the only thing that must stay on the
-        /// main actor is applying the answer.
-        ///
-        /// Two guards keep a slow parse from styling the wrong characters:
-        ///
-        /// 1. `generation` — a newer parse having been started makes this one's
-        ///    result garbage, even if the text looks right.
-        /// 2. the SNAPSHOT check — the spans index `snapshot` and nothing else,
-        ///    so they are installed only if the view still holds exactly that
-        ///    string. This is the same identity rule `describes(_:)` encodes,
-        ///    applied across the hop.
-        ///
-        /// When the text HAS moved on, nothing is applied and nothing is
-        /// re-armed here: the edit that moved it went through `textDidChange`,
-        /// which armed the debounce already.
-        private func parseNow() {
-            parseTimer = nil
-            guard let tv = textView else { return }
-            let snapshot = tv.string
-            guard styleCache.isStale || !styleCache.describes(snapshot) else { return }
-            parseGeneration += 1
-            let generation = parseGeneration
-            Task.detached(priority: .userInitiated) {
-                let derived = MarkdownStyleCache.derive(snapshot)
-                await MainActor.run { [weak self] in
-                    self?.applyParsed(derived, of: snapshot, generation: generation)
-                }
-            }
-        }
-
-        private func applyParsed(_ derived: MarkdownStyleCache.Derived,
-                                 of snapshot: String, generation: Int) {
-            guard generation == parseGeneration,
-                  let tv = textView, tv.string == snapshot else { return }
-            styleCache.adopt(derived, for: snapshot)
-            renderStyles()
-        }
-
-        /// In viewport mode the styled range follows the scroll, so scrolling
-        /// has to re-render — but only when the window actually moved, since
-        /// this fires continuously during a drag.
-        private func restyleForViewportIfNeeded() {
-            guard styleCache.isOverViewportCap, let tv = textView else { return }
-            let window = MarkdownStyleRenderer.viewportWindow(of: tv)
-            if let last = lastViewportWindow, NSEqualRanges(last, window) { return }
-            renderStyles()
-        }
+        // The styling pipeline — parse debounce, render, reveal, container
+        // geometry — lives in `MarkdownEditorReveal.swift`. This file is the
+        // AppKit wiring and nothing else; see its line-count note.
     }
 }

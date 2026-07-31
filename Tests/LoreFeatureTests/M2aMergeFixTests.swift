@@ -145,10 +145,13 @@ final class M2aSavePathParseCountTests: XCTestCase {
 @MainActor
 final class M2aFontCompositionTests: XCTestCase {
 
+    private static let theme = MarkdownTheme(tokens: TestTokens.make())
+
     private func styled(_ text: String) -> NSTextStorage {
         let storage = NSTextStorage(string: text)
         MarkdownStyleRenderer.apply(MarkdownStyleCache.derive(text).spans,
-                                    to: storage, tokens: TestTokens.make(), limitedTo: nil)
+                                    to: storage, tokens: TestTokens.make(),
+                                    theme: Self.theme, limitedTo: nil)
         return storage
     }
 
@@ -166,7 +169,8 @@ final class M2aFontCompositionTests: XCTestCase {
         let storage = styled(text)
         let headingSize = font(storage, at: 2).pointSize     // the "A"
         let boldSize = font(storage, at: 7).pointSize        // the "B"
-        XCTAssertEqual(headingSize, 24, "level-1 heading is 26 - 2")
+        XCTAssertEqual(headingSize, Self.theme.headingSize(1), accuracy: 0.01,
+                       "level-1 heading size now comes from MarkdownTheme")
         XCTAssertEqual(boldSize, headingSize,
                        "the child span overwrote the heading's font")
         XCTAssertTrue(traits(font(storage, at: 7)).contains(.boldFontMask))
@@ -191,7 +195,7 @@ final class M2aFontCompositionTests: XCTestCase {
         let storage = styled(text)
         let headingSize = font(storage, at: 2).pointSize
         let code = font(storage, at: 6)                      // inside "code"
-        XCTAssertEqual(headingSize, 24)
+        XCTAssertEqual(headingSize, Self.theme.headingSize(1), accuracy: 0.01)
         XCTAssertEqual(code.pointSize, headingSize)
         XCTAssertTrue(code.isFixedPitch, "inline code must still be monospaced")
     }

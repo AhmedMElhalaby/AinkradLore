@@ -14,7 +14,18 @@ settings:
 packages:
   AinkradAppKit:
     url: https://github.com/AhmedMElhalaby/AinkradAppKit
-    revision: d5d994bdd8e79d530410a1c370657fa593fa4ce6
+    # MUST equal the revision the HOST is pinned to, not merely a revision that
+    # stamps the same AinkradAPIVersion. The generation check compares integers,
+    # so a plugin built against a different revision of generation 8 passes
+    # validation and then fails at dlopen — silently, with no rejection logged,
+    # because the failure is below the layer that reports rejections.
+    #
+    # Lore sat at d5d994b, 28 commits behind the host's e4882ad, for three
+    # milestones. Every test passed the whole time; the plugin never once loaded.
+    # `make test` cannot detect this. `make devhost` plus the lsof check can:
+    #   lsof -p <pid> | grep LorePlugin   # a `txt` row means it really dlopen'd
+    # Host pin lives in Ainkrad's project.yml under the same package name.
+    revision: e4882adb97af2892b55870b55c397e9ec9453def
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"

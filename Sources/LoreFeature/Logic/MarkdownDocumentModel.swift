@@ -365,12 +365,15 @@ struct MarkdownASTCollector: MarkupWalker {
                                       ? .fencedCodeBlock : .indentedCodeBlock))
         styleSpans.append(StyleSpan(range: swiftRange(ns),
                                     kind: .codeBlock(language: codeBlock.language)))
+        // Only a FENCED block has fence lines; an indented one yields nothing.
+        appendMarkers(MarkdownMarkers.fences(in: ns, text: text), .codeFence)
     }
 
     mutating func visitInlineCode(_ inlineCode: InlineCode) {
         guard let ns = resolve(inlineCode.range) else { return }
         regions.append(CodeRegion(range: ns, kind: .inlineCode))
         styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .inlineCode))
+        appendMarkers(MarkdownMarkers.backtickPair(in: ns, text: text), .inlineCode)
     }
 
     mutating func visitHTMLBlock(_ html: HTMLBlock) {

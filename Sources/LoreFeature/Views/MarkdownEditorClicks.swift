@@ -34,6 +34,47 @@ final class LinkTextView: NSTextView {
     /// Fires whenever focus leaves this view, including the routes that do not
     /// produce a `textDidEndEditing`.
     var onResignFirstResponder: (@MainActor () -> Void)?
+    /// Fires when the view's WIDTH changes, which is the only input to where
+    /// the text column sits — see `MarkdownEditorLayout`. Height changes are
+    /// ignored, and a height change is what most `setFrameSize` calls are: the
+    /// view grows as the document does.
+    var onWidthChange: (@MainActor (CGFloat) -> Void)?
+    private var lastNotifiedWidth: CGFloat = -1
+
+    /// The resize hook. `updateNSView` is not one: SwiftUI does not re-run it
+    /// for every frame of a live window resize, so a column centred only there
+    /// would drift off-centre while the user drags the window edge.
+    ///
+    /// Cannot recurse: the handler sets `textContainerInset`, never the frame,
+    /// and any frame change that follows carries the same width — which this
+    /// guard drops.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard abs(newSize.width - lastNotifiedWidth) > 0.5 else { return }
+        lastNotifiedWidth = newSize.width
+        onWidthChange?(newSize.width)
+    }
+
+    /// Code panels and blockquote bars to paint BEHIND the text. Set by the
+    /// coordinator whenever styles are applied; see `MarkdownBlockBackgrounds`
+    /// for why these are drawn rather than attributed.
+    var blockBackgrounds: [MarkdownBlockBackgrounds.Region] = [] {
+        didSet { if blockBackgrounds != oldValue { needsDisplay = true } }
+    }
+    /// The colours those regions are painted in, from the host theme.
+    var blockBackgroundPalette: MarkdownBlockBackgrounds.Palette? {
+        didSet { if blockBackgroundPalette != oldValue { needsDisplay = true } }
+    }
+
+    /// The one drawing hook. `super` first, so the view's own background is
+    /// down before the block decoration goes on top of it and the text on top
+    /// of that.
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let palette = blockBackgroundPalette else { return }
+        MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
+                                      in: self, dirtyRect: rect)
+    }
 
     /// Modifiers that mean the user is doing something other than "activate
     /// what is under the pointer": extending a selection, opening a context
@@ -61,6 +102,53 @@ final class LinkTextView: NSTextView {
            event.modifierFlags.intersection(Self.selectionModifiers).isEmpty,
            onPlainClick?(characterIndexForInsertion(at: point)) == true { return }
         super.mouseDown(with: event)
+    }
+
+    // MARK: - Typing affordances
+
+    /// Auto-pairing. `insertText` rather than a `doCommandBy` arm because
+    /// ordinary characters never reach `doCommandBy`. Multi-character input —
+    /// a paste, or an IME committing a phrase — is filtered out inside
+    /// `MarkdownEditorTyping.typed`, so composition is untouched.
+    ///
+    /// Two inputs must never be auto-paired, because
+    /// `MarkdownEditorTyping.typed` rebuilds the whole string around
+    /// `selectedRange()` and knows nothing about either:
+    ///
+    /// - MARKED TEXT. An IME committing a single pair character (`[`, `(`, a
+    ///   backtick, a quote) mid-composition would have its in-progress marked
+    ///   range replaced with no `unmarkText`, leaving the input session
+    ///   describing text that no longer exists.
+    /// - An explicit `replacementRange`. Autocorrect, dictation and text
+    ///   substitution target a range that is NOT the selection, so pairing
+    ///   there inserts the pair in the wrong place and drops the correction.
+    ///
+    /// A `replacementRange` EQUAL to the current selection is ordinary typing
+    /// described redundantly, and is allowed — refusing it would disable
+    /// auto-pairing wherever AppKit chooses to spell the range out.
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        let targetsSelection = replacementRange.location == NSNotFound
+            || replacementRange == selectedRange()
+        if targetsSelection, !hasMarkedText() {
+            let typed = (string as? String) ?? (string as? NSAttributedString)?.string
+            if let typed, MarkdownEditorTyping.typed(typed, in: self) { return }
+        }
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    /// Cmd-B / Cmd-I. Handled here rather than through `toggleBoldface(_:)`
+    /// because those selectors arrive only from a Font menu, which a plugin's
+    /// host window need not have.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command, window?.firstResponder === self {
+            switch event.charactersIgnoringModifiers {
+            case "b": MarkdownEditorTyping.toggleWrap(in: self, with: "**"); return true
+            case "i": MarkdownEditorTyping.toggleWrap(in: self, with: "*"); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 

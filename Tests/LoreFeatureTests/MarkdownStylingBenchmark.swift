@@ -114,9 +114,11 @@ final class MarkdownStylingCacheTests: XCTestCase {
     }
 
     /// Text arriving from outside the editor (document switch, external write)
-    /// is not a keystroke and has no cached spans to shift, so it parses once,
-    /// synchronously — styling a freshly opened note must not lag.
-    func test_externallyReplacedTextParsesOnce() {
+    /// is not a keystroke and has no cached spans to shift, so it parses. Once,
+    /// and — for a SMALL document — synchronously: the parse is a millisecond
+    /// and deferring it would flash the note unstyled on every switch. See
+    /// `MarkdownStyleCache.synchronousParseCap`.
+    func test_externallyReplacedSmallTextParsesOnceSynchronously() {
         let (coordinator, tv, _) = makeEditor("start")
         withExtendedLifetime(coordinator) {
             MarkdownParseCounter.reset()
@@ -124,6 +126,35 @@ final class MarkdownStylingCacheTests: XCTestCase {
             coordinator.applyStyles()
             coordinator.applyStyles()
             XCTAssertEqual(MarkdownParseCounter.count, 1)
+            XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .heading(1) },
+                          "and it must be styled by the time applyStyles returns")
+        }
+    }
+
+    /// Task 11. Above the cap the same path must NOT parse on the main actor —
+    /// that synchronous parse was ~0.4 s Debug on a 230 KB note, felt as the
+    /// editor freezing on every document switch. The answer arrives off-actor.
+    func test_externallyReplacedLargeTextDoesNotParseOnTheMainActor() {
+        let (coordinator, tv, _) = makeEditor("start")
+        withExtendedLifetime(coordinator) {
+            let large = "# Replaced\n\n**bold**\n\n"
+                + String(repeating: "Some prose with a [[Link]] in it.\n\n", count: 2_000)
+            XCTAssertGreaterThan(large.utf16.count, MarkdownStyleCache.synchronousParseCap)
+            MarkdownParseCounter.reset()
+            tv.string = large
+            coordinator.applyStyles()
+            XCTAssertEqual(MarkdownParseCounter.count, 0,
+                           "a large document must not be parsed on the main actor")
+            XCTAssertTrue(coordinator.styleCache.describes(large),
+                          "but the cache must claim currency at once, "
+                          + "or every redraw re-enters this path")
+
+            let landed = expectation(description: "off-actor parse landed")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { landed.fulfill() }
+            wait(for: [landed], timeout: 3)
+            XCTAssertEqual(MarkdownParseCounter.count, 1, "and exactly one parse, off-actor")
+            XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .strong },
+                          "the document must end up styled")
         }
     }
 
