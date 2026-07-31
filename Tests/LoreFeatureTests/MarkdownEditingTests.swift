@@ -48,3 +48,87 @@ final class MarkdownEditingTests: XCTestCase {
         XCTAssertEqual(enter("- a\r\n- b", at: 8)?.text, "- a\r\n- b\n- ")
     }
 }
+
+extension MarkdownEditingTests {
+    private func indent(_ text: String, at location: Int, by delta: Int) -> EditResult? {
+        MarkdownEditing.indent(text: text,
+                               selection: NSRange(location: location, length: 0), by: delta)
+    }
+
+    func test_tabIndentsTheItemUnderTheCaret() {
+        XCTAssertEqual(indent("- item", at: 3, by: 1)?.text, "  - item")
+    }
+
+    func test_shiftTabOutdents() {
+        XCTAssertEqual(indent("  - item", at: 5, by: -1)?.text, "- item")
+    }
+
+    func test_outdentAtColumnZeroIsANoOpRatherThanADeletion() {
+        XCTAssertEqual(indent("- item", at: 3, by: -1)?.text, "- item")
+    }
+
+    /// Renumbering: an ordered item that moves must not keep a number from its
+    /// old level.
+    func test_indentingAnOrderedItemRestartsItsNumbering() {
+        XCTAssertEqual(indent("1. a\n2. b", at: 7, by: 1)?.text, "1. a\n  1. b")
+    }
+
+    /// Tab outside a list must not be swallowed — it should insert a tab.
+    func test_tabInProseIsNotHandled() {
+        XCTAssertNil(indent("prose", at: 3, by: 1))
+    }
+}
+
+extension MarkdownEditingTests {
+
+    func test_cmdBWrapsTheSelection() {
+        let r = MarkdownEditing.toggleWrap(text: "make bold now",
+                                           selection: NSRange(location: 5, length: 4),
+                                           with: "**")
+        XCTAssertEqual(r.text, "make **bold** now")
+    }
+
+    /// The same keystroke unwraps — a toggle, not an "add more asterisks".
+    func test_cmdBOnAlreadyBoldTextUnwrapsIt() {
+        let r = MarkdownEditing.toggleWrap(text: "make **bold** now",
+                                           selection: NSRange(location: 7, length: 4),
+                                           with: "**")
+        XCTAssertEqual(r.text, "make bold now")
+    }
+
+    func test_cmdBWithNoSelectionInsertsAnEmptyPairWithTheCaretInside() {
+        let r = MarkdownEditing.toggleWrap(text: "ab", selection: NSRange(location: 1, length: 0),
+                                           with: "**")
+        XCTAssertEqual(r.text, "a****b")
+        XCTAssertEqual(r.selection.location, 3)
+    }
+
+    /// Losing a selection to a stray bracket is a small data loss, so
+    /// auto-pair SURROUNDS a selection rather than replacing it.
+    func test_autoPairSurroundsASelectionInsteadOfReplacingIt() {
+        let r = MarkdownEditing.autoPair(text: "keep me",
+                                         selection: NSRange(location: 5, length: 2), typing: "[")
+        XCTAssertEqual(r?.text, "keep [me]")
+    }
+
+    func test_autoPairInsertsTheClosingCharacter() {
+        let r = MarkdownEditing.autoPair(text: "", selection: NSRange(location: 0, length: 0),
+                                         typing: "[")
+        XCTAssertEqual(r?.text, "[]")
+        XCTAssertEqual(r?.selection.location, 1)
+    }
+
+    /// Typing the closing character when it is already there moves past it
+    /// rather than doubling it.
+    func test_typingAClosingCharacterOverATypedOneSkipsIt() {
+        let r = MarkdownEditing.autoPair(text: "[]", selection: NSRange(location: 1, length: 0),
+                                         typing: "]")
+        XCTAssertEqual(r?.text, "[]")
+        XCTAssertEqual(r?.selection.location, 2)
+    }
+
+    func test_autoPairIgnoresUnpairedCharacters() {
+        XCTAssertNil(MarkdownEditing.autoPair(text: "", selection: NSRange(location: 0, length: 0),
+                                              typing: "z"))
+    }
+}
