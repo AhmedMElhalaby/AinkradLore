@@ -195,13 +195,20 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// longer the current one is discarded — see `parseNow`.
         var parseGeneration = 0
         var lastViewportWindow: NSRange?
-        /// Block ranges for the CURRENT text, recomputed only when the text is
-        /// re-rendered — never on a caret move. See `MarkdownEditorReveal`.
-        var revealBlocks: [Range<Int>] = []
-        /// The blocks whose markers are currently revealed. The reveal state in
-        /// full: if a caret move leaves this unchanged there is nothing to
-        /// redraw, which is what keeps arrowing free of styling work.
-        var revealedBlocks: [Range<Int>] = []
+        /// Block ranges, per-block span buckets and list depths for the CURRENT
+        /// text. Rebuilt only when the text is re-rendered — never on a caret
+        /// move, because `MarkdownReveal.blocks(in:)` scans the whole string.
+        /// See `MarkdownEditorReveal.Index`.
+        var revealIndex = MarkdownEditorReveal.Index.empty
+        /// The INDICES of the blocks whose markers are currently revealed. The
+        /// reveal state in full: if a caret move leaves this unchanged there is
+        /// nothing to redraw, which is what keeps arrowing free of styling work.
+        var revealedBlockIndices: Range<Int> = 0..<0
+        /// How many times the index has been built. Exists so a test can pin
+        /// the claim that a caret move never rebuilds it — the claim is the
+        /// whole performance contract of the reveal path, and an earlier
+        /// version of this file made it without the code supporting it.
+        var revealIndexBuilds = 0
         /// The edit `shouldChangeTextIn` announced, consumed by the very next
         /// `textDidChange`. AppKit always pairs them, and anything that edits
         /// the storage WITHOUT the pair leaves the cache describing a stale

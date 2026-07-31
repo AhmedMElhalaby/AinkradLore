@@ -236,6 +236,83 @@ extension MarkdownThemeTests {
         XCTAssertEqual(MarkdownListDepth.depths(of: spans), [0, 1, 0])
     }
 
+    /// FINDING 3. A nested item's source indentation is real, visible text that
+    /// no marker collapses, so its first line begins at `firstLineHeadIndent`
+    /// PLUS that whitespace — and a fixed hang put every wrapped nested line to
+    /// the LEFT of the text it was supposed to hang under.
+    func test_nestedListWrappedLinesHangUnderTheFirstLinesText() throws {
+        let tokens = TestTokens.make()
+        let body = "- outer\n    - inner text long enough to wrap\n"
+        let model = MarkdownDocumentModel(body: body)
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.apply(model.styleSpans, to: storage, tokens: tokens,
+                                    theme: MarkdownTheme(tokens: tokens), limitedTo: nil)
+        let inner = try XCTUnwrap(storage.attribute(
+            .paragraphStyle, at: (body as NSString).range(of: "inner").location,
+            effectiveRange: nil) as? NSParagraphStyle)
+        // Four spaces of source indent, in the monospaced base font.
+        let space = (" " as NSString).size(
+            withAttributes: [.font: MarkdownStyleRenderer.baseFont]).width
+        XCTAssertEqual(inner.headIndent, inner.firstLineHeadIndent + space * 4,
+                       accuracy: 0.5,
+                       "the hang must clear the source indentation, not ignore it")
+        XCTAssertGreaterThan(inner.headIndent, inner.firstLineHeadIndent)
+    }
+
+    /// The derivation is additive: `style(for:theme:)` keeps its committed
+    /// answer, and only the new entry point derives the hang.
+    func test_theDerivedHangIsRelativeToTheItemsOwnIndent() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let flat = MarkdownParagraphStyles.listItemStyle(depth: 0, leadingIndent: 0,
+                                                         theme: theme)
+        XCTAssertEqual(flat.headIndent, flat.firstLineHeadIndent, accuracy: 0.01,
+                       "with no indent and a collapsed bullet, the text IS the first line")
+        let nested = MarkdownParagraphStyles.listItemStyle(depth: 1, leadingIndent: 40,
+                                                           theme: theme)
+        XCTAssertEqual(nested.headIndent - nested.firstLineHeadIndent, 40, accuracy: 0.01)
+    }
+
+    /// FINDING 5. A fence INSIDE a list item is indented, so its paragraph's
+    /// first character is the item's leading whitespace — which now carries a
+    /// listItem paragraph style. `endEditing` extends that first character's
+    /// style over the paragraph, so a code style applied over the raw span
+    /// range loses. Nothing made this reachable until list items started
+    /// writing a paragraph style at all.
+    func test_aFenceNestedInAListItemKeepsTheCodeParagraphStyle() throws {
+        let tokens = TestTokens.make()
+        let theme = MarkdownTheme(tokens: tokens)
+        let body = "- item\n\n    ```\n    let x = 1\n    ```\n"
+        let model = MarkdownDocumentModel(body: body)
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.apply(model.styleSpans, to: storage, tokens: tokens,
+                                    theme: theme, limitedTo: nil)
+        let code = try XCTUnwrap(storage.attribute(
+            .paragraphStyle, at: (body as NSString).range(of: "let x").location,
+            effectiveRange: nil) as? NSParagraphStyle)
+        let expected = MarkdownParagraphStyles.style(for: .codeBlock, theme: theme)
+        XCTAssertEqual(code.lineHeightMultiple, expected.lineHeightMultiple, accuracy: 0.01,
+                       "the code block's own rhythm must survive the enclosing item")
+        XCTAssertEqual(code.paragraphSpacing, expected.paragraphSpacing, accuracy: 0.01)
+    }
+
+    /// The same trap, for a quote indented inside a list item.
+    func test_aQuoteNestedInAListItemKeepsTheQuoteParagraphStyle() throws {
+        let tokens = TestTokens.make()
+        let theme = MarkdownTheme(tokens: tokens)
+        let body = "- item\n\n    > quoted line\n"
+        let model = MarkdownDocumentModel(body: body)
+        let storage = NSTextStorage(string: body)
+        MarkdownStyleRenderer.apply(model.styleSpans, to: storage, tokens: tokens,
+                                    theme: theme, limitedTo: nil)
+        let quote = try XCTUnwrap(storage.attribute(
+            .paragraphStyle, at: (body as NSString).range(of: "quoted").location,
+            effectiveRange: nil) as? NSParagraphStyle)
+        let expected = MarkdownParagraphStyles.style(for: .blockQuote, theme: theme)
+        XCTAssertEqual(quote.firstLineHeadIndent, expected.firstLineHeadIndent,
+                       accuracy: 0.01,
+                       "the quote's own indent must survive the enclosing item")
+    }
+
     /// Requirement 4. Regions are derived from ALL spans while attributes are
     /// windowed, so an unclipped panel could be painted behind text that was
     /// never styled.

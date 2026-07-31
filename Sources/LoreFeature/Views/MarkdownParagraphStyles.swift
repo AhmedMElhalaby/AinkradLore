@@ -49,6 +49,29 @@ enum MarkdownListDepth {
 /// MCP tools hold. Layout is a rendering concern and stays one.
 enum MarkdownParagraphStyles {
 
+    /// A list item's style with its hang indent DERIVED from where the item's
+    /// text actually starts.
+    ///
+    /// Additive to `style(for:theme:)`, which keeps its committed signature and
+    /// its committed answer. That answer assumes the bullet is the only thing
+    /// between the indent and the text — true at the top level, false the
+    /// moment an item is nested, because the source indentation before a nested
+    /// bullet is visible text that no marker collapses. The first line
+    /// therefore begins at `firstLineHeadIndent + leadingIndent`, and a
+    /// wrapped line hangs under the text only if `headIndent` says the same.
+    ///
+    /// - Parameter leadingIndent: the rendered width of the whitespace before
+    ///   the item's bullet. Zero for a top-level item, where this degrades to
+    ///   "wrapped lines align with the first line" — which, with the bullet
+    ///   collapsed in the reading state, is exactly under the text.
+    static func listItemStyle(depth: Int, leadingIndent: CGFloat,
+                              theme: MarkdownTheme) -> NSParagraphStyle {
+        let base = style(for: .listItem(depth: depth), theme: theme)
+        guard let s = base.mutableCopy() as? NSMutableParagraphStyle else { return base }
+        s.headIndent = s.firstLineHeadIndent + max(0, leadingIndent)
+        return s
+    }
+
     static func style(for block: MarkdownBlock, theme: MarkdownTheme) -> NSParagraphStyle {
         let s = NSMutableParagraphStyle()
         s.lineHeightMultiple = theme.lineHeightMultiple

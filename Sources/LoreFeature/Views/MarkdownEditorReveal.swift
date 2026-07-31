@@ -50,12 +50,81 @@ enum MarkdownEditorLayout {
 /// re-rendered.
 enum MarkdownEditorReveal {
 
+    /// Everything the caret path needs, derived once per TEXT change.
+    ///
+    /// The point of this type is that `revealForSelectionChange` may touch none
+    /// of the document: the block ranges are here rather than rescanned, the
+    /// spans are already bucketed by block so no walk over all spans is needed
+    /// to find the two that matter, and list depths — which are global, being
+    /// derived from containment — are computed once so a per-block restyle
+    /// cannot disagree with a full one.
+    struct Index {
+        let blocks: [Range<Int>]
+        /// Positions into the coordinator's `spans`, bucketed by block. A span
+        /// belongs to the block containing its start; markdown spans do not
+        /// cross a blank line, so that is also the block containing all of it.
+        let spansByBlock: [[Int]]
+        /// Nesting depth per span, aligned by index. See `MarkdownListDepth`.
+        let depths: [Int]
+
+        static let empty = Index(blocks: [], spansByBlock: [], depths: [])
+    }
+
+    /// Builds the index for `text` and `spans`. O(text) once, on a text change
+    /// — never on a caret move.
+    static func index(text: String, spans: [StyleSpan]) -> Index {
+        let blocks = MarkdownReveal.blocks(in: text)
+        var buckets = [[Int]](repeating: [], count: blocks.count)
+        for (position, span) in spans.enumerated() {
+            guard let block = blockIndex(of: span.range.lowerBound, in: blocks) else { continue }
+            buckets[block].append(position)
+        }
+        return Index(blocks: blocks, spansByBlock: buckets,
+                     depths: MarkdownListDepth.depths(of: spans))
+    }
+
+    /// The block containing `offset`, by binary search. Blocks are sorted and
+    /// contiguous, which is what makes this — and `revealedBlockIndices` —
+    /// logarithmic rather than a scan.
+    static func blockIndex(of offset: Int, in blocks: [Range<Int>]) -> Int? {
+        var low = 0, high = blocks.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            if offset < blocks[mid].lowerBound { high = mid - 1 }
+            else if offset >= blocks[mid].upperBound { low = mid + 1 }
+            else { return mid }
+        }
+        // Past the last block's end — an offset at the very end of the
+        // document belongs to the last block rather than to nothing.
+        return blocks.isEmpty ? nil : min(max(low, 0), blocks.count - 1)
+    }
+
+    /// The INDICES of the blocks the selection touches.
+    ///
+    /// Contiguous, and therefore a range rather than a set: blocks tile the
+    /// document end to end, so the blocks a selection touches are exactly those
+    /// between the one holding its start and the one holding its end. A caret
+    /// resting exactly on a boundary belongs to both adjacent blocks — the
+    /// inclusive rule `MarkdownReveal.hiddenMarkers` uses — which this
+    /// preserves by widening one step at a boundary rather than flickering
+    /// between two answers.
+    static func revealedBlockIndices(_ blocks: [Range<Int>],
+                                     selection: NSRange) -> Range<Int> {
+        guard !blocks.isEmpty else { return 0..<0 }
+        let lower = selection.location
+        let upper = lower + max(selection.length, 0)
+        guard var first = blockIndex(of: lower, in: blocks),
+              var last = blockIndex(of: upper, in: blocks) else { return 0..<0 }
+        if first > 0, blocks[first].lowerBound == lower { first -= 1 }
+        if last < blocks.count - 1, blocks[last].upperBound == upper { last += 1 }
+        return first..<(last + 1)
+    }
+
     /// The blocks the selection touches, and therefore the blocks whose
     /// markers are shown.
     ///
-    /// The predicate is `MarkdownReveal.hiddenMarkers`' own reveal rule, stated
-    /// over blocks alone: inclusive at both ends, so a caret resting exactly on
-    /// a boundary reveals rather than flickering between two answers.
+    /// The value-level statement of the same rule, kept for tests and for
+    /// callers that want the ranges rather than their positions.
     static func revealedBlocks(_ blocks: [Range<Int>],
                                selection: NSRange) -> [Range<Int>] {
         let lower = selection.location
@@ -94,7 +163,13 @@ extension MarkdownEditor.Coordinator {
         // Reveal rides the SAME pass as the attributes, and must come after
         // them: `apply` sets fonts over the whole string, so collapsing first
         // would be immediately overwritten.
-        revealBlocks = MarkdownReveal.blocks(in: tv.string)
+        //
+        // THE ONLY place the index is built, and this runs on a text change or
+        // a redraw — never on a caret move. `MarkdownReveal.blocks(in:)` is a
+        // scan of the whole string, so calling it from the selection path would
+        // put an O(document) cost on every arrow key.
+        revealIndex = MarkdownEditorReveal.index(text: tv.string, spans: styleCache.spans)
+        revealIndexBuilds += 1
         collapseHiddenMarkers(in: storage, window: window)
         // Code panels and quote bars are DRAWN, not attributed — see
         // `MarkdownBlockBackgrounds`. Refreshed from the same spans in the
@@ -114,14 +189,16 @@ extension MarkdownEditor.Coordinator {
 
     /// Hides the markers of every block the selection is NOT in, and records
     /// the reveal state that `revealForSelectionChange` compares against.
+    ///
+    /// The whole-document version, run only as part of a full render.
     private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?) {
         guard let tv = textView else { return }
         let selection = tv.selectedRange()
-        revealedBlocks = MarkdownEditorReveal.revealedBlocks(revealBlocks,
-                                                             selection: selection)
+        revealedBlockIndices = MarkdownEditorReveal.revealedBlockIndices(
+            revealIndex.blocks, selection: selection)
         var hidden = MarkdownReveal.hiddenMarkers(spans: styleCache.spans,
                                                   selection: selection,
-                                                  blocks: revealBlocks)
+                                                  blocks: revealIndex.blocks)
         if let window {
             hidden = hidden.filter {
                 $0.lowerBound < NSMaxRange(window) && $0.upperBound > window.location
@@ -132,23 +209,66 @@ extension MarkdownEditor.Coordinator {
 
     /// Called from `textViewDidChangeSelection` — i.e. on every arrow key.
     ///
-    /// Deliberately does NOT parse and, in the common case, does not
-    /// re-attribute either. Re-attributing is only correct when a marker has to
-    /// come back, and a marker only comes back when the caret crosses into a
-    /// different block; while the caret stays put in one block this costs a
-    /// filter over `revealBlocks` and a comparison. Task 11 asserts that a
-    /// caret move costs zero markdown parses, which this satisfies by
-    /// construction: the only inputs are the cached spans and the cached
-    /// block ranges.
+    /// Costs, in order of how often each is reached:
+    ///
+    /// 1. Caret still inside the same block — two binary searches over the
+    ///    cached block list and an equality check. No parse, no scan of the
+    ///    text, no attribute written. This is nearly every keypress.
+    /// 2. Caret crossed a boundary — the blocks that ENTERED and LEFT reveal
+    ///    are re-attributed, and nothing else is. Two blocks, from spans
+    ///    already bucketed per block, over character ranges bounded by the
+    ///    blocks themselves.
+    ///
+    /// What it deliberately does NOT do is call `renderStyles()`, which is what
+    /// the first version of this did. `MarkdownStyleRenderer.apply` clears the
+    /// whole document before styling — correct for a text change, ruinous for
+    /// an arrow key — and `MarkdownReveal.blocks(in:)` rescans the entire
+    /// string. Blocks are blank-line-separated paragraphs, so arrowing down
+    /// ordinary prose crosses one every few keypresses; the full path would
+    /// have restyled the note each time. Block ranges depend only on the TEXT
+    /// and are rebuilt only when the text is rendered.
     func revealForSelectionChange() {
-        guard let tv = textView else { return }
-        let nowRevealed = MarkdownEditorReveal.revealedBlocks(
-            revealBlocks, selection: tv.selectedRange())
-        guard nowRevealed != revealedBlocks else { return }
-        // A marker that must REAPPEAR cannot be un-collapsed in place — the
-        // font it should return to is a function of its enclosing spans — so
-        // the attributes are re-derived from the cache. Still no parse.
-        renderStyles()
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard !revealIndex.blocks.isEmpty else { return }
+        let selection = tv.selectedRange()
+        let now = MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
+                                                            selection: selection)
+        let was = revealedBlockIndices
+        guard now != was else { return }
+        revealedBlockIndices = now
+
+        // Exactly the blocks whose reveal state flipped: those in one range and
+        // not the other. Both are contiguous, so this is a handful of indices
+        // even when a selection is dragged across many blocks at once.
+        let changed = Set(now).symmetricDifference(Set(was))
+        for block in changed.sorted() {
+            restyleBlock(block, revealed: now.contains(block), in: storage)
+        }
+    }
+
+    /// Re-attributes ONE block and re-hides its markers if it is not revealed.
+    ///
+    /// A marker that must REAPPEAR cannot be un-collapsed in place — the font it
+    /// should return to is a function of its enclosing spans — so the block is
+    /// rebuilt from the cached spans. Still no parse, and still nothing outside
+    /// this block is touched.
+    private func restyleBlock(_ block: Int, revealed: Bool, in storage: NSTextStorage) {
+        guard block >= 0, block < revealIndex.blocks.count else { return }
+        let range = revealIndex.blocks[block]
+        let ns = NSRange(location: range.lowerBound, length: range.count)
+        MarkdownStyleRenderer.restyle(styleCache.spans,
+                                      at: revealIndex.spansByBlock[block],
+                                      depths: revealIndex.depths,
+                                      in: ns, to: storage,
+                                      tokens: tokens,
+                                      theme: MarkdownTheme(tokens: tokens))
+        guard !revealed else { return }
+        let hidden = revealIndex.spansByBlock[block].compactMap { index -> Range<Int>? in
+            guard index < styleCache.spans.count,
+                  case .marker = styleCache.spans[index].kind else { return nil }
+            return styleCache.spans[index].range
+        }
+        MarkdownStyleRenderer.collapse(hidden, in: storage)
     }
 
     // MARK: - Container geometry
