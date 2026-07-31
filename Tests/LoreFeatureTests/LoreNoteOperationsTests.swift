@@ -12,8 +12,14 @@ private final class MemoryDocs: PluginDocumentStore {
 /// A temp vault. **Never the user's real vault.**
 @MainActor
 private func makeVault() async throws -> (URL, LoreNoteOperations, LoreStore) {
+    // Nested one level deeper than the shared temp directory ON PURPOSE.
+    // `createRejectsTitlesThatEscapeTheVault` snapshots the vault's PARENT
+    // before and after, and a parent shared with every other suite's temp
+    // directories puts their files in that diff — turning the one test that
+    // proves a title cannot write outside the vault into a flaky one.
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("lore-ops-\(UUID())", isDirectory: true)
+        .appendingPathComponent("vault", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let store = LoreStore(documents: MemoryDocs(),
                           indexPath: root.appendingPathComponent(".index.sqlite"))

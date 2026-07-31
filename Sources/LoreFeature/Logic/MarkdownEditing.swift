@@ -195,4 +195,45 @@ extension MarkdownEditing {
         return EditResult(text: ns.replacingCharacters(in: selection, with: typing + closer),
                           selection: NSRange(location: selection.location + 1, length: 0))
     }
+
+    /// The edit that accepting a `[[…]]` completion makes.
+    ///
+    /// Pure, and separate from the editor, because the DEFECT it fixes only
+    /// exists where two features meet: auto-pairing `[` means typing `[[`
+    /// already leaves `]]` sitting after the caret, so an insertion that
+    /// unconditionally appends its own closer produced `[[Target]]]]`. Neither
+    /// feature's own tests could see that — see
+    /// `test_typingTwoBracketsThenAcceptingACompletionClosesTheLinkExactlyOnce`.
+    ///
+    /// The closer is therefore ABSORBED rather than assumed absent: up to two
+    /// `]` immediately after the caret join the replaced range, so the result is
+    /// `[[Target]]` whether the brackets were auto-paired, typed by hand, or
+    /// already there from editing an existing link.
+    ///
+    /// - Parameter prefixLength: the UTF-16 length of the typed prefix ending at
+    ///   `caret`, which the target replaces.
+    static func linkInsertion(text: String, caret: Int, prefixLength: Int,
+                              target: String) -> EditResult {
+        let replaced = linkInsertionRange(text: text, caret: caret, prefixLength: prefixLength)
+        let insertion = target + "]]"
+        return EditResult(text: (text as NSString).replacingCharacters(in: replaced,
+                                                                       with: insertion),
+                          selection: NSRange(location: replaced.location
+                                                + (insertion as NSString).length,
+                                             length: 0))
+    }
+
+    /// The range `linkInsertion` replaces, for a caller that must make the edit
+    /// through `shouldChangeText`/`didChangeText` rather than on a string.
+    static func linkInsertionRange(text: String, caret: Int, prefixLength: Int) -> NSRange {
+        let ns = text as NSString
+        let start = max(0, caret - max(0, prefixLength))
+        var end = min(caret, ns.length)
+        var absorbed = 0
+        while absorbed < 2, end < ns.length, ns.character(at: end) == 0x5D {
+            end += 1
+            absorbed += 1
+        }
+        return NSRange(location: start, length: end - start)
+    }
 }

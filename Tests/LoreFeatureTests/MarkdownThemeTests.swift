@@ -266,10 +266,87 @@ extension MarkdownThemeTests {
         let flat = MarkdownParagraphStyles.listItemStyle(depth: 0, leadingIndent: 0,
                                                          theme: theme)
         XCTAssertEqual(flat.headIndent, flat.firstLineHeadIndent, accuracy: 0.01,
-                       "with no indent and a collapsed bullet, the text IS the first line")
+                       "wrapped lines align under the first line's text")
+        // The collapsed bullet is no longer NOTHING: `MarkdownBlockBackgrounds`
+        // draws a substitute in the space to the LEFT of where the text starts,
+        // so that space has to exist.
+        XCTAssertGreaterThan(flat.firstLineHeadIndent,
+                             MarkdownBlockBackgrounds.listMarkerGap,
+                             "a list item needs a gutter for its drawn marker")
         let nested = MarkdownParagraphStyles.listItemStyle(depth: 1, leadingIndent: 40,
                                                            theme: theme)
         XCTAssertEqual(nested.headIndent - nested.firstLineHeadIndent, 40, accuracy: 0.01)
+    }
+
+    // MARK: - FINDING 2: a collapsed list marker gets a drawn substitute
+
+    /// The regression in words: an unfocused ordered list lost its numbering
+    /// entirely, because the marker was collapsed and nothing was put back.
+    /// The drawn substitute carries the item's OWN ordinal.
+    func test_orderedListMarkersKeepTheirOwnNumbers() {
+        XCTAssertEqual(MarkdownBlockBackgrounds.listMarkerGlyph(for: "1. "), "1.")
+        XCTAssertEqual(MarkdownBlockBackgrounds.listMarkerGlyph(for: "7. "), "7.")
+        XCTAssertEqual(MarkdownBlockBackgrounds.listMarkerGlyph(for: "10) "), "10.")
+    }
+
+    /// `-`, `*` and `+` all draw as one real bullet glyph, so which character
+    /// the author typed stops showing through in the reading state.
+    func test_unorderedListMarkersDrawAsABullet() {
+        for source in ["- ", "* ", "+ "] {
+            XCTAssertEqual(MarkdownBlockBackgrounds.listMarkerGlyph(for: source), "•", source)
+        }
+    }
+
+    /// The `MarkdownMarkers` rule, kept: a shape that is not a list marker gets
+    /// nothing rather than a guessed glyph in the gutter.
+    func test_aMarkerThatIsNotAListMarkerDrawsNothing() {
+        XCTAssertNil(MarkdownBlockBackgrounds.listMarkerGlyph(for: "## "))
+        XCTAssertNil(MarkdownBlockBackgrounds.listMarkerGlyph(for: "1x "))
+        XCTAssertNil(MarkdownBlockBackgrounds.listMarkerGlyph(for: ". "))
+        XCTAssertNil(MarkdownBlockBackgrounds.listMarkerGlyph(for: "   "))
+    }
+
+    /// End to end from a real document: parsing a mixed list yields exactly one
+    /// drawn region per item, reading the ordinals out of the source.
+    func test_aParsedListYieldsOneDrawnMarkerPerItem() {
+        let body = "- alpha\n- beta\n\n1. one\n2. two\n"
+        let model = MarkdownDocumentModel(body: body)
+        let regions = MarkdownBlockBackgrounds.regions(
+            for: model.styleSpans, length: (body as NSString).length,
+            in: body as NSString)
+        let glyphs = regions.compactMap { region -> String? in
+            if case .listMarker(let glyph) = region.kind { return glyph }
+            return nil
+        }
+        XCTAssertEqual(glyphs, ["•", "•", "1.", "2."])
+    }
+
+    /// A caller that passes no text asks only for the block decorations, and
+    /// must not get a marker whose content could only have been guessed.
+    func test_withoutTheDocumentNoListMarkersAreEmitted() {
+        let body = "- alpha\n"
+        let model = MarkdownDocumentModel(body: body)
+        let regions = MarkdownBlockBackgrounds.regions(for: model.styleSpans,
+                                                       length: (body as NSString).length)
+        XCTAssertTrue(regions.allSatisfy {
+            if case .listMarker = $0.kind { return false }
+            return true
+        })
+    }
+
+    /// A marker is two or three characters, so a HALF marker is meaningless:
+    /// one straddling the viewport window is dropped rather than clipped, which
+    /// is the opposite of what a code panel wants.
+    func test_aListMarkerStraddlingTheWindowIsDroppedNotClipped() {
+        let body = "- alpha\n"
+        let model = MarkdownDocumentModel(body: body)
+        let regions = MarkdownBlockBackgrounds.regions(
+            for: model.styleSpans, length: (body as NSString).length,
+            limitedTo: NSRange(location: 0, length: 1), in: body as NSString)
+        XCTAssertTrue(regions.allSatisfy {
+            if case .listMarker = $0.kind { return false }
+            return true
+        })
     }
 
     /// FINDING 5. A fence INSIDE a list item is indented, so its paragraph's

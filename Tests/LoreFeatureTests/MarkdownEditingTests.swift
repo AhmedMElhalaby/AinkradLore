@@ -139,6 +139,83 @@ extension MarkdownEditingTests {
         XCTAssertEqual(r?.selection.location, 2)
     }
 
+    // MARK: - Auto-pairing COMPOSED with `[[` completion
+
+    /// FINDING 1. Both halves passed their own tests and the composition was
+    /// still broken: `[` auto-pairs, so typing `[[` leaves `[[]]` with the caret
+    /// in the middle, and an insertion that appends its own `]]` produced
+    /// `[[Target]]]]`. This test walks the real path — type, type, complete.
+    func test_typingTwoBracketsThenAcceptingACompletionClosesTheLinkExactlyOnce() throws {
+        var text = ""
+        var caret = NSRange(location: 0, length: 0)
+        for _ in 0..<2 {
+            let step = try XCTUnwrap(MarkdownEditing.autoPair(text: text, selection: caret,
+                                                              typing: "["))
+            text = step.text
+            caret = step.selection
+        }
+        XCTAssertEqual(text, "[[]]")
+        XCTAssertEqual(caret.location, 2)
+
+        // The panel opens on an empty prefix — this is what M1 detects.
+        let prefix = try XCTUnwrap(LinkCompletionContext.activePrefix(in: text,
+                                                                      caret: caret.location))
+        XCTAssertEqual(prefix, "")
+
+        let result = MarkdownEditing.linkInsertion(text: text, caret: caret.location,
+                                                   prefixLength: prefix.utf16.count,
+                                                   target: "Target")
+        XCTAssertEqual(result.text, "[[Target]]", "the auto-paired closer must be absorbed")
+        XCTAssertEqual(result.selection.location, 10, "the caret continues in prose")
+    }
+
+    /// The same acceptance where the brackets were NOT auto-paired — a pasted
+    /// or hand-typed `[[Des` with nothing after it. The closer is added, not
+    /// absorbed.
+    func test_acceptingACompletionWithNoExistingCloserStillClosesTheLink() {
+        let result = MarkdownEditing.linkInsertion(text: "see [[Des", caret: 9,
+                                                   prefixLength: 3, target: "Design")
+        XCTAssertEqual(result.text, "see [[Design]]")
+        XCTAssertEqual(result.selection.location, 14)
+    }
+
+    /// Re-completing INSIDE an already-closed link must not leave the old `]]`
+    /// stranded after the new one.
+    func test_recompletingInsideAClosedLinkKeepsOnePairOfBrackets() {
+        let result = MarkdownEditing.linkInsertion(text: "[[Des]] tail", caret: 5,
+                                                   prefixLength: 3, target: "Design")
+        XCTAssertEqual(result.text, "[[Design]] tail")
+    }
+
+    /// Only a real closer is absorbed. A lone `]` after the caret is one
+    /// character of prose and half of it must not be eaten as the second
+    /// bracket of a pair that is not there.
+    func test_absorptionTakesAtMostTheTwoBracketsItNeeds() {
+        let result = MarkdownEditing.linkInsertion(text: "[[Des]]]] more", caret: 5,
+                                                   prefixLength: 3, target: "Design")
+        XCTAssertEqual(result.text, "[[Design]]]] more",
+                       "at most two brackets belong to this link")
+    }
+
+    /// Escaping the panel leaves the auto-paired brackets exactly as typing
+    /// them produced — the user carries on inside a well-formed link.
+    func test_dismissingThePanelLeavesAWellFormedEmptyLink() {
+        // After the FIRST `[`, the text is already `[]` with the caret inside.
+        let opened = MarkdownEditing.autoPair(text: "[]", selection: NSRange(location: 1, length: 0),
+                                              typing: "[")
+        XCTAssertEqual(opened?.text, "[[]]")
+        XCTAssertEqual(opened?.selection.location, 2)
+    }
+
+    /// And a lone `[` in prose still pairs, which is the affordance Task 9 was
+    /// for. Nothing about the fix reaches it.
+    func test_aLoneBracketInProseStillPairs() {
+        let r = MarkdownEditing.autoPair(text: "a b", selection: NSRange(location: 2, length: 0),
+                                         typing: "[")
+        XCTAssertEqual(r?.text, "a []b")
+        XCTAssertEqual(r?.selection.location, 3)
+    }
+
     func test_autoPairIgnoresUnpairedCharacters() {
         XCTAssertNil(MarkdownEditing.autoPair(text: "", selection: NSRange(location: 0, length: 0),
                                               typing: "z"))

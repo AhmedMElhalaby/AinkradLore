@@ -191,7 +191,8 @@ extension MarkdownEditor.Coordinator {
         revealIndex = MarkdownEditorReveal.index(text: tv.string, spans: styleCache.spans)
         revealIndexBuilds += 1
         collapseHiddenMarkers(in: storage, window: window)
-        // Code panels and quote bars are DRAWN, not attributed — see
+        // Code panels, quote bars and collapsed list markers are DRAWN, not
+        // attributed — see
         // `MarkdownBlockBackgrounds`. Refreshed from the same spans in the
         // same pass, so the decoration can never describe older text than
         // the attributes do. Clipped to the SAME window the attributes were,
@@ -201,7 +202,8 @@ extension MarkdownEditor.Coordinator {
             linkView.blockBackgrounds =
                 MarkdownBlockBackgrounds.regions(for: styleCache.spans,
                                                  length: storage.length,
-                                                 limitedTo: window)
+                                                 limitedTo: window,
+                                                 in: storage.string as NSString)
         }
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
@@ -264,6 +266,11 @@ extension MarkdownEditor.Coordinator {
         for block in changed.sorted() {
             restyleBlock(block, revealed: now.contains(block), in: storage)
         }
+        // The DRAWN decoration is a function of reveal state too — a list
+        // marker's substitute is drawn only while the real one is collapsed —
+        // and it lives in the gutter, outside the glyph rects an attribute
+        // change dirties. Once per boundary crossing, not per keypress.
+        tv.needsDisplay = true
     }
 
     /// Re-attributes ONE block and re-hides its markers if it is not revealed.

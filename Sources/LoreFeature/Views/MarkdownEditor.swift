@@ -59,6 +59,14 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.delegate = context.coordinator
         tv.isRichText = false
         tv.allowsUndo = true
+        // Markdown source, not prose. macOS's automatic substitutions turn `"`
+        // into typographic quotes and `--` into an em dash, which corrupts the
+        // very characters the parser reads — and, for `"`, gives the key two
+        // owners, since `MarkdownEditing.pairs` also auto-pairs it. Which one
+        // won depended on a System Settings toggle; now neither does.
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
@@ -383,9 +391,13 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completionPanel.hide(); return
             }
             let insertion = linkTarget(row) + "]]"
-            let caretUTF16 = tv.selectedRange().location
-            let range = NSRange(location: caretUTF16 - prefix.utf16.count,
-                                length: prefix.utf16.count)
+            // The `]]` may ALREADY be there: `[` auto-pairs, so typing `[[`
+            // leaves `[[]]` with the caret in the middle. `linkInsertionRange`
+            // absorbs an existing closer into the replaced range, which is what
+            // stops an accepted completion reading `[[Target]]]]`.
+            let range = MarkdownEditing.linkInsertionRange(
+                text: tv.string, caret: tv.selectedRange().location,
+                prefixLength: prefix.utf16.count)
             // Through `shouldChangeText`/`didChangeText` so the edit is one
             // undo step and the delegate still fires.
             if tv.shouldChangeText(in: range, replacementString: insertion) {

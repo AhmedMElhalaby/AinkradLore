@@ -22,6 +22,15 @@ enum MarkdownBlockBackgrounds {
         case codePanel
         /// A vertical bar in the left margin of a blockquote.
         case quoteBar
+        /// The substitute for a COLLAPSED list marker, drawn in the gutter to
+        /// the left of the item's text: `•` for `-`/`*`/`+`, and the item's own
+        /// ordinal for a numbered list.
+        ///
+        /// Lists were the one construct that got its marker hidden with nothing
+        /// put back, so an unfocused ordered list lost its numbering entirely.
+        /// The associated value is what to DRAW, never what the document says —
+        /// the source text is untouched, as everywhere else here.
+        case listMarker(String)
     }
 
     /// A stretch of text to decorate. UTF-16, into the view's own string.
@@ -37,10 +46,14 @@ enum MarkdownBlockBackgrounds {
     struct Palette: Equatable {
         let codePanel: NSColor
         let quoteBar: NSColor
+        /// A list marker is quiet foreground too — it is punctuation, not a
+        /// control, so it must not read as clickable.
+        let listMarker: NSColor
 
         init(tokens: HostThemeTokens) {
             codePanel = NSColor(tokens.surfaceElevated).withAlphaComponent(0.55)
             quoteBar = NSColor(tokens.foreground).withAlphaComponent(0.30)
+            listMarker = NSColor(tokens.foreground).withAlphaComponent(0.55)
         }
     }
 
@@ -57,23 +70,57 @@ enum MarkdownBlockBackgrounds {
     ///   bounding rect of a region far outside the viewport is exactly the work
     ///   that makes a long note stutter. `nil` means "the whole document was
     ///   styled", which is the ordinary case.
+    /// - Parameter text: the document, needed only to read what a list marker
+    ///   actually SAYS — `1.` and `7.` must not both draw as `1.`. `nil` (the
+    ///   default, used by callers that only care about the block decorations)
+    ///   emits no list markers rather than guessing at one.
     static func regions(for spans: [StyleSpan], length: Int,
-                        limitedTo window: NSRange? = nil) -> [Region] {
+                        limitedTo window: NSRange? = nil,
+                        in text: NSString? = nil) -> [Region] {
         spans.compactMap { span in
+            var r = NSRange(location: span.range.lowerBound, length: span.range.count)
+            guard r.length > 0, NSMaxRange(r) <= length else { return nil }
+
             let kind: Kind
             switch span.kind {
             case .codeBlock: kind = .codePanel
             case .blockQuote: kind = .quoteBar
+            case .marker(of: .listBullet):
+                // NOT clipped to the window: a marker is two or three
+                // characters, so intersecting it would draw half a `10.`. It is
+                // either wholly inside the styled window or it is not drawn.
+                guard let text, NSMaxRange(r) <= text.length,
+                      let glyph = listMarkerGlyph(for: text.substring(with: r))
+                else { return nil }
+                if let window,
+                   NSIntersectionRange(r, window).length != r.length { return nil }
+                return Region(kind: .listMarker(glyph), range: r)
             default: return nil
             }
-            var r = NSRange(location: span.range.lowerBound, length: span.range.count)
-            guard r.length > 0, NSMaxRange(r) <= length else { return nil }
             if let window {
                 r = NSIntersectionRange(r, window)
                 guard r.length > 0 else { return nil }
             }
             return Region(kind: kind, range: r)
         }
+    }
+
+    /// What a list marker's SOURCE draws as once collapsed.
+    ///
+    /// `- `, `* `, `+ ` become a real bullet; an ordinal keeps its own number
+    /// and is normalised to a trailing `.` so a `1)` list and a `1.` list read
+    /// alike. Anything else returns nil — the same "emit nothing rather than a
+    /// guess" rule `MarkdownMarkers` follows, since a wrong glyph in the gutter
+    /// is worse than none.
+    static func listMarkerGlyph(for source: String) -> String? {
+        let body = source.trimmingCharacters(in: .whitespaces)
+        guard !body.isEmpty else { return nil }
+        if body == "-" || body == "*" || body == "+" { return "•" }
+        let digits = body.dropLast()
+        guard let last = body.last, last == "." || last == ")",
+              !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber })
+        else { return nil }
+        return digits + "."
     }
 
     /// The left edge of the text column, in the text view's own coordinates.
@@ -108,6 +155,19 @@ enum MarkdownBlockBackgrounds {
     static let cornerRadius: CGFloat = 5
     /// Width of a blockquote's bar.
     static let barWidth: CGFloat = 3
+    /// The gap between a drawn list marker and the item's text.
+    static let listMarkerGap: CGFloat = 5
+    /// Below this rendered width a marker's source is COLLAPSED and its
+    /// substitute must be drawn; at or above it the real characters are on
+    /// screen — the caret is in the block — and drawing would double them.
+    ///
+    /// Geometry rather than bookkeeping, deliberately: reveal state changes on
+    /// a caret move, which does not rebuild the regions, so a cached flag would
+    /// go stale exactly when the user looked at it. The collapsed font is
+    /// 0.01pt (see `MarkdownStyleRenderer.collapse`) and the revealed one is
+    /// 14pt monospaced, so any threshold between them separates the two cases
+    /// by three orders of magnitude.
+    static let collapsedMarkerWidth: CGFloat = 2
 
     /// Paints `regions` into the current context, behind `textView`'s text.
     ///
@@ -124,6 +184,12 @@ enum MarkdownBlockBackgrounds {
         let x = columnX(in: textView)
         let width = columnWidth(in: textView)
         for region in regions {
+            if case .listMarker(let glyph) = region.kind {
+                drawListMarker(glyph, at: region.range, columnX: x,
+                               palette: palette, in: textView,
+                               origin: origin, dirtyRect: dirtyRect)
+                continue
+            }
             var rect = boundingRect(of: region.range, in: textView)
             guard !rect.isNull, !rect.isEmpty else { continue }
             rect = rect.offsetBy(dx: origin.x, dy: origin.y)
@@ -146,8 +212,50 @@ enum MarkdownBlockBackgrounds {
                 palette.quoteBar.setFill()
                 NSBezierPath(roundedRect: bar, xRadius: barWidth / 2,
                              yRadius: barWidth / 2).fill()
+            case .listMarker:
+                break   // handled above, before the rect is taken
             }
         }
+    }
+
+    /// Draws a collapsed list marker's substitute in the gutter.
+    ///
+    /// Two rects, for two different questions. The MARKER's own rect answers
+    /// "is it collapsed?" and gives the x the item's text starts at; the rect
+    /// of the marker plus the first character of the item answers "where is
+    /// this line, and how tall?", which a 0.01pt run cannot be trusted to.
+    @MainActor
+    private static func drawListMarker(_ glyph: String, at range: NSRange,
+                                       columnX x: CGFloat, palette: Palette,
+                                       in textView: NSTextView, origin: NSPoint,
+                                       dirtyRect: NSRect) {
+        let markerRect = boundingRect(of: range, in: textView)
+        guard !markerRect.isNull else { return }
+        guard markerRect.width < collapsedMarkerWidth else { return }
+
+        let withContent = NSRange(location: range.location,
+                                  length: min(range.length + 1,
+                                              (textView.string as NSString).length
+                                                - range.location))
+        var line = boundingRect(of: withContent, in: textView)
+        if line.isNull || line.height <= 0 { line = markerRect }
+        guard line.height > 0 else { return }
+        line = line.offsetBy(dx: origin.x, dy: origin.y)
+        let textStart = markerRect.minX + origin.x
+
+        let font = MarkdownStyleRenderer.baseFont
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: palette.listMarker
+        ]
+        let size = (glyph as NSString).size(withAttributes: attributes)
+        // Right-aligned into the gutter, but never pushed out of the column: a
+        // wide ordinal (`10.`) on a shallow indent runs out of gutter, and
+        // clamping keeps it inside the measure instead of under the margin.
+        let drawX = max(x, textStart - size.width - listMarkerGap)
+        let rect = NSRect(x: drawX, y: line.midY - size.height / 2,
+                          width: size.width, height: size.height)
+        guard rect.intersects(dirtyRect) else { return }
+        (glyph as NSString).draw(in: rect, withAttributes: attributes)
     }
 
     /// The union of the line rects `range` occupies, in TEXT CONTAINER
