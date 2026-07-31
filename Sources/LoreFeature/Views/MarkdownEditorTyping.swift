@@ -14,6 +14,12 @@ enum MarkdownEditorTyping {
     /// view's own undo registration, delegate notifications and autosave
     /// bookkeeping all run — bypassing it with a direct `textStorage` mutation
     /// is what produces edits the autosave never learns about.
+    ///
+    /// THAT CALL is what makes the affordance one undo step: it registers the
+    /// single reverse action, before the grouping below opens, and the mutation
+    /// underneath is one `replaceCharacters`. The explicit grouping is belt and
+    /// braces for anything that might later register a second action inside it;
+    /// it is not what delivers the guarantee.
     @MainActor
     @discardableResult
     static func apply(_ result: EditResult, to tv: NSTextView) -> Bool {

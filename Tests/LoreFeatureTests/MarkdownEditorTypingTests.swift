@@ -54,12 +54,17 @@ final class MarkdownEditorTypingTests: XCTestCase {
     /// Outdenting at column zero returns the text UNCHANGED. Applying that must
     /// not push a do-nothing entry onto the undo stack — the next Cmd-Z would
     /// then appear to do nothing at all.
-    func test_applyingAnUnchangedResultRegistersNoUndoStep() {
+    func test_applyingAnUnchangedResultRegistersNoUndoStep() throws {
         let tv = textView("- first", caret: 7)
         tv.undoManager?.removeAllActions()
-        let unchanged = EditResult(text: tv.string, selection: NSRange(location: 2, length: 0))
+        // Driven through the REAL transform, so this also pins that outdenting
+        // at column zero still returns the text unchanged rather than nil.
+        let unchanged = try XCTUnwrap(
+            MarkdownEditing.indent(text: tv.string, selection: tv.selectedRange(), by: -1))
+        XCTAssertEqual(unchanged.text, tv.string)
         XCTAssertTrue(MarkdownEditorTyping.apply(unchanged, to: tv))
-        XCTAssertEqual(tv.selectedRange().location, 2)
+        XCTAssertEqual(tv.string, "- first")
+        XCTAssertEqual(tv.selectedRange(), unchanged.selection)
         XCTAssertFalse(tv.undoManager?.canUndo ?? false)
     }
 
@@ -137,6 +142,44 @@ final class MarkdownEditorTypingTests: XCTestCase {
         XCTAssertEqual(tv.string, "[]")
         tv.insertText("z", replacementRange: tv.selectedRange())
         XCTAssertEqual(tv.string, "[z]", "ordinary characters still type normally")
+    }
+
+    /// An IME committing a single pair character mid-composition must not be
+    /// auto-paired: `typed` rebuilds the string around the SELECTION and would
+    /// replace the marked range without unmarking it.
+    func test_typedTextIsNotAutoPairedWhileComposing() {
+        let tv = LinkTextView(frame: .init(x: 0, y: 0, width: 200, height: 200))
+        tv.isRichText = false
+        tv.string = ""
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.setMarkedText("n", selectedRange: NSRange(location: 1, length: 0),
+                         replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(tv.hasMarkedText())
+        tv.insertText("[", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(tv.string.contains("[]"), "composition was auto-paired: \(tv.string)")
+    }
+
+    /// Autocorrect, dictation and text substitution target a range that is not
+    /// the selection. Pairing there would insert the pair in the wrong place.
+    func test_anExplicitReplacementRangeIsLeftToAppKit() {
+        let tv = LinkTextView(frame: .init(x: 0, y: 0, width: 200, height: 200))
+        tv.isRichText = false
+        tv.string = "hello world"
+        tv.setSelectedRange(NSRange(location: 11, length: 0))
+        tv.insertText("\"", replacementRange: NSRange(location: 0, length: 5))
+        XCTAssertEqual(tv.string, "\" world", "the replacement range must be honoured, unpaired")
+    }
+
+    /// The redundant spelling of ordinary typing — range EQUAL to the selection
+    /// — still pairs, or auto-pairing would silently stop working wherever
+    /// AppKit chooses to name the range.
+    func test_aReplacementRangeEqualToTheSelectionStillPairs() {
+        let tv = LinkTextView(frame: .init(x: 0, y: 0, width: 200, height: 200))
+        tv.isRichText = false
+        tv.string = ""
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        tv.insertText("[", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(tv.string, "[]")
     }
 
     /// Enter continues a list only when the `[[` completion panel is closed —

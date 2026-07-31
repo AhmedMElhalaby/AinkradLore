@@ -110,10 +110,29 @@ final class LinkTextView: NSTextView {
     /// ordinary characters never reach `doCommandBy`. Multi-character input —
     /// a paste, or an IME committing a phrase — is filtered out inside
     /// `MarkdownEditorTyping.typed`, so composition is untouched.
+    ///
+    /// Two inputs must never be auto-paired, because
+    /// `MarkdownEditorTyping.typed` rebuilds the whole string around
+    /// `selectedRange()` and knows nothing about either:
+    ///
+    /// - MARKED TEXT. An IME committing a single pair character (`[`, `(`, a
+    ///   backtick, a quote) mid-composition would have its in-progress marked
+    ///   range replaced with no `unmarkText`, leaving the input session
+    ///   describing text that no longer exists.
+    /// - An explicit `replacementRange`. Autocorrect, dictation and text
+    ///   substitution target a range that is NOT the selection, so pairing
+    ///   there inserts the pair in the wrong place and drops the correction.
+    ///
+    /// A `replacementRange` EQUAL to the current selection is ordinary typing
+    /// described redundantly, and is allowed — refusing it would disable
+    /// auto-pairing wherever AppKit chooses to spell the range out.
     override func insertText(_ string: Any, replacementRange: NSRange) {
-        if let typed = string as? String, MarkdownEditorTyping.typed(typed, in: self) { return }
-        if let typed = (string as? NSAttributedString)?.string,
-           MarkdownEditorTyping.typed(typed, in: self) { return }
+        let targetsSelection = replacementRange.location == NSNotFound
+            || replacementRange == selectedRange()
+        if targetsSelection, !hasMarkedText() {
+            let typed = (string as? String) ?? (string as? NSAttributedString)?.string
+            if let typed, MarkdownEditorTyping.typed(typed, in: self) { return }
+        }
         super.insertText(string, replacementRange: replacementRange)
     }
 
