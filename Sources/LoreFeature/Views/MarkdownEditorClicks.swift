@@ -103,6 +103,34 @@ final class LinkTextView: NSTextView {
            onPlainClick?(characterIndexForInsertion(at: point)) == true { return }
         super.mouseDown(with: event)
     }
+
+    // MARK: - Typing affordances
+
+    /// Auto-pairing. `insertText` rather than a `doCommandBy` arm because
+    /// ordinary characters never reach `doCommandBy`. Multi-character input —
+    /// a paste, or an IME committing a phrase — is filtered out inside
+    /// `MarkdownEditorTyping.typed`, so composition is untouched.
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if let typed = string as? String, MarkdownEditorTyping.typed(typed, in: self) { return }
+        if let typed = (string as? NSAttributedString)?.string,
+           MarkdownEditorTyping.typed(typed, in: self) { return }
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    /// Cmd-B / Cmd-I. Handled here rather than through `toggleBoldface(_:)`
+    /// because those selectors arrive only from a Font menu, which a plugin's
+    /// host window need not have.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command, window?.firstResponder === self {
+            switch event.charactersIgnoringModifiers {
+            case "b": MarkdownEditorTyping.toggleWrap(in: self, with: "**"); return true
+            case "i": MarkdownEditorTyping.toggleWrap(in: self, with: "*"); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }
 
 extension MarkdownEditor.Coordinator {

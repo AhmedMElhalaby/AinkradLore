@@ -311,7 +311,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         // MARK: - Keys the popup owns, and only while it is open
 
         public func textView(_ tv: NSTextView, doCommandBy selector: Selector) -> Bool {
-            guard completionPanel.isVisible else { return false }
+            // The panel owns Enter, Tab, the arrows and Escape WHILE IT IS
+            // OPEN. Only once it is closed do Enter and Tab mean "continue this
+            // list" and "indent it" — see `MarkdownEditorTyping`.
+            guard completionPanel.isVisible else {
+                return MarkdownEditorTyping.handle(selector, in: tv)
+            }
             switch selector {
             case #selector(NSResponder.moveUp(_:)):
                 completionPanel.moveSelection(by: -1); return true
