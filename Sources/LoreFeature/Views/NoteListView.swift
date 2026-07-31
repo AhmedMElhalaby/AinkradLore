@@ -8,8 +8,13 @@ struct NoteListView: View {
     let theme: HostTheme
     let onSelect: (IndexRow) -> Void
     let onNew: () -> Void
-
-    @State private var activeTag: String?
+    /// Rename / move / trash, shared with `FolderTreeView`. Owns the
+    /// confirmation dialog, the preview sheet and — new in Task 10 — the
+    /// VISIBLE refusal when a delete is declined.
+    let ops: SidebarOperations
+    /// Lifted to `LoreRootView` so it can decide whether an active tag filter
+    /// should force the flat list even while the sidebar is in tree mode.
+    @Binding var activeTag: String?
 
     private var visible: [IndexRow] {
         var base = query.isEmpty ? store.rows : store.search(query)
@@ -18,13 +23,14 @@ struct NoteListView: View {
     }
 
     var body: some View {
+        // The search field and the "+" button used to live HERE, which meant
+        // neither existed in tree mode — this view is not even mounted then.
+        // They are now in `LoreRootView`'s sidebar header, above the mode
+        // picker, so both are reachable in both modes. Tag chips stay here: they
+        // are a flat-list filter by nature (a tag cuts across folders, so
+        // filtering the tree by one leaves a scaffold of empty branches), and
+        // `LoreRootView` already forces the flat list whenever a tag is active.
         VStack(spacing: AinkradSpacing.sm) {
-            HStack(spacing: AinkradSpacing.sm) {
-                AinkradSearchField(text: $query, placeholder: "Search notes")
-                AinkradIconButton(systemName: "plus", action: onNew)
-                    .keyboardShortcut("n", modifiers: .command)
-            }
-
             if !store.allTags.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AinkradSpacing.xs) {
@@ -61,6 +67,7 @@ struct NoteListView: View {
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
+                            .contextMenu { LoreRowMenu(row: row, ops: ops) }
                         }
                     }
                 }

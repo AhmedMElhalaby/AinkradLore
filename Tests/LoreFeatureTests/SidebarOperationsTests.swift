@@ -1,0 +1,204 @@
+import XCTest
+import SwiftUI
+@testable import LoreFeature
+import AinkradAppKit
+
+/// The sidebar's rename / move / trash flows, tested where the behaviour lives
+/// rather than through a view host. Every case here is a review finding from an
+/// earlier task that a SwiftUI-only test could not have caught.
+@MainActor
+final class SidebarOperationsTests: XCTestCase {
+
+    private func vault(_ label: String = "ops") throws -> (URL, LoreStore) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-\(label)-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let s = LoreStore(documents: FakeDocs(),
+                          indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try s.setVaultRootForTesting(root)
+        return (root, s)
+    }
+
+    private func row(_ s: LoreStore, _ name: String) throws -> IndexRow {
+        try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == name })
+    }
+
+    // MARK: - The preview is the whole safety net
+
+    /// M1 HAS NO UNDO, so a plan the store already refused must never be
+    /// reachable through a confirm button. Asserted on the value the button is
+    /// built from, and on `confirm()` refusing to act.
+    func test_refusedPlanCannotBeConfirmed() async throws {
+        let (root, s) = try vault()
+        try "---\nid: a\ntitle: A\n---\nx"
+            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+
+        ops.beginRename(try row(s, "a.md"))
+        ops.nameText = "../escaped"
+        ops.commitName()
+
+        let preview = try XCTUnwrap(ops.preview)
+        XCTAssertNotNil(preview.refusal)
+        XCTAssertFalse(preview.canConfirm)
+        ops.confirm()
+        XCTAssertNil(ops.report, "a refused plan must not be applicable")
+        XCTAssertTrue(FileManager.default
+            .fileExists(atPath: root.appendingPathComponent("a.md").path))
+    }
+
+    func test_validRenameProducesAConfirmablePreviewNamingTheAffectedFiles() async throws {
+        let (root, s) = try vault()
+        try "---\nid: a\ntitle: A\n---\nsee [[Design]]"
+            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try "---\nid: d\ntitle: Design\n---\nx"
+            .write(to: root.appendingPathComponent("Design.md"), atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+
+        ops.beginRename(try row(s, "Design.md"))
+        XCTAssertEqual(ops.nameText, "Design", "the prompt starts from the current name")
+        ops.nameText = "Architecture"
+        ops.commitName()
+
+        let preview = try XCTUnwrap(ops.preview)
+        XCTAssertTrue(preview.canConfirm)
+        XCTAssertEqual(preview.editCount, 1)
+        XCTAssertEqual(preview.files.map(\.lastPathComponent), ["a.md"])
+        XCTAssertTrue(preview.summary.contains("1 link"), preview.summary)
+
+        ops.confirm()
+        let report = try XCTUnwrap(ops.report)
+        XCTAssertTrue(report.isCompleteSuccess, "\(report.failed) \(report.skipped)")
+        XCTAssertEqual(report.rewritten.map(\.lastPathComponent), ["a.md"])
+    }
+
+    /// A move out of the vault is refused BEFORE a plan exists: the store would
+    /// move the file, but its inbound links have no vault-relative path to be
+    /// rewritten to, so they would all break.
+    func test_moveOutsideTheVaultIsRefusedWithAVisibleMessage() async throws {
+        let (root, s) = try vault()
+        try "---\nid: a\ntitle: A\n---\nx"
+            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+
+        ops.move(try row(s, "a.md"), toFolder: FileManager.default.temporaryDirectory)
+
+        XCTAssertNil(ops.preview)
+        XCTAssertEqual(ops.activeSheet, .message)
+        XCTAssertTrue(try XCTUnwrap(ops.message).contains("outside the vault"),
+                      ops.message ?? "")
+    }
+
+    // MARK: - A refused trash must be VISIBLE
+
+    /// INHERITED REQUIREMENT. This was `try? store.trash(row)`: `trash` refuses
+    /// when a tab holds unsaved edits it could not flush, so the user pressed
+    /// Delete, the file stayed, and NOTHING said why.
+    func test_refusedTrashSurfacesTheRefusalInsteadOfDoingNothingSilently() async throws {
+        let (root, s) = try vault("ops-trash")
+        let url = root.appendingPathComponent("gone.md")
+        try "---\nid: g\ntitle: Gone\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let target = try row(s, "gone.md")
+        s.open(target)
+        let session = try XCTUnwrap(s.selectedTab)
+        let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
+        engine.note.body = "unsaved edit"
+        session.markChanged()
+        session.cancelPendingSave()
+
+        // Drive the session into conflict, which is what makes the flush refuse.
+        try await Task.sleep(for: .milliseconds(1100))
+        try "---\nid: g\ntitle: Gone\n---\nsomebody else"
+            .write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try session.saveNow())
+
+        let ops = SidebarOperations(store: s)
+        ops.requestTrash(target)
+        ops.confirmTrash()
+
+        let message = try XCTUnwrap(ops.message, "the refusal was swallowed")
+        XCTAssertTrue(message.contains("was not deleted"), message)
+        XCTAssertTrue(message.contains("unsaved edits"), message)
+        // ...and it tells the user how to clear it.
+        XCTAssertTrue(message.contains("Resolve"), message)
+        XCTAssertEqual(ops.activeSheet, .message)
+        // The file and the unsaved text are both untouched.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertTrue(session.isDirty)
+    }
+
+    func test_successfulTrashSurfacesNothingAndTheInboundCountIsStated() async throws {
+        let (root, s) = try vault("ops-trash-ok")
+        try "---\nid: a\ntitle: A\n---\nsee [[Gone]]"
+            .write(to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        let gone = root.appendingPathComponent("Gone.md")
+        try "---\nid: g\ntitle: Gone\n---\nx".write(to: gone, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+        let target = try row(s, "Gone.md")
+
+        // The warning states the count, and promises no rewrite.
+        let warning = ops.trashMessage(for: target)
+        XCTAssertTrue(warning.contains("1 note link"), warning)
+        XCTAssertTrue(warning.contains("stop resolving"), warning)
+
+        ops.requestTrash(target)
+        ops.confirmTrash()
+        XCTAssertNil(ops.message)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gone.path))
+    }
+
+    /// `LoreError.trashFailed` gets a sentence too, and that sentence promises
+    /// the file was NOT permanently deleted — the fallback `trash` refuses to do.
+    func test_trashFailedIsDescribedAndPromisesNoPermanentDelete() {
+        let url = URL(fileURLWithPath: "/v/x.md")
+        let target = IndexRow(path: url, id: "x", title: "X", tags: [], aliases: [],
+                              updated: Date(), type: MarkdownEngine.identifier, properties: [])
+        let text = SidebarOperations.describe(.trashFailed(url, "No .Trashes on the volume."),
+                                              row: target)
+        XCTAssertTrue(text.contains("No .Trashes"), text)
+        XCTAssertTrue(text.contains("Nothing was deleted"), text)
+    }
+
+    // MARK: - Smoke
+
+    func test_sheetsBuildInEveryState() throws {
+        let theme = HostTheme(TestTokens.make())
+        let plan = RenamePlan(source: URL(fileURLWithPath: "/v/Design.md"),
+                              destination: URL(fileURLWithPath: "/v/Architecture.md"),
+                              edits: [LinkEdit(file: URL(fileURLWithPath: "/v/A.md"),
+                                               oldTarget: "Design", newTarget: "Architecture")])
+        let preview = RenamePreview(document: plan, isMove: false)
+        _ = RenamePreviewSheet(preview: preview, report: nil, theme: theme,
+                               onConfirm: {}, onCancel: {})
+        _ = RenamePreviewSheet(
+            preview: preview,
+            report: RenameReport(rewritten: [URL(fileURLWithPath: "/v/A.md")],
+                                 skipped: [], failed: [], movedTo: plan.destination),
+            theme: theme, onConfirm: {}, onCancel: {})
+        _ = RenamePreviewSheet(
+            preview: RenamePreview(document: RenamePlan(source: plan.source,
+                                                        destination: plan.source, edits: [],
+                                                        refusal: "Not a name."),
+                                   isMove: false),
+            report: nil, theme: theme, onConfirm: {}, onCancel: {})
+        _ = NameSheet(title: "Rename", text: .constant("x"), theme: theme,
+                      onConfirm: {}, onCancel: {})
+        _ = MessageSheet(text: "nope", theme: theme, onDismiss: {})
+    }
+
+    /// A folder with no indexed documents still MOVES, so its preview must not
+    /// claim there is nothing to do.
+    func test_folderPreviewWithNoIndexedDocumentsStillDescribesTheMove() {
+        let plan = FolderRenamePlan(source: URL(fileURLWithPath: "/v/Projects"),
+                                    destination: URL(fileURLWithPath: "/v/Work"))
+        let preview = RenamePreview(folder: plan)
+        XCTAssertTrue(preview.canConfirm)
+        XCTAssertTrue(preview.summary.contains("will still be renamed"), preview.summary)
+        XCTAssertTrue(preview.summary.contains("does not index"), preview.summary)
+    }
+}

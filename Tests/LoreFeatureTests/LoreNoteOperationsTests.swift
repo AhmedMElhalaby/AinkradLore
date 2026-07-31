@@ -12,8 +12,14 @@ private final class MemoryDocs: PluginDocumentStore {
 /// A temp vault. **Never the user's real vault.**
 @MainActor
 private func makeVault() async throws -> (URL, LoreNoteOperations, LoreStore) {
+    // Nested one level deeper than the shared temp directory ON PURPOSE.
+    // `createRejectsTitlesThatEscapeTheVault` snapshots the vault's PARENT
+    // before and after, and a parent shared with every other suite's temp
+    // directories puts their files in that diff — turning the one test that
+    // proves a title cannot write outside the vault into a flaky one.
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("lore-ops-\(UUID())", isDirectory: true)
+        .appendingPathComponent("vault", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let store = LoreStore(documents: MemoryDocs(),
                           indexPath: root.appendingPathComponent(".index.sqlite"))
@@ -108,12 +114,80 @@ struct LoreNoteOperationsTests {
         #expect(outcome.text.contains("Browseable"))
     }
 
+    /// `IndexRow.type` now spans markdown notes AND plaintext/source files
+    /// (Task 5's generalized index). `search_notes` is documented as
+    /// searching notes; silently surfacing a `.txt` match would be the tool
+    /// lying about its own contract.
+    @Test func searchOnlyReturnsMarkdownNotes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "A")
+        note.body = "needle"
+        try store.save(note)
+        try "needle in plain text".write(
+            to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "search", "query": "needle"])
+        #expect(outcome.isError == false)
+        #expect(outcome.text.contains(note.id))
+        #expect(outcome.text.contains("b.txt") == false,
+                "note tools must not claim plain-text files are notes")
+    }
+
     @Test func searchReportsNoMatchesWithoutErroring() async throws {
         let (root, operations, _) = try await makeVault()
         defer { try? FileManager.default.removeItem(at: root) }
         let outcome = await run(operations, ["operation": "search", "query": "nothingatall"])
         #expect(outcome.isError == false)
         #expect(outcome.text.contains("No notes match"))
+    }
+
+    /// `resolve` backs `read_note`/`save_note`/`delete_note`; it must not
+    /// resolve a non-markdown row even when the caller's identifier happens to
+    /// match one exactly (its path, here).
+    @Test func readCannotResolveANonMarkdownFile() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let textURL = root.appendingPathComponent("notes.txt")
+        try "plain text, not a note".write(to: textURL, atomically: true, encoding: .utf8)
+        try store.rebuild()
+
+        let outcome = await run(operations, ["operation": "read", "note": textURL.path])
+        #expect(outcome.isError)
+        #expect(outcome.text.contains("search_notes"))
+    }
+
+    /// Unclaimed files (`.pdf`, `.xlsx`) now appear in `store.rows` so the
+    /// sidebar does not lie about the vault. The note tools must be unmoved by
+    /// that: they are type-filtered to markdown and stay so.
+    @Test func noteToolsIgnoreUnclaimedFileTypes() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var note = try store.create(title: "Real Note")
+        note.body = "zorkmid body"
+        try store.save(note)
+        try "%PDF-1.4 zorkmid".write(to: root.appendingPathComponent("paper.pdf"),
+                                     atomically: true, encoding: .utf8)
+        try "sheet zorkmid".write(to: root.appendingPathComponent("book.xlsx"),
+                                  atomically: true, encoding: .utf8)
+        try store.rebuild()
+        #expect(store.rows.count == 3, "precondition: unclaimed rows are indexed")
+
+        let listed = await run(operations, ["operation": "search"])
+        #expect(listed.isError == false)
+        #expect(listed.text.contains("Real Note"))
+        #expect(listed.text.contains("paper.pdf") == false)
+        #expect(listed.text.contains("book.xlsx") == false)
+
+        let searched = await run(operations, ["operation": "search", "query": "zorkmid"])
+        #expect(searched.text.contains("paper.pdf") == false)
+        #expect(searched.text.contains("book.xlsx") == false)
+
+        let resolved = await run(operations,
+                                 ["operation": "read",
+                                  "note": root.appendingPathComponent("book.xlsx").path])
+        #expect(resolved.isError)
     }
 
     @Test func readReturnsTitleTagsAndBody() async throws {
@@ -210,7 +284,7 @@ struct LoreNoteOperationsTests {
         let after = Set((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])
         #expect(after.subtracting(before).isEmpty, "a file was written outside the vault")
         // And every note file that does exist is inside the vault root.
-        #expect(LoreStore.scanVault(at: root).isEmpty)
+        #expect(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
     @Test func createStillAcceptsAnOrdinaryTitle() async throws {
@@ -284,6 +358,61 @@ struct LoreNoteOperationsTests {
         #expect(outcome.isError == false)
         #expect(FileManager.default.fileExists(atPath: note.path.path) == false)
         #expect(store.rows.isEmpty)
+    }
+
+    /// `delete_note` used to call `LoreStore.delete`, which closed no tab and
+    /// cancelled no pending save: an MCP delete could permanently unlink a file
+    /// AND have the open tab's debounced autosave recreate it 500ms later. It
+    /// goes through `trash` now, which owns both.
+    @Test func deleteClosesAnOpenTabAndCancelsItsPendingSave() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let note = try store.create(title: "Doomed")
+        try store.rebuild()
+        let row = try #require(store.rows.first { $0.id == note.id })
+        store.open(row)
+        let session = try #require(store.selectedTab)
+        let engine = try #require(session.engine as? MarkdownEngine)
+        // An armed autosave: exactly what used to resurrect the file.
+        engine.note.body = "would resurrect"
+        session.markChanged()
+
+        let outcome = await run(operations, ["operation": "delete", "note": note.id])
+        #expect(outcome.isError == false)
+        #expect(store.tabs.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: note.path.path) == false)
+
+        // Well past the 500ms autosave debounce.
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(FileManager.default.fileExists(atPath: note.path.path) == false,
+                "a pending autosave resurrected a trashed note")
+    }
+
+    /// The refusal reaches the agent through the existing error-reporting shape
+    /// rather than as a thrown surprise.
+    @Test func deleteReportsARefusalWhenATabHoldsUnsavedEdits() async throws {
+        let (root, operations, store) = try await makeVault()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let note = try store.create(title: "Contested")
+        try store.rebuild()
+        let row = try #require(store.rows.first { $0.id == note.id })
+        store.open(row)
+        let session = try #require(store.selectedTab)
+        let engine = try #require(session.engine as? MarkdownEngine)
+        engine.note.body = "unsaved edit"
+        session.markChanged()
+        session.cancelPendingSave()
+
+        try await Task.sleep(for: .milliseconds(1100))
+        try "---\nid: \(note.id)\ntitle: Contested\n---\nsomebody else"
+            .write(to: note.path, atomically: true, encoding: .utf8)
+        #expect(throws: (any Error).self) { try session.saveNow() }
+
+        let outcome = await run(operations, ["operation": "delete", "note": note.id])
+        #expect(outcome.isError)
+        #expect(outcome.text.contains("unsaved edits"))
+        #expect(FileManager.default.fileExists(atPath: note.path.path))
+        #expect(store.tabs.count == 1)
     }
 
     // MARK: - identifier handling
