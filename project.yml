@@ -25,7 +25,7 @@ packages:
     # `make test` cannot detect this. `make devhost` plus the lsof check can:
     #   lsof -p <pid> | grep LorePlugin   # a `txt` row means it really dlopen'd
     # Host pin lives in Ainkrad's project.yml under the same package name.
-    revision: e4882adb97af2892b55870b55c397e9ec9453def
+    revision: 69c7f5f435d2de98bd2906236f356b131df7b999
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
