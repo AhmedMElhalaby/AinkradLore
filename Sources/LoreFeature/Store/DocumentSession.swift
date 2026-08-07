@@ -78,9 +78,7 @@ public final class DocumentSession: Identifiable {
         self.coordinator = coordinator
         self.baseline = Self.mtime(of: url) ?? .distantPast
         self.cachedTitle = engine.indexTitle
-        // Same honest-but-temporary type switch as `copyState(from:)`; M3/M4
-        // replace both with protocol requirements.
-        self.isReadOnly = (engine as? PlainTextEngine)?.isLossilyDecoded == true
+        self.isReadOnly = !engine.isEditable
     }
 
     public static func open(url: URL, coordinator: VaultIndexCoordinator) throws -> DocumentSession {
@@ -163,6 +161,7 @@ public final class DocumentSession: Identifiable {
         try copyState(from: fresh)
         baseline = Self.mtime(of: url) ?? .distantPast
         cachedTitle = engine.indexTitle
+        isReadOnly = !engine.isEditable
         conflict = false
         isDirty = false
         lastSaveError = nil
@@ -251,22 +250,21 @@ public final class DocumentSession: Identifiable {
         try? coordinator.indexDocument(engine, at: url)
     }
 
-    /// Replaces this session's engine contents with `fresh`'s. Implemented per
-    /// engine because only the engine knows its own document model.
+    /// Replaces this session's engine contents with `fresh`'s, via the engine's
+    /// own `replaceContents(with:)`.
     ///
-    /// This switch is the one place M0 leaks engine knowledge into the shell.
-    /// M3/M4 must replace it with a `replaceContents(with:)` requirement on
-    /// `DocumentEngine`; with two engines that requirement is still
-    /// speculative, and the switch is honest about being temporary.
+    /// Passing `engine` (an `any DocumentEngine`) as the argument to a generic
+    /// parameter constrained to `DocumentEngine` implicitly opens the
+    /// existential (SE-0352), recovering the concrete type `E`. The inner
+    /// closure then checks that `fresh` is that SAME concrete type. A mismatch
+    /// means the file changed type under us (a `.md` replaced by a `.pdf` at
+    /// the same path) and is an `unsupported` error, exactly as before.
     private func copyState(from fresh: any DocumentEngine) throws {
-        switch (engine, fresh) {
-        case let (mine as MarkdownEngine, theirs as MarkdownEngine):
-            mine.note = theirs.note
-        case let (mine as PlainTextEngine, theirs as PlainTextEngine):
-            mine.text = theirs.text
-        default:
-            throw EngineError.unsupported(url)
+        func adopt<E: DocumentEngine>(_ mine: E) throws {
+            guard let theirs = fresh as? E else { throw EngineError.unsupported(url) }
+            mine.replaceContents(with: theirs)
         }
+        try adopt(engine)
     }
 
     private static func mtime(of url: URL) -> Date? {

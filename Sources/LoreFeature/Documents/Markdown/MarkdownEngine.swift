@@ -88,6 +88,10 @@ public final class MarkdownEngine: DocumentEngine {
                             id: note.id)
     }
 
+    public func replaceContents(with other: MarkdownEngine) {
+        note = other.note
+    }
+
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
         AnyView(MarkdownDocumentEditor(engine: self, ctx: ctx))
     }

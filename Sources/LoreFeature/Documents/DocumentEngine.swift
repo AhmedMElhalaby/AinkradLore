@@ -32,9 +32,25 @@ public protocol DocumentEngine: AnyObject {
     /// overrides and the parse disappears.
     var indexTitle: String { get }
 
+    /// False for read-only citizens (PDF, rich text, attachments). The session
+    /// gates autosave on this: a read-only document is never marked dirty, so a
+    /// keystroke cannot become one failed write per typing pause.
+    ///
+    /// Defaulted to true so the two editable engines are untouched.
+    var isEditable: Bool { get }
+
+    /// Adopt `other`'s contents in place.
+    ///
+    /// `DocumentSession.engine` is `let`, so a reload copies fresh contents into
+    /// the engine the session already owns rather than swapping the object.
+    /// Implemented per engine because only the engine knows its document model;
+    /// this requirement replaces the shell-side type switch that M0 left behind.
+    func replaceContents(with other: Self)
+
     @MainActor func makeEditor(_ ctx: EditorContext) -> AnyView
 }
 
 public extension DocumentEngine {
     var indexTitle: String { indexPayload.title }
+    var isEditable: Bool { true }
 }
