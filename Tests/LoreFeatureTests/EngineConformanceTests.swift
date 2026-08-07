@@ -208,14 +208,24 @@ final class EngineConformanceTests: XCTestCase {
         return url
     }
 
-    /// Scoped to `specificEngines`: `AttachmentEngine` is deliberately not a
-    /// conformance citizen here — it never round-trips (`save` always throws
-    /// `readOnly`), so the "byte-stable" round-trip this suite exists to
-    /// enforce does not apply to it. `AttachmentEngine`'s own contract is
-    /// covered by `test_attachment_indexesFilenameAndSizeButNoContent` in
-    /// `EngineRegistryTests`.
+    /// Scoped to the EDITABLE subset of `specificEngines`: `AttachmentEngine`
+    /// and any read-only specific engine (`PDFEngine`, and later
+    /// `RichTextEngine`) are deliberately not conformance citizens here — they
+    /// never round-trip (`save` always throws `readOnly`), so the
+    /// "byte-stable" round-trip this suite exists to enforce does not apply.
+    /// `AttachmentEngine`'s own contract is covered by
+    /// `test_attachment_indexesFilenameAndSizeButNoContent` in
+    /// `EngineRegistryTests`; a read-only engine's load/index contract is
+    /// covered by its own test file (e.g. `PDFEngineTests`).
+    /// `DocumentEngine.isEditable` lives on an instance, not the type, so
+    /// there is no loaded document to ask here — this suite's read-only
+    /// engines are named explicitly instead. `RichTextEngine` joins this set
+    /// when it lands (Task 4), same as `PDFEngine` did here.
+    private static let readOnlyEngineIdentifiers: Set<String> = ["pdf"]
+
     func test_everyEngineHasASample() {
-        for engine in EngineRegistry.specificEngines {
+        for engine in EngineRegistry.specificEngines
+        where !Self.readOnlyEngineIdentifiers.contains(engine.identifier) {
             XCTAssertNotNil(Self.samples[engine.identifier],
                             "engine \(engine.identifier) has no conformance sample")
         }
