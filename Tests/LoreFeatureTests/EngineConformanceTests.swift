@@ -15,9 +15,37 @@ final class EngineRegistryTests: XCTestCase {
         XCTAssertFalse(EngineRegistry.engines.isEmpty)
     }
 
-    func test_registry_returnsNilForUnclaimedType() throws {
+    func test_specificEngines_areMutuallyExclusive() throws {
+        let samples = ["n.md", "n.markdown", "n.txt", "n.json", "n.swift",
+                       "n.pdf", "n.rtf", "n.html", "n.xlsx", "n.png", "n"]
+        for name in samples {
+            let url = try tempFile(name, "x")
+            let claimers = EngineRegistry.specificEngines.filter { $0.canOpen(url) }
+            XCTAssertLessThanOrEqual(claimers.count, 1,
+                "\(name) claimed by \(claimers.map { $0.identifier })")
+        }
+    }
+
+    func test_attachmentEngine_isLastResortOnly() throws {
+        // It is not in the specific set at all...
+        XCTAssertFalse(EngineRegistry.specificEngines.contains { $0 == AttachmentEngine.self })
+        // ...and it never steals a file a specific engine claims.
+        let md = try tempFile("n.md", "---\ntitle: N\n---\nbody\n")
+        XCTAssertEqual(EngineRegistry.engine(for: md).identifier, MarkdownEngine.identifier)
+    }
+
+    func test_engineResolution_isTotal() throws {
         let url = try tempFile("sheet.xlsx", "binary-ish")
-        XCTAssertNil(EngineRegistry.engine(for: url))
+        XCTAssertEqual(EngineRegistry.engine(for: url).identifier, AttachmentEngine.identifier)
+    }
+
+    func test_attachment_indexesFilenameAndSizeButNoContent() throws {
+        let url = try tempFile("sheet.xlsx", "binary-ish")
+        let engine = try AttachmentEngine.load(url)
+        XCTAssertEqual(engine.indexPayload.title, "sheet.xlsx")
+        XCTAssertEqual(engine.indexPayload.plaintext, "")
+        XCTAssertEqual(engine.byteSize, "binary-ish".utf8.count)
+        XCTAssertFalse(engine.isEditable)
     }
 
     func test_load_dispatchesThroughTheRegisteredEngine() throws {
@@ -33,11 +61,15 @@ final class EngineRegistryTests: XCTestCase {
         XCTAssertTrue(engine.indexPayload.plaintext.contains("haystack"))
     }
 
-    func test_load_throwsUnsupportedForAnUnclaimedType() throws {
+    /// Engine resolution is now TOTAL (Task 2): a file no specific engine
+    /// claims loads via `AttachmentEngine` instead of throwing. Replaces the
+    /// old `test_load_throwsUnsupportedForAnUnclaimedType`, whose expectation
+    /// is exactly the behavior this task removes.
+    func test_load_ofAnUnrecognizedTypeLoadsAsAnAttachment() throws {
         let url = try tempFile("sheet.xlsx", "binary-ish")
-        XCTAssertThrowsError(try EngineRegistry.load(url)) { error in
-            XCTAssertEqual(error as? EngineError, .unsupported(url))
-        }
+        let engine = try EngineRegistry.load(url)
+        XCTAssertEqual(engine.indexPayload.title, "sheet.xlsx")
+        XCTAssertTrue(engine is AttachmentEngine)
     }
 
     func test_engineIdentifiersAreUnique() {
@@ -176,8 +208,14 @@ final class EngineConformanceTests: XCTestCase {
         return url
     }
 
+    /// Scoped to `specificEngines`: `AttachmentEngine` is deliberately not a
+    /// conformance citizen here — it never round-trips (`save` always throws
+    /// `readOnly`), so the "byte-stable" round-trip this suite exists to
+    /// enforce does not apply to it. `AttachmentEngine`'s own contract is
+    /// covered by `test_attachment_indexesFilenameAndSizeButNoContent` in
+    /// `EngineRegistryTests`.
     func test_everyEngineHasASample() {
-        for engine in EngineRegistry.engines {
+        for engine in EngineRegistry.specificEngines {
             XCTAssertNotNil(Self.samples[engine.identifier],
                             "engine \(engine.identifier) has no conformance sample")
         }
@@ -205,10 +243,16 @@ final class EngineConformanceTests: XCTestCase {
     }
 
     func test_canOpenIsMutuallyExclusive() throws {
-        for engine in EngineRegistry.engines {
+        // Scoped to `specificEngines`, same reasoning as `test_everyEngineHasASample`:
+        // `AttachmentEngine.canOpen` is unconditionally `true`, so checking
+        // mutual exclusivity across `EngineRegistry.engines` (which includes
+        // it) would always find two claimers by design. Mutual exclusivity is
+        // a guarantee only among `specificEngines` — `EngineRegistry`
+        // consults `AttachmentEngine` last, and only when they all decline.
+        for engine in EngineRegistry.specificEngines {
             guard let sample = Self.samples[engine.identifier] else { continue }
             let url = try write(sample.name, sample.contents)
-            let claimers = EngineRegistry.engines.filter { $0.canOpen(url) }
+            let claimers = EngineRegistry.specificEngines.filter { $0.canOpen(url) }
             XCTAssertEqual(claimers.count, 1,
                            "\(sample.name) claimed by \(claimers.map { $0.identifier })")
         }

@@ -49,13 +49,20 @@ final class TabsTests: XCTestCase {
         XCTAssertEqual(s.selectedTab?.url.lastPathComponent, "a.md")
     }
 
-    func test_openUnsupportedType_recordsErrorWithoutOpeningTab() throws {
+    /// Engine resolution is now TOTAL (Task 2): a file no specific engine
+    /// claims opens as a read-only `AttachmentEngine` tab instead of setting
+    /// `openError`. Replaces the old
+    /// `test_openUnsupportedType_recordsErrorWithoutOpeningTab`, whose
+    /// expectation is exactly the behavior this task removes.
+    func test_openUnrecognizedType_opensAReadOnlyAttachmentTab() throws {
         let root = tempDir(); let s = try makeStore(root)
         let url = root.appendingPathComponent("sheet.xlsx")
         try "binary".write(to: url, atomically: true, encoding: .utf8)
         s.open(url: url)
-        XCTAssertTrue(s.tabs.isEmpty)
-        XCTAssertEqual(s.openError?.url, url)
+        XCTAssertNil(s.openError)
+        let session = try XCTUnwrap(s.selectedTab)
+        XCTAssertTrue(session.engine is AttachmentEngine)
+        XCTAssertTrue(session.isReadOnly)
     }
 
     func test_closeTab_savesDirtySessionBeforeClosing() throws {

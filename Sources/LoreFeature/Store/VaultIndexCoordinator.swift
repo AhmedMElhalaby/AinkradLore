@@ -133,16 +133,10 @@ public final class VaultIndexCoordinator {
     /// Pure, off-actor: every engine-openable file under `root`, loaded and
     /// reduced to its index payload. No index access.
     ///
-    /// Files no engine claims are indexed too, but METADATA ONLY: type
-    /// `EngineRegistry.unclaimedType`, empty plaintext, the filename (with its
-    /// extension — there is no engine to derive anything better) as the title.
-    ///
-    /// They used to be skipped entirely, which made the sidebar lie: a vault of
-    /// `.pdf`/`.xlsx` showed as empty, and `FallbackViewer`'s "can't open this
-    /// yet" branch was unreachable because nothing could ever be clicked to
-    /// reach it. The spec's failure-modes table requires the opposite. Empty
-    /// plaintext is the point: an unclaimed row must never match a full-text
-    /// search for content nobody parsed.
+    /// Files no SPECIFIC engine claims are loaded by `AttachmentEngine`: type
+    /// `attachment`, empty plaintext, the filename (with extension) as title.
+    /// Empty plaintext is the point — an attachment row must never match a
+    /// full-text search for content nobody parsed.
     nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
         // CANONICAL ON WRITE, part 1: the enumerator builds every URL it yields
         // by appending to the URL it was given, so canonicalizing the root ONCE
@@ -191,16 +185,15 @@ public final class VaultIndexCoordinator {
             // changes sidebar ordering for vaults where the two disagree.
             let updated = values?.contentModificationDate ?? Date()
 
-            // An engine that claims the file but fails to LOAD it is left out,
-            // as before: that is a real error, not an unclaimed type, and this
-            // scan has nowhere to report it.
-            guard let engineType = EngineRegistry.engine(for: url) else {
-                entries.append(IndexEntry(
-                    url: url, type: EngineRegistry.unclaimedType,
-                    payload: IndexPayload(title: url.lastPathComponent, plaintext: ""),
-                    updated: updated))
-                continue
-            }
+            // Resolution is total (`EngineRegistry.engine(for:)` never returns
+            // nil), so there is no unclaimed branch any more: a file no
+            // specific engine claims loads as an attachment, which indexes its
+            // filename and size and nothing else.
+            let engineType = EngineRegistry.engine(for: url)
+            // An engine that claims a file but fails to LOAD it is left out, as
+            // before: that is a real error, and this scan has nowhere to report
+            // it. `AttachmentEngine.load` cannot fail, so a load failure now
+            // means a specific engine rejected a file it claimed.
             guard let engine = try? engineType.load(url) else { continue }
             var payload = engine.indexPayload
             payload.plaintext = Self.capped(payload.plaintext)

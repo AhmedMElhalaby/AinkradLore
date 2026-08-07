@@ -94,7 +94,9 @@ struct LoreRootView: View {
 
     @ViewBuilder private var content: some View {
         if let failure = store.openError, failure.url == attempted {
-            FallbackViewer(url: failure.url, error: failure.error, theme: theme)
+            DocumentErrorCard(url: failure.url,
+                              message: "Lore couldn't open this document.",
+                              theme: theme)
         } else if let session = store.selectedTab {
             // Identity is the session's stable id — NOT its url, which changes
             // when the session adopts a "save a copy" resolution.

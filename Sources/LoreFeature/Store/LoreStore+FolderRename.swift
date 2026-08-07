@@ -193,10 +193,9 @@ extension LoreStore {
 
         // Resolved BEFORE the move: `canonical` is `realpath(3)`, which fails
         // on a path that no longer exists. Matched by PREFIX rather than
-        // against `plan.documentMoves`, so a tab open on a file the index does
-        // not claim (an unclaimed type, a file created since the last rescan)
-        // still follows the folder instead of being left pointing into a
-        // directory that is gone.
+        // against `plan.documentMoves`, so a tab open on a file the index has
+        // not yet reached (created since the last rescan) still follows the
+        // folder instead of being left pointing into a directory that is gone.
         let prefix = plan.source.path + "/"
         var following: [(session: DocumentSession, from: URL, to: URL)] = []
         for session in tabs {

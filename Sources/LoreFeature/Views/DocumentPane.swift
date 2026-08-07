@@ -78,7 +78,7 @@ struct DocumentPane: View {
                 .id("\(session.id)-\(session.reloadGeneration)")
 
             // Only markdown documents contribute to the link graph — plain-
-            // text and unclaimed documents would show an empty panel, which
+            // text and attachment documents would show an empty panel, which
             // is noise, not information.
             if session.engine is MarkdownEngine {
                 // Gated on the CACHED outline being non-empty, not merely on

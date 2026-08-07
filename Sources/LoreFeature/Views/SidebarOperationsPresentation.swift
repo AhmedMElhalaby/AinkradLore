@@ -108,10 +108,10 @@ struct MessageSheet: View {
 /// destructive affordance that differs between two views is a destructive
 /// affordance that was reviewed once.
 ///
-/// Unclaimed rows (`.pdf`, `.xlsx`, anything no engine claims) get Rename and
-/// Move but NO Delete, exactly as the previous milestone left them: Lore cannot
-/// open them, so it does not arm an irreversible delete against a binary the
-/// user has no way to inspect here first.
+/// Attachment rows (`.pdf`, `.xlsx`, anything no specific engine claims) get
+/// Rename and Move but NO Delete, exactly as the previous milestone left them:
+/// they are read-only, so this menu does not arm an irreversible delete
+/// against a binary the user has no way to edit or reconstruct.
 struct LoreRowMenu: View {
     let row: IndexRow
     let ops: SidebarOperations
@@ -119,7 +119,7 @@ struct LoreRowMenu: View {
     var body: some View {
         Button("Rename…") { ops.beginRename(row) }
         Button("Move to…") { ops.beginMove(row) }
-        if row.type != EngineRegistry.unclaimedType {
+        if row.type != AttachmentEngine.identifier {
             Divider()
             Button("Move to Trash", role: .destructive) { ops.requestTrash(row) }
         }

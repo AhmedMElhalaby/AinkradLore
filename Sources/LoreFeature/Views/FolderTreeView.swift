@@ -117,6 +117,6 @@ struct FolderTreeView: View {
     }
 
     private func icon(for row: IndexRow) -> String {
-        row.type == EngineRegistry.unclaimedType ? "doc" : "doc.text"
+        row.type == AttachmentEngine.identifier ? "doc" : "doc.text"
     }
 }

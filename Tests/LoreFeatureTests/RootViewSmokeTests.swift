@@ -87,11 +87,10 @@ final class RootViewSmokeTests: XCTestCase {
                          activeTag: .constant(nil))
     }
 
-    func test_fallbackViewer_builds() {
+    func test_documentErrorCard_builds() {
         let url = URL(fileURLWithPath: "/tmp/x.xlsx")
-        _ = FallbackViewer(url: url, error: EngineError.unsupported(url),
-                           theme: HostTheme(TestTokens.make()))
-        _ = FallbackViewer(url: url, error: nil, theme: HostTheme(TestTokens.make()))
+        _ = DocumentErrorCard(url: url, message: "Lore couldn't open this document.",
+                              theme: HostTheme(TestTokens.make()))
     }
 
     /// The delete affordance moved from `NoteEditorPane` to the list row's
