@@ -219,9 +219,9 @@ final class EngineConformanceTests: XCTestCase {
     /// covered by its own test file (e.g. `PDFEngineTests`).
     /// `DocumentEngine.isEditable` lives on an instance, not the type, so
     /// there is no loaded document to ask here — this suite's read-only
-    /// engines are named explicitly instead. `RichTextEngine` joins this set
-    /// when it lands (Task 4), same as `PDFEngine` did here.
-    private static let readOnlyEngineIdentifiers: Set<String> = ["pdf"]
+    /// engines are named explicitly instead. `RichTextEngine` joins `PDFEngine`
+    /// here as of Task 4.
+    private static let readOnlyEngineIdentifiers: Set<String> = ["pdf", "richtext"]
 
     func test_everyEngineHasASample() {
         for engine in EngineRegistry.specificEngines

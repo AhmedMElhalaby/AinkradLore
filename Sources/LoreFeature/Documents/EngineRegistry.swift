@@ -7,13 +7,11 @@ import Foundation
 public enum EngineRegistry {
     /// Engines that claim specific formats. Required to be mutually exclusive
     /// with one another — `EngineRegistryTests` enforces it.
-    ///
-    /// `RichTextEngine` does not exist yet (Task 4); it adds its own line here
-    /// when it lands.
     public static let specificEngines: [any DocumentEngine.Type] = [
         MarkdownEngine.self,
         PlainTextEngine.self,
         PDFEngine.self,
+        RichTextEngine.self,
     ]
 
     /// Consulted ONLY when every specific engine declines. `AttachmentEngine`
