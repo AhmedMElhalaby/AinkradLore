@@ -27,6 +27,14 @@ public final class LoreStore {
     /// reasoning as `backlinksPanelExpanded`.
     public private(set) var outlinePanelExpanded: Bool = true
 
+    /// "Show all files" — OFF by default, so a non-document attachment (a
+    /// `.zip`, a stray binary, an OAuth credentials file) is hidden from the
+    /// sidebar browse lists (`FolderTreeView`, `NoteListView`) unless the
+    /// owner opts in. See `DocumentVisibility` for what "hidden" does and
+    /// does not mean — it is a browse-list filter only, never an indexing or
+    /// resolution decision.
+    public private(set) var showAllFiles: Bool = false
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -50,6 +58,7 @@ public final class LoreStore {
     private static let expandedFoldersKey = "expandedFolders"
     private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
     private static let outlinePanelExpandedKey = "outlinePanelExpanded"
+    private static let showAllFilesKey = "showAllFiles"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -74,6 +83,10 @@ public final class LoreStore {
         if let data = documents.data(forKey: Self.outlinePanelExpandedKey),
            let raw = String(data: data, encoding: .utf8) {
             outlinePanelExpanded = raw == "true"
+        }
+        if let data = documents.data(forKey: Self.showAllFilesKey),
+           let raw = String(data: data, encoding: .utf8) {
+            showAllFiles = raw == "true"
         }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
@@ -105,6 +118,17 @@ public final class LoreStore {
         outlinePanelExpanded = expanded
         documents.setData((expanded ? "true" : "false").data(using: .utf8),
                           forKey: Self.outlinePanelExpandedKey)
+    }
+
+    /// Persist the "Show all files" setting. Takes effect immediately: both
+    /// `FolderTreeView` and `NoteListView` read `showAllFiles` live through
+    /// `DocumentVisibility.visibleRows` on every redraw, so flipping this
+    /// needs no reindex and no relaunch — the index never changes shape, only
+    /// what of it gets drawn.
+    public func setShowAllFiles(_ show: Bool) {
+        showAllFiles = show
+        documents.setData((show ? "true" : "false").data(using: .utf8),
+                          forKey: Self.showAllFilesKey)
     }
 
     // MARK: - Index facade

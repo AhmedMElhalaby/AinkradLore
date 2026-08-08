@@ -38,6 +38,18 @@ struct LoreSettingsView: View {
                 }
             }
 
+            AinkradFormRow(title: "Show all files",
+                           help: "Show every file in the sidebar, including "
+                               + "attachments Lore can't render inline (zip "
+                               + "archives, credentials files, other "
+                               + "binaries). Off by default so the sidebar "
+                               + "stays a list of documents. Files stay fully "
+                               + "indexed, linkable and openable either way —"
+                               + " this only changes what the browse list "
+                               + "draws.") {
+                AinkradToggle(isOn: showAllFilesBinding)
+            }
+
             AinkradFormRow(title: "Index",
                            help: "Rebuild the search index from the files on disk.") {
                 AinkradButton(title: "Rebuild index", style: .ghost) { try? store.rebuild() }
@@ -51,6 +63,11 @@ struct LoreSettingsView: View {
     private var defaultFolderBinding: Binding<String> {
         Binding(get: { store.defaultNoteFolder },
                 set: { store.setDefaultNoteFolder($0) })
+    }
+
+    private var showAllFilesBinding: Binding<Bool> {
+        Binding(get: { store.showAllFiles },
+                set: { store.setShowAllFiles($0) })
     }
 
     /// Shares `SidebarOperations`' picker so settings and the first-run empty

@@ -78,9 +78,20 @@ struct FolderTreeView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if let root = store.vaultRoot {
-                    outline(FolderNode.tree(from: store.rows,
-                                            directories: store.directoryPaths,
-                                            root: root), depth: 0)
+                    // Filtered to the browse-list rows only — `directories`
+                    // is passed UNFILTERED below, so a folder holding
+                    // nothing but hidden attachments still gets a node (see
+                    // `FolderNode.tree`'s own doc comment on why zero rows
+                    // does not mean zero folder). Hiding the folder itself
+                    // would be a second, silent disappearance on top of the
+                    // files' — a folder the owner remembers creating,
+                    // vanishing with no explanation, is worse than an empty
+                    // folder they can right-click and inspect.
+                    outline(FolderNode.tree(
+                        from: DocumentVisibility.visibleRows(store.rows,
+                                                             showAllFiles: store.showAllFiles),
+                        directories: store.directoryPaths,
+                        root: root), depth: 0)
                 }
                 // A filler BELOW every row, not an overlay across the whole
                 // ScrollView: `.ainkradContextMenu`'s catcher only lets a
