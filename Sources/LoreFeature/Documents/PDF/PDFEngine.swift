@@ -49,17 +49,27 @@ public final class PDFEngine: DocumentEngine {
                              loadFailure: "This PDF is password-protected.",
                              metadataTitle: nil)
         }
-        // `document.string` concatenates every page. Capped at the index limit
-        // here rather than downstream so a 900-page scan never holds its whole
-        // text resident during a vault rescan.
-        let raw = document.string ?? ""
-        let text = VaultIndexCoordinator.capped(raw)
-        let truncated = text.utf8.count < raw.utf8.count
+        // `document.string` concatenates every page — the expensive walk this
+        // cache exists to skip on an unchanged file. It is called ONLY inside
+        // the cache's closure, which only runs on a miss: on a hit, PDFKit
+        // never touches page content at all. Capped at the index limit here
+        // rather than downstream so a 900-page scan never holds its whole
+        // text resident during a vault rescan. The truncation flag is
+        // computed alongside the text and cached with it (see
+        // `ExtractionCache.ExtractionResult`) — the raw, uncapped text is
+        // gone the moment this closure returns, so a cache HIT has nothing
+        // else to compare against.
+        let extraction = ExtractionCache.shared.result(for: url) {
+            let raw = document.string ?? ""
+            let text = VaultIndexCoordinator.capped(raw)
+            return ExtractionCache.ExtractionResult(
+                text: text, isTruncated: text.utf8.count < raw.utf8.count)
+        }
         let title = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return PDFEngine(sourceURL: url, extractedText: text, loadFailure: nil,
+        return PDFEngine(sourceURL: url, extractedText: extraction.text, loadFailure: nil,
                          metadataTitle: (title?.isEmpty == false) ? title : nil,
-                         isContentTruncated: truncated)
+                         isContentTruncated: extraction.isTruncated)
     }
 
     public func save(to url: URL) throws {

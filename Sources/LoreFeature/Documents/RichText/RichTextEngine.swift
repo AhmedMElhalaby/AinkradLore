@@ -85,17 +85,42 @@ public final class RichTextEngine: DocumentEngine {
     }
 
     public var indexPayload: IndexPayload {
-        IndexPayload(title: indexTitle,
-                     plaintext: VaultIndexCoordinator.capped(attributed.string))
+        IndexPayload(title: indexTitle, plaintext: cachedExtraction().text)
     }
 
-    /// Computed rather than stored: `attributed.string` is already resident
-    /// (it backs the viewer), so re-deriving this from it costs one more
-    /// `capped` call — cheap relative to holding a stale flag that could drift
-    /// from `attributed` after `replaceContents`.
+    /// Computed rather than stored, and routed through the SAME cache entry
+    /// as `indexPayload` (via `cachedExtraction()`) rather than independently
+    /// re-deriving it from `attributed.string`. Two independent computations
+    /// of "is this truncated" from the same underlying text can never
+    /// disagree in principle, but they COULD disagree in practice if one
+    /// route hit the cache and the other read `attributed` fresh after
+    /// `replaceContents` swapped it — sharing one lookup makes that
+    /// impossible by construction, not just unlikely.
     public var isContentTruncated: Bool {
-        let raw = attributed.string
-        return VaultIndexCoordinator.capped(raw).utf8.count < raw.utf8.count
+        cachedExtraction().isTruncated
+    }
+
+    /// `attributed.string` is already resident (it backs the viewer), so the
+    /// extraction this caches is cheap on its own — unlike `PDFEngine`, this
+    /// does not skip AppKit's document parse (that already ran, unconditionally,
+    /// in `load`). What it DOES buy: `indexPayload` is read at least twice per
+    /// save (`scanVault` and `indexDocument`) and `isContentTruncated` is read
+    /// again by the editor, and each of those used to re-walk and re-cap
+    /// `attributed.string` from scratch. Caching means only the first of those
+    /// calls, for a given file version, pays for the walk.
+    ///
+    /// Keyed by the FILE's `(path, mtime, size)`, not by this instance — so a
+    /// `replaceContents(with:)` swap (only ever called after an external edit
+    /// changed the file on disk, i.e. after its mtime/size already changed)
+    /// naturally misses the old entry and re-extracts from the new
+    /// `attributed`, rather than serving stale text under the old key.
+    private func cachedExtraction() -> ExtractionCache.ExtractionResult {
+        ExtractionCache.shared.result(for: sourceURL) {
+            let raw = attributed.string
+            let text = VaultIndexCoordinator.capped(raw)
+            return ExtractionCache.ExtractionResult(
+                text: text, isTruncated: text.utf8.count < raw.utf8.count)
+        }
     }
 
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
