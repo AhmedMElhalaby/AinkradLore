@@ -127,7 +127,9 @@ private struct MarkdownDocumentEditor: View {
                            // Task checkboxes are markdown, and only a session
                            // that can actually be written may offer to flip
                            // one — see `EditorContext.isReadOnly`.
-                           allowsTaskToggle: !ctx.isReadOnly)
+                           allowsTaskToggle: !ctx.isReadOnly,
+                           writePastedImage: ctx.writePastedImage,
+                           writeDroppedFile: ctx.writeDroppedFile)
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
         }
         .background(ctx.theme.tokens.background)

@@ -40,6 +40,24 @@ final class LinkTextView: NSTextView {
     /// view grows as the document does.
     var onWidthChange: (@MainActor (CGFloat) -> Void)?
     private var lastNotifiedWidth: CGFloat = -1
+    /// Receives pasted image bytes and a generated filename, and reports
+    /// whether it was handled (written as an attachment and inserted).
+    /// `false` — or no handler — falls through to AppKit's own `paste(_:)`,
+    /// same fall-through contract `onCommandClick`/`onPlainClick` use.
+    var onPasteImage: (@MainActor (Data, String) -> Bool)?
+    /// Receives the file URLs from a Finder drop and reports whether they
+    /// were handled (copied in and inserted). Same fall-through contract.
+    var onDropFileURLs: (@MainActor ([URL]) -> Bool)?
+
+    /// File URLs are registered by `MarkdownEditor.makeNSView` right after
+    /// construction, not here: `NSTextView` is an Objective-C class, and
+    /// overriding its designated initializer to do this would drop the
+    /// inherited `NSTextView(frame:)` convenience initializer that
+    /// `makeNSView` actually calls. A plain (`isRichText == false`) text
+    /// view does not accept a Finder drag by default the way a rich text
+    /// view does, and the default rich-text behaviour (embedding the image
+    /// as an `NSTextAttachment`) is not what a MARKDOWN source file wants
+    /// anyway — Task 9 wants a `![[name]]` embed, not an attachment run.
 
     /// The resize hook. `updateNSView` is not one: SwiftUI does not re-run it
     /// for every frame of a live window resize, so a column centred only there
@@ -185,6 +203,86 @@ final class LinkTextView: NSTextView {
         super.insertText(string, replacementRange: replacementRange)
     }
 
+    // MARK: - Paste and drop attachments
+
+    /// Intercepts an image paste (screenshot, Preview copy, …) before
+    /// AppKit's own handling — which, on a plain (`isRichText == false`)
+    /// view, would just discard image data since there is no rich-text
+    /// storage to hold it.
+    ///
+    /// ONLY when the pasteboard has NO string representation at all.
+    /// `NSPasteboard.availableType(from:)` reports whether a type is
+    /// PRESENT, not whether it is the pasteboard's PREFERRED one — an
+    /// earlier version of this method checked `availableType(from: [.png,
+    /// .tiff])` alone and hijacked any MIXED copy: an image dragged out of
+    /// Safari, Notes or Keynote, and most RTF copies, carry `.tiff`
+    /// ALONGSIDE `public.utf8-plain-text`, and that version wrote the image
+    /// as an attachment while silently discarding the text the user
+    /// actually meant to paste. A pasteboard offering a string type is
+    /// treated as a text paste, full stop, and falls straight through to
+    /// `super.paste(_:)` — exactly AppKit's own behaviour — regardless of
+    /// what else rides along with it. `.png` is tried before `.tiff`
+    /// because that is what `NSPasteboard`'s screenshot/copy-image paths
+    /// actually populate; TIFF is the fallback some apps use instead.
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
+        guard pb.availableType(from: [.string]) == nil,
+              let best = pb.availableType(from: imageTypes),
+              let data = pb.data(forType: best) else {
+            super.paste(sender)
+            return
+        }
+        let ext = best == .png ? "png" : "tiff"
+        let name = "Pasted image \(Self.pasteTimestampFormatter.string(from: Date())).\(ext)"
+        if onPasteImage?(data, name) == true { return }
+        super.paste(sender)
+    }
+
+    /// `yyyy-MM-dd HH.mm.ss`: colons are illegal in filenames on some
+    /// volumes, so `HH.mm.ss` stands in for the usual `HH:mm:ss`. The
+    /// pasteboard's timestamp is the only thing that distinguishes one paste
+    /// from the next — without it, every image pasted into a note would
+    /// collide on the same name and stack up as "image 2", "image 3", ….
+    private static let pasteTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return formatter
+    }()
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard onDropFileURLs != nil,
+              sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self]) else {
+            return super.draggingEntered(sender)
+        }
+        return .copy
+    }
+
+    /// Files dropped from Finder are COPIED into the vault, never referenced
+    /// in place — see `LoreStore.writeAttachment(copying:besideNote:)`'s doc
+    /// comment.
+    ///
+    /// Falls through to `super` (AppKit's default drop handling) only when
+    /// there is NO handler installed, or the pasteboard carries no file
+    /// URLs at all — the same two "this drop is not mine" cases
+    /// `draggingEntered` already reports as not `.copy`. Once a handler IS
+    /// installed and file URLs ARE present, this drop is fully owned:
+    /// whatever `onDropFileURLs` reports — success or failure — is the
+    /// final answer. Falling through to `super` on failure was the bug:
+    /// with `.fileURL` registered, AppKit's own default handling inserts
+    /// the raw file PATH as text, so a write that failed (permissions, disk
+    /// full, outside-vault guard) would otherwise still leave something
+    /// behind in the document — just the wrong something. A failed drop
+    /// must insert nothing.
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let onDropFileURLs else { return super.performDragOperation(sender) }
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self]) as? [URL], !urls.isEmpty else {
+            return super.performDragOperation(sender)
+        }
+        return onDropFileURLs(urls)
+    }
+
     /// Cmd-B / Cmd-I. Handled here rather than through `toggleBoldface(_:)`
     /// because those selectors arrive only from a Font menu, which a plugin's
     /// host window need not have.
@@ -270,5 +368,52 @@ extension MarkdownEditor.Coordinator {
             return true
         }
         return false
+    }
+
+    /// Writes pasted image bytes as an attachment beside the note (via
+    /// `EditorContext.writePastedImage`) and inserts the resulting
+    /// `![[name]]` embed at the caret. `false` means declined or failed —
+    /// no vault, no `writePastedImage` handler installed, or the write
+    /// itself threw — and `LinkTextView.paste(_:)` falls through to AppKit's
+    /// default paste, exactly like a Cmd-click that hits no link.
+    @discardableResult
+    @MainActor func insertAttachment(fromPastedImage data: Data, name: String) -> Bool {
+        guard let writePastedImage, let embed = writePastedImage(data, name) else { return false }
+        insertAtCaret(embed)
+        return true
+    }
+
+    /// Copies each dropped file into the vault beside the note (via
+    /// `EditorContext.writeDroppedFile`) and inserts every embed that
+    /// succeeded, one per line, at the caret. A partial failure (one file
+    /// copies, another does not — e.g. a permissions error mid-drop) still
+    /// inserts what DID succeed rather than discarding it; only a drop where
+    /// EVERY file failed reports `false` and falls through to AppKit's
+    /// default drop handling.
+    @discardableResult
+    @MainActor func insertAttachments(fromDroppedFiles urls: [URL]) -> Bool {
+        guard let writeDroppedFile else { return false }
+        let embeds = urls.compactMap { writeDroppedFile($0) }
+        guard !embeds.isEmpty else { return false }
+        insertAtCaret(embeds.joined(separator: "\n"))
+        return true
+    }
+
+    /// The shared insertion primitive for both attachment paths. Goes
+    /// through `shouldChangeText`/`didChangeText` — the identical bracketing
+    /// `insert(_ row:)` and `toggleTask(atUTF16:)` use — so an attachment
+    /// insert is ONE undo step and fires the same `textDidChange` delegate
+    /// call that updates `text.wrappedValue`, shifts the style cache, and
+    /// (through `ctx.onChange()`) marks the document dirty for autosave.
+    /// Replaces the current selection, same as typing over it — this is the
+    /// ONLY sanctioned way this feature touches document text or offsets.
+    @MainActor private func insertAtCaret(_ insertion: String) {
+        guard let tv = textView else { return }
+        let range = tv.selectedRange()
+        guard tv.shouldChangeText(in: range, replacementString: insertion) else { return }
+        tv.textStorage?.replaceCharacters(in: range, with: insertion)
+        tv.didChangeText()
+        tv.setSelectedRange(NSRange(location: range.location + (insertion as NSString).length,
+                                    length: 0))
     }
 }

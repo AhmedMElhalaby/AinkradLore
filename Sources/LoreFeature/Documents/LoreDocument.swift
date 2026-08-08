@@ -97,6 +97,18 @@ public struct EditorContext {
     /// the task-checkbox toggle. Defaulted to writable so an engine or a test
     /// that does not care behaves exactly as before.
     public let isReadOnly: Bool
+    /// Writes pasted image bytes as an attachment BESIDE the open document
+    /// and returns the `![[name]]` embed text to insert at the caret, or
+    /// `nil` if the write failed (no vault, no permission, …) — in which
+    /// case the editor drops the paste rather than inserting a link to
+    /// nothing. Defaulted to "cannot write", the same shape every other
+    /// store-backed capability here defaults to, so an engine with no
+    /// attachment story (or a read-only session) needs no changes.
+    public let writePastedImage: @MainActor (Data, String) -> String?
+    /// Copies a dropped file into the vault BESIDE the open document and
+    /// returns the `![[name]]` embed text to insert. Same "nil means declined
+    /// or failed" contract as `writePastedImage`.
+    public let writeDroppedFile: @MainActor (URL) -> String?
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
@@ -106,12 +118,16 @@ public struct EditorContext {
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 registerScrollHandler: @escaping @MainActor (@escaping @MainActor (Int) -> Void) -> Void
                     = { _ in },
-                isReadOnly: Bool = false) {
+                isReadOnly: Bool = false,
+                writePastedImage: @escaping @MainActor (Data, String) -> String? = { _, _ in nil },
+                writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil }) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler
         self.isReadOnly = isReadOnly
+        self.writePastedImage = writePastedImage
+        self.writeDroppedFile = writeDroppedFile
     }
 }

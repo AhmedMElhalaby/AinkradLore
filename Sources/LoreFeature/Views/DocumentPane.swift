@@ -69,7 +69,34 @@ struct DocumentPane: View {
                               resolveEmbedTarget: { store.resolveLink($0) },
                               linkTarget: { store.linkTarget(for: $0) },
                               registerScrollHandler: { handler in scrollHandler = handler },
-                              isReadOnly: session.isReadOnly))
+                              isReadOnly: session.isReadOnly,
+                              // Beside `session.url`, never in a vault-wide
+                              // folder — see `LoreStore.writeAttachment`'s doc
+                              // comment. `try?`: a failed write (no vault,
+                              // permission denied, outside-vault guard) means
+                              // "insert nothing" here, same as the store API's
+                              // own contract for its callers. Gated on
+                              // `session.isReadOnly` FIRST — same reasoning
+                              // as `allowsTaskToggle: !ctx.isReadOnly` below:
+                              // a read-only session's `saveNow()` refuses to
+                              // write, so letting these two closures write a
+                              // real file into the vault and insert an embed
+                              // `saveNow()` will then never persist is
+                              // exactly the affordance `EditorContext.isReadOnly`
+                              // exists to withhold.
+                              writePastedImage: { data, name in
+                                  guard !session.isReadOnly,
+                                        let written = try? store.writeAttachment(
+                                            data: data, preferredName: name,
+                                            besideNote: session.url) else { return nil }
+                                  return store.embedSyntax(for: written)
+                              },
+                              writeDroppedFile: { url in
+                                  guard !session.isReadOnly,
+                                        let written = try? store.writeAttachment(
+                                            copying: url, besideNote: session.url) else { return nil }
+                                  return store.embedSyntax(for: written)
+                              }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
                 // without the generation in the identity the user clicks
