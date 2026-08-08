@@ -222,6 +222,56 @@ final class EmbedDecorationTests: XCTestCase {
         }
     }
 
+    /// Fix round 1, Critical 1 / Important 4: the END-TO-END proof, through
+    /// the real `applyEmbeds` pipeline (parsed spans, real paragraph style,
+    /// real `EmbedImageRegion`), that an Arabic document's image embed
+    /// resolves RTL — not just the pure-geometry unit test in
+    /// `EmbedGeometryTests`. The embed paragraph itself, `![[screenshot.png]]`,
+    /// is Latin-only; only the ARABIC PARAGRAPH ABOVE it can be the source of
+    /// a correct `.rightToLeft` answer, which is exactly what was broken
+    /// before this fix (direction resolved from the embed's own paragraph,
+    /// i.e. the filename, every time).
+    func test_arabicDocument_resolvesRightToLeftForALatinFilenameEmbed() throws {
+        let (dir, imageURL) = try writeTempImage()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let text = "مرحبا بكم في الملاحظات.\n\n![[screenshot.png]]\n"
+        let (coordinator, tv) = makeEditor(text) { _ in imageURL }
+        withExtendedLifetime(coordinator) {
+            XCTAssertEqual(tv.embedImages.count, 1)
+            XCTAssertEqual(tv.embedImages.first?.writingDirection, .rightToLeft,
+                           "the Arabic paragraph above the embed must decide its direction")
+        }
+    }
+
+    /// Fix round 2, Important 7: an embed sharing its paragraph with other
+    /// text — `Before ![[shot.png]] after.` — must render as a CHIP, never
+    /// as a drawn image. `EmbedGeometry.drawRect` answers in MARGIN-anchored
+    /// coordinates with no idea where "Before "/"after." end, so if this
+    /// guard (`isAloneOnItsParagraph`, in `applyEmbeds`) were ever bypassed,
+    /// the image would paint at the paragraph's margin, directly over the
+    /// surrounding prose. This is the regression guard for that guard: it
+    /// uses a REAL decodable image, so a version of `applyEmbeds` that
+    /// forgot the alone-on-paragraph check would fail this by producing a
+    /// drawn region instead of a chip.
+    func test_midParagraphEmbed_rendersAsAChipNotAnImage() throws {
+        let (dir, imageURL) = try writeTempImage()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let text = "Before ![[shot.png]] after.\n"
+        let (coordinator, tv) = makeEditor(text) { _ in imageURL }
+        withExtendedLifetime(coordinator) {
+            XCTAssertTrue(tv.embedImages.isEmpty,
+                          "a mid-paragraph embed must never produce a drawn image region")
+            guard let storage = tv.textStorage else { return XCTFail("no storage") }
+            let ns = text as NSString
+            let targetStart = ns.range(of: "shot.png").location
+            XCTAssertNotNil(storage.attribute(.backgroundColor, at: targetStart, effectiveRange: nil),
+                            "a mid-paragraph embed must fall back to the chip pill")
+            XCTAssertEqual(storage.string, text, "the surrounding prose must be untouched")
+        }
+    }
+
     /// A directory target (no extension, so `EmbedRendering.kind(for:)`
     /// classifies it as `.chip`) must render as a chip like any other
     /// non-image target — not crash, not attempt a decode.

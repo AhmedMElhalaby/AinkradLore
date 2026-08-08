@@ -43,6 +43,15 @@ public final class RichTextEngine: DocumentEngine {
     /// fragments) a `.plain` result means the reader never actually
     /// recognized the format — that is treated as a load failure, not a
     /// successful parse.
+    ///
+    /// This `.plain` guard is NOT what catches a JavaScript-built HTML page
+    /// (a React/Vue SPA whose `<body>` is empty and whose content is built
+    /// at runtime by its `<script>` tags): the HTML importer never runs
+    /// script, so it happily reports `documentType == .html` — a technically
+    /// correct, successful parse of an empty document. That case succeeds
+    /// HERE and is caught downstream instead, in `makeEditor`'s
+    /// `hasNoExtractableText` check: a load that "succeeds" with next to no
+    /// extracted text must still not render as a silently blank pane.
     public static func load(_ url: URL) throws -> RichTextEngine {
         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
             .characterEncoding: String.Encoding.utf8.rawValue,
@@ -123,10 +132,55 @@ public final class RichTextEngine: DocumentEngine {
         }
     }
 
+    /// True when AppKit's reader "succeeded" — no `loadFailure`, a
+    /// recognized `documentType` — but the text it actually extracted is
+    /// empty or whitespace-only. The concrete case this exists for: a React/
+    /// Vue single-page app saved as `.html`, whose `<body>` is empty and
+    /// whose content is built at runtime by seven `<script>` tags. AppKit's HTML
+    /// importer does not run JavaScript, so `attributed` ends up with next
+    /// to nothing in it, `load`'s `.plain`-documentType guard never fires
+    /// (HTML is explicitly exempt from it, and rightly so — the format WAS
+    /// recognized), and without this check `makeEditor` would hand back a
+    /// working-but-empty `NSTextView`: no error card, no message, a blank
+    /// pane indistinguishable from a genuinely blank document. An
+    /// image-only scan saved as `.rtf`/`.docx` (no OCR layer, so no text
+    /// runs at all) hits the identical branch for the identical reason.
+    ///
+    /// Checked directly on `attributed.string`, not through
+    /// `cachedExtraction()`: the cache exists to avoid re-walking a
+    /// PLAUSIBLY-large string, and this only ever needs to know whether that
+    /// string is essentially empty, which is cheap to ask of the string
+    /// itself and does not need to share the cache's truncation bookkeeping.
+    var hasNoExtractableText: Bool {
+        attributed.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
         if let loadFailure {
             return AnyView(DocumentErrorCard(url: sourceURL, message: loadFailure,
                                              theme: ctx.theme))
+        }
+        if hasNoExtractableText {
+            // NOT auto-rendered: `AttachmentEngine` already wraps
+            // `QLPreviewView` for a format Lore does not model itself, and
+            // that same fallback is what makes a JS-built SPA (or a scanned
+            // image) viewable here where the plain-text importer returned
+            // nothing. But QuickLook's HTML preview is WebKit, and WebKit
+            // EXECUTES the page's JavaScript and can fetch remote
+            // subresources it references — that is a hazard, not a
+            // convenience: a vault `.html` file is untrusted content, and
+            // merely opening the note must not run its script or make
+            // network calls the owner did not ask for. `EmptyExtractionFallbackView`
+            // is the gate — it shows only the notice and a "Render this
+            // page" button until the owner explicitly presses it, one fresh
+            // `RenderGate` per open, so nothing executes on open and
+            // pressing render in one tab can never opt in any other
+            // document. The document is still opened and still indexed
+            // regardless (`indexPayload` above already reports EMPTY
+            // plaintext for this case — never invented text, so full-text
+            // search cannot match content nobody parsed) — only the
+            // PREVIEW is gated behind the owner's explicit action.
+            return AnyView(EmptyExtractionFallbackView(url: sourceURL, theme: ctx.theme))
         }
         var view = AnyView(RichTextViewer(attributed: attributed)
             .background(ctx.theme.tokens.background))

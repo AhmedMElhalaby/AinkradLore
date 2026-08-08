@@ -127,10 +127,39 @@ final class LinkTextView: NSTextView {
             let windowRect = window.convertFromScreen(screenRect)
             let rect = convert(windowRect, from: nil)
             guard rect.intersects(dirtyRect) else { continue }
-            // Left-aligned within the line's reserved height, at the image's
-            // own scaled size — `applyEmbeds` already capped both dimensions
-            // to the container.
-            let drawRect = NSRect(x: rect.minX, y: rect.minY,
+            // Positioned by `EmbedGeometry.drawRect`, NOT by `rect.minX` —
+            // for a collapsed, near-zero-width source run, TextKit places
+            // that run against the LINE'S END margin, which for an RTL
+            // paragraph is the right edge, not the left. Deriving the
+            // origin from the paragraph's own writing direction and the
+            // container's usable width instead is correct for both
+            // directions and clamps an over-wide image to never overflow
+            // either edge. `rect.minY` is still trusted — the diagnosed bug
+            // is horizontal only.
+            //
+            // `EmbedGeometry.drawRect` answers in CONTAINER-local x.
+            // `textContainerOrigin.x`, NOT `textContainerInset.width`,
+            // translates that into this view's own coordinate space — see
+            // `MarkdownBlockBackgrounds.columnX`'s doc comment: the inset
+            // only happens to agree with the container's real origin while
+            // the column is flush against the view edge, and
+            // `MarkdownEditorLayout` centres a capped-width column, so on a
+            // wide window the two part company and every embed image would
+            // detach sideways from the code panels/quote bars that already
+            // use `textContainerOrigin.x`. `lineFragmentPadding` (AppKit's
+            // own 5pt default, never zeroed here) is passed through too —
+            // fix round 1, Important 2 — because the OLD `rect.minX` code
+            // included it for free (a glyph rect already accounts for line
+            // fragment padding) and dropping it would shift every
+            // previously-working top-level LTR embed 5pt left of where it
+            // used to sit.
+            let containerWidth = textContainer?.size.width ?? bounds.width
+            let padding = textContainer?.lineFragmentPadding ?? 0
+            let local = EmbedGeometry.drawRect(containerWidth: containerWidth,
+                                               writingDirection: region.writingDirection,
+                                               indent: region.indent,
+                                               lineFragmentPadding: padding, imageSize: region.size)
+            let drawRect = NSRect(x: local.origin.x + textContainerOrigin.x, y: rect.minY,
                                   width: region.size.width, height: region.size.height)
             // `draw(in:)` (the single-rect convenience) does NOT respect a
             // flipped coordinate system, and `NSTextView` IS flipped — fix

@@ -280,6 +280,18 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// whole performance contract of the reveal path, and an earlier
         /// version of this file made it without the code supporting it.
         var revealIndexBuilds = 0
+        /// The DOCUMENT's dominant writing direction — the first strong
+        /// (Unicode-alphabetic) character anywhere in the text, or `.leftToRight`
+        /// when none exists. Rebuilt once per full `renderStyles()` pass, from
+        /// the same string every other O(document) step in that pass already
+        /// scans, and reused by `applyEmbeds` (both the full-render and the
+        /// block-scoped `restyleBlock` path) as the LAST-RESORT fallback for an
+        /// embed image's writing direction, when neither the paragraph before
+        /// nor after it has a strong character of its own to go on — see
+        /// `EmbedGeometry.contextualWritingDirection`. `restyleBlock` never
+        /// recomputes it: it only ever runs on a caret move, never a text
+        /// change, so the document this was computed from is still current.
+        var documentWritingDirection: NSWritingDirection = .leftToRight
         /// How many BLOCKS the incremental reveal path has re-attributed. The
         /// caret contract is O(1) blocks per boundary crossing — two, the one
         /// leaving reveal and the one entering it — and "O(1)" is only a claim

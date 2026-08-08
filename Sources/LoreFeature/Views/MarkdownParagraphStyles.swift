@@ -79,8 +79,24 @@ enum MarkdownParagraphStyles {
     /// `minimumLineHeight` is what makes the paragraph tall enough for
     /// `LinkTextView` to draw the actual image into, without inserting any
     /// character or attachment that would change what the line contains.
-    static func embedImageStyle(height: CGFloat, theme: MarkdownTheme) -> NSParagraphStyle {
-        let base = style(for: .body, theme: theme)
+    ///
+    /// - Parameter base: the paragraph's OWN style, as already applied by
+    ///   `MarkdownStyleRenderer` for whatever block this paragraph is (list
+    ///   item, blockquote, or plain body) — `nil` only when no such style is
+    ///   on record yet, which falls back to `style(for: .body, theme:)`.
+    ///   Rebasing on `.body` UNCONDITIONALLY, as this used to, discards
+    ///   `firstLineHeadIndent`/`headIndent` for a list-nested or
+    ///   blockquoted embed — it reset such an image to the left/right margin
+    ///   as if it were top-level. That silently MASKED the writing-direction
+    ///   bug `EmbedGeometry.drawRect` now fixes: with indent always zero,
+    ///   a mis-derived RTL origin and a correctly-derived one only diverge
+    ///   once there IS an indent to get wrong, so an indented embed was the
+    ///   one case fix round 1 never actually exercised. Preserving `base`
+    ///   here is what makes an indented embed sit at its list/blockquote's
+    ///   indent instead of resetting to zero, in EITHER writing direction.
+    static func embedImageStyle(basedOn base: NSParagraphStyle?, height: CGFloat,
+                                theme: MarkdownTheme) -> NSParagraphStyle {
+        let base = base ?? style(for: .body, theme: theme)
         guard let s = base.mutableCopy() as? NSMutableParagraphStyle else { return base }
         s.minimumLineHeight = height
         s.maximumLineHeight = height

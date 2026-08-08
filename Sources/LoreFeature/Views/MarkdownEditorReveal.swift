@@ -194,6 +194,13 @@ extension MarkdownEditor.Coordinator {
         // pass, so the caret path can answer "is the selection inside an
         // embed?" without walking the document — see `embedIndex`.
         rebuildEmbedIndex()
+        // Cheap: an early-exit scan that stops at the FIRST strong character,
+        // so it costs O(document) only for a document with none anywhere (rare,
+        // and no worse than the `revealIndex`/`blockBackgrounds` scans this
+        // same pass already does unconditionally). See `documentWritingDirection`'s
+        // doc comment for who reads it and why a fresh scan per render is safe.
+        documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)
+            ?? .leftToRight
         collapseHiddenMarkers(in: storage, window: window)
         // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
         // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see

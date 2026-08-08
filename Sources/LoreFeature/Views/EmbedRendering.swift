@@ -139,9 +139,18 @@ extension MarkdownEditor.Coordinator {
         let range: NSRange
         let image: NSImage
         let size: NSSize
+        /// The paragraph's resolved writing direction and indent, captured
+        /// here rather than recomputed at draw time: `drawEmbedImages` runs
+        /// on every `needsDisplay`, including scroll, and re-scanning the
+        /// paragraph's text for its bidi class on every frame would be
+        /// needless work for a value that only changes when `applyEmbeds`
+        /// itself re-runs. See `EmbedGeometry.drawRect`.
+        let writingDirection: NSWritingDirection
+        let indent: CGFloat
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.range == rhs.range && lhs.image === rhs.image && lhs.size == rhs.size
+                && lhs.writingDirection == rhs.writingDirection && lhs.indent == rhs.indent
         }
     }
 
@@ -235,18 +244,28 @@ extension MarkdownEditor.Coordinator {
                     EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
                     continue
                 }
-                // Restricted to an embed that is ALONE on its paragraph
-                // (fix round 1, Important 7). A mid-sentence image has
-                // nowhere safe to reserve width: the paragraph-level line
-                // height this function sets covers the WHOLE line, so text
-                // sharing that line ("Before ![[a.png]] after.") would be
-                // pushed apart vertically from its own baseline while the
-                // image is drawn at a fixed rect that does not track where
-                // "after." ends up — an overlap no reflow-free drawn
-                // decoration can fix without an attachment character, which
-                // is exactly what is ruled out here. Rather than draw a
-                // decoration with a known collision, a mid-paragraph image
-                // embed degrades to the SAME chip treatment a document gets.
+                // Restricted to an embed that is ALONE on its paragraph. A
+                // mid-sentence image has nowhere safe to reserve width: the
+                // paragraph-level line height this function sets covers the
+                // WHOLE line, so text sharing that line
+                // ("Before ![[a.png]] after.") would be pushed apart
+                // vertically from its own baseline while the image is drawn
+                // at a fixed rect that does not track where "after." ends up
+                // — an overlap no reflow-free drawn decoration can fix
+                // without an attachment character, which is exactly what is
+                // ruled out here. Rather than draw a decoration with a known
+                // collision, a mid-paragraph image embed degrades to the
+                // SAME chip treatment a document gets.
+                //
+                // THIS is also what keeps `EmbedGeometry.drawRect` safe:
+                // that function answers in MARGIN-anchored coordinates
+                // (fix round 2, Important 7) with no idea where "Before "/
+                // "after." end, so it is only ever a correct answer for an
+                // embed with nothing else sharing its line — exactly what
+                // this guard enforces before an `EmbedImageRegion` is ever
+                // built. See `EmbedDecorationTests
+                // .test_midParagraphEmbed_rendersAsAChipNotAnImage` for the
+                // regression guard.
                 guard Self.isAloneOnItsParagraph(fullRange: full_, in: text) else {
                     EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
                     continue
@@ -273,10 +292,33 @@ extension MarkdownEditor.Coordinator {
                 // be worse than the raw markdown it replaces.
                 MarkdownStyleRenderer.collapse([full_.location..<NSMaxRange(full_)], in: storage)
                 let paragraph = text.paragraphRange(for: full_)
+                // The paragraph's OWN style — already applied by
+                // `MarkdownStyleRenderer` for its block (list item,
+                // blockquote, body) before `applyEmbeds` ever runs — read
+                // BEFORE it is overwritten below, so `embedImageStyle` can
+                // preserve its indent rather than resetting to `.body`. See
+                // that function's doc comment.
+                let existingStyle = storage.attribute(
+                    .paragraphStyle, at: paragraph.location, effectiveRange: nil
+                ) as? NSParagraphStyle
                 let style = MarkdownParagraphStyles.embedImageStyle(
-                    height: size.height, theme: MarkdownTheme(tokens: tokens))
+                    basedOn: existingStyle, height: size.height,
+                    theme: MarkdownTheme(tokens: tokens))
                 storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
-                regions.append(EmbedImageRegion(range: full_, image: image, size: size))
+                // Resolved once here, from the SURROUNDING text — never the
+                // embed's own paragraph, which is just a filename and is
+                // very often Latin even inside an Arabic document (fix
+                // round 1, Critical 1) — and carried on the region rather
+                // than re-derived at draw time. See
+                // `EmbedGeometry.contextualWritingDirection` and
+                // `EmbedImageRegion.writingDirection`'s doc comments.
+                let writingDirection = EmbedGeometry.contextualWritingDirection(
+                    paragraph: paragraph, in: text,
+                    documentFallback: documentWritingDirection)
+                let indent = existingStyle?.firstLineHeadIndent ?? 0
+                regions.append(EmbedImageRegion(range: full_, image: image, size: size,
+                                                writingDirection: writingDirection,
+                                                indent: indent))
             }
         }
 
