@@ -142,11 +142,14 @@ final class RootViewSmokeTests: XCTestCase {
     }
 
     /// Same regression, for a folder created INSIDE a subfolder — the shape
-    /// that actually broke in round 3: `Vault/Parent/Q1` touches no watched
-    /// vnode (the single, non-recursive `FolderWatcher` only watches the
-    /// vault ROOT), so before `createFolder` called
-    /// `coordinator.noteDirectoryCreated` directly, nothing would ever have
-    /// told `directoryPaths` this folder exists.
+    /// that actually broke in round 3. Before `createFolder` called
+    /// `coordinator.noteDirectoryCreated` directly, `directoryPaths` had no
+    /// synchronous way to learn `Vault/Parent/Q1` existed: even now that
+    /// `FolderWatcher`'s `FSEventStream` sees subfolder changes too, that
+    /// path runs through FSEvents' coalescing latency and a full
+    /// `startBackgroundRebuild()`, not an immediate update — this test
+    /// asserts the folder is visible with NEITHER a background rebuild NOR a
+    /// watcher event required.
     func test_createFolderInsideASubfolderIsVisibleImmediately() throws {
         let root = try tempVault()
         let parent = root.appendingPathComponent("Parent")
@@ -159,7 +162,7 @@ final class RootViewSmokeTests: XCTestCase {
 
         XCTAssertTrue(store.directoryPaths.contains("Parent/Q1"),
                       "a folder created inside a subfolder must be visible immediately, "
-                      + "even though the root-only watcher never sees the change")
+                      + "without waiting on the watcher's coalescing latency")
     }
 
     /// The background-rescan path (a watcher event, or a full app relaunch)

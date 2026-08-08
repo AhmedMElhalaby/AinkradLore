@@ -96,16 +96,17 @@ extension LoreStore {
 
         try FileManager.default.createDirectory(
             at: destination, withIntermediateDirectories: false)
-        // `coordinator.rows` never gains a row for a directory, and the
-        // watcher — a single, non-recursive `DispatchSource` on the vault
-        // ROOT — fires no event for a create INSIDE a subfolder, so nothing
-        // else would ever tell `coordinator.directoryPaths` this folder now
-        // exists. Told directly, with the exact vault-relative path just
-        // created, rather than relying on a rescan this call has no reason
-        // to trigger. See `VaultIndexCoordinator.noteDirectoryCreated`'s doc
-        // comment — this was a real regression (whole-branch review round 3,
-        // Critical 1) once `directoryPaths` stopped being an uncached
-        // per-render walk that happened to self-heal on the next redraw.
+        // `coordinator.rows` never gains a row for a directory, and while the
+        // watcher's `FSEventStream` DOES see a create inside a subfolder (it
+        // is recursive), routing through it would mean waiting on FSEvents'
+        // coalescing latency and a full `startBackgroundRebuild()` for a
+        // change whose exact content this call already knows. Told directly,
+        // with the exact vault-relative path just created, rather than
+        // relying on a rescan this call has no reason to trigger. See
+        // `VaultIndexCoordinator.noteDirectoryCreated`'s doc comment — this
+        // was a real regression (whole-branch review round 3, Critical 1)
+        // once `directoryPaths` stopped being an uncached per-render walk
+        // that happened to self-heal on the next redraw.
         coordinator.noteDirectoryCreated(Self.vaultRelativePath(destination, under: root))
         return destination
     }

@@ -70,20 +70,16 @@ public final class VaultIndexCoordinator {
     ///   touch `rows`, and trash/rename can target a subfolder the watcher
     ///   never sees) can go stale silently.
     ///
-    /// Known limitation, not fixed: `FolderWatcher` is a single
-    /// `DispatchSource` on the vault ROOT only, non-recursive (same
-    /// limitation `rows` has always had for document changes made inside a
-    /// subfolder by something other than Lore itself — this property
-    /// inherits it rather than introduces it). A folder created, trashed, or
-    /// renamed in a SUBFOLDER by an external tool (Finder, `mkdir`, another
-    /// app) fires no watcher event and so is not picked up until an unrelated
-    /// root-level change or the next full rescan/relaunch. Lore's OWN
-    /// mutations are unaffected (the three targeted calls above are
-    /// synchronous and need no watcher), so this limitation is scoped to
-    /// changes made entirely outside Lore. A recursive watcher would need one
-    /// `DispatchSource` per directory (or FSEvents' own recursive API in
-    /// place of `DispatchSource`) — flagged as a follow-up, not attempted in
-    /// this wave.
+    /// Previously a known limitation, now fixed: `FolderWatcher` is an
+    /// `FSEventStream` on the vault root, which is recursive by
+    /// construction — a folder created, trashed, or renamed in a SUBFOLDER
+    /// by an external tool (Finder, `mkdir`, another app, a sync client) now
+    /// fires the same `onChange` a root-level change always did, triggering
+    /// `startBackgroundRebuild()` the same way. The three targeted `note*`
+    /// calls above remain because they are still strictly cheaper than a
+    /// full rescan for Lore's OWN mutations (synchronous, exact, no need to
+    /// wait on FSEvents' coalescing latency) — not because the watcher can't
+    /// see those changes anymore.
     public private(set) var directoryPaths: [String] = []
 
     private let indexPath: URL
@@ -474,13 +470,15 @@ public final class VaultIndexCoordinator {
 
     /// `createFolder`'s own notification that it just created `path`
     /// (vault-relative) directly on disk, bypassing both `rows` (folders are
-    /// never index rows) and the watcher (a create INSIDE a subfolder fires
-    /// no event on the root-only, non-recursive `FolderWatcher` — see
-    /// `directoryPaths`'s own doc comment). A plain append: cheap, exact, and
-    /// avoids re-running the whole-vault walk synchronously on the main actor
-    /// for a change whose entire content this method's caller already knows
-    /// precisely. Idempotent (checks `contains` first) so a redundant call
-    /// costs nothing beyond that check.
+    /// never index rows) and the watcher. `FolderWatcher` WOULD see this
+    /// (its `FSEventStream` is recursive, so a create inside a subfolder
+    /// fires `onChange` too — see `directoryPaths`'s own doc comment), but
+    /// only after FSEvents' coalescing latency and a full
+    /// `startBackgroundRebuild()`; this is a synchronous, exact, cheap
+    /// substitute for a change whose entire content this method's caller
+    /// already knows precisely, without waiting on the watcher at all.
+    /// Idempotent (checks `contains` first) so a redundant call costs
+    /// nothing beyond that check.
     func noteDirectoryCreated(_ path: String) {
         guard !directoryPaths.contains(path) else { return }
         directoryPaths.append(path)

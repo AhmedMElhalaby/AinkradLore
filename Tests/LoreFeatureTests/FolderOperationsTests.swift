@@ -459,8 +459,10 @@ final class FolderOperationsTests: XCTestCase {
     /// `directoryPaths`. Goes through the REAL `applyTrashFolder` API — no
     /// manual rebuild — the shape the reviewer's probe used to reproduce the
     /// bug (`directoryPaths after trash = ["Parent/Q1"]` with the directory
-    /// already gone from disk). Nested one level, the exact case that
-    /// defeats the root-only watcher too.
+    /// already gone from disk). Nested one level — the recursive
+    /// `FolderWatcher` would eventually see this too, but only after its
+    /// coalescing latency and a full rescan, so this test still goes through
+    /// the synchronous `noteDirectoryRemoved` path, not the watcher.
     func test_applyTrashFolder_removesTheFolderFromDirectoryPaths() async throws {
         let root = try vault()
         let parent = root.appendingPathComponent("Parent")
