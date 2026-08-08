@@ -41,6 +41,20 @@ struct LoreRootView: View {
                 // type into either way.
                 HStack(spacing: AinkradSpacing.sm) {
                     AinkradSearchField(text: $query, placeholder: "Search notes")
+                    // Folder creation belongs to Folders mode only — "All
+                    // notes" (`NoteListView`) has no folder affordances at
+                    // all, by design. Gated on `effectiveSidebarMode` rather
+                    // than `store.sidebarMode` so an active search/tag filter
+                    // (which silently forces the flat list — see
+                    // `effectiveSidebarMode`) hides this too: it would
+                    // otherwise sit above a list that is not the tree, next to
+                    // rows it cannot affect.
+                    if effectiveSidebarMode == .tree, let root = store.vaultRoot {
+                        AinkradIconButton(systemName: "folder.badge.plus",
+                                         tooltip: "New Folder") {
+                            ops.beginNewFolder(in: root)
+                        }
+                    }
                     AinkradIconButton(systemName: "plus", action: quickCapture)
                         .keyboardShortcut("n", modifiers: .command)
                 }

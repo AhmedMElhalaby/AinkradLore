@@ -63,9 +63,9 @@ struct FolderNode: Identifiable {
 /// flat list. Expansion state and the choice between the two views persist
 /// via `LoreStore`; see `LoreStore.sidebarMode` / `setExpandedFolders`.
 ///
-/// Rename / move / trash arrive through `ops`, whose menus (`LoreRowMenu`,
-/// `LoreFolderMenu`) are shared with `NoteListView` so a destructive affordance
-/// is not defined twice.
+/// Rename / move / trash arrive through `ops`, whose menu builders
+/// (`loreRowMenuItems`, `loreFolderMenuItems`) are shared with `NoteListView`
+/// so a destructive affordance is not defined twice.
 struct FolderTreeView: View {
     @Bindable var store: LoreStore
     let theme: HostTheme
@@ -81,6 +81,23 @@ struct FolderTreeView: View {
                     outline(FolderNode.tree(from: store.rows,
                                             directories: store.directoryPaths,
                                             root: root), depth: 0)
+                }
+                // A filler BELOW every row, not an overlay across the whole
+                // ScrollView: `.ainkradContextMenu`'s catcher only lets a
+                // right-click through where it is hit-testable, but it still
+                // sits ON TOP of whatever it decorates, so putting it on the
+                // ScrollView itself would shadow every row's OWN catcher
+                // underneath and swallow the row menus this task must
+                // preserve. Placed here, after the tree, it only ever
+                // occupies the empty space below the last row — exactly the
+                // spot with no row to host `loreFolderMenuItems` at all,
+                // which is the whole reason a vault with no subfolder yet (or
+                // every folder collapsed) had no reachable New Folder.
+                if let root = store.vaultRoot {
+                    Color.clear
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .contentShape(Rectangle())
+                        .ainkradContextMenu(loreRootMenuItems(root: root, ops: ops))
                 }
             }
         }
@@ -111,9 +128,7 @@ struct FolderTreeView: View {
             // vault-RELATIVE path, so it is resolved against the live vault root
             // rather than assumed absolute; with no vault there is no folder to
             // rename and the menu is simply absent.
-            .contextMenu {
-                if let folder = folderURL(node) { LoreFolderMenu(folder: folder, ops: ops) }
-            }
+            .ainkradContextMenu(folderURL(node).map { loreFolderMenuItems(folder: $0, ops: ops) } ?? [])
         }
         if depth == 0 || expanded.contains(node.id) {
             ForEach(node.documents, id: \.path) { row in
@@ -125,14 +140,22 @@ struct FolderTreeView: View {
                     subtitle: nil,
                     trailing: { EmptyView() })
                 .padding(.leading, CGFloat(depth + 1) * 12)
-                .contextMenu { LoreRowMenu(row: row, ops: ops) }
+                .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
             }
             ForEach(node.children) { child in outline(child, depth: depth + 1) }
         }
     }
 
     /// The absolute URL of a tree node, or nil for the synthetic root node (its
-    /// id is `"/"` and it IS the vault — renaming it is not a folder rename).
+    /// id is `"/"` and it IS the vault — renaming it is not a folder rename,
+    /// and `loreFolderMenuItems`'s Rename/Move-to-Trash have no sense for it).
+    /// This function is only ever called from `outlineBody`'s `depth > 0`
+    /// branch, where `node.id` can never be `"/"`, so the nil case never
+    /// actually fires here — the guard stays because a future caller passing
+    /// the root node is exactly the kind of mistake it exists to catch. The
+    /// root's OWN "New Folder" route is `loreRootMenuItems`, reached through
+    /// the empty-space filler below the tree and the sidebar header button,
+    /// not through this per-row menu.
     private func folderURL(_ node: FolderNode) -> URL? {
         guard let root = store.vaultRoot, node.id != "/" else { return nil }
         return root.appendingPathComponent(node.id)

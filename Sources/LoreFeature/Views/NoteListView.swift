@@ -67,7 +67,7 @@ struct NoteListView: View {
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
-                            .contextMenu { LoreRowMenu(row: row, ops: ops) }
+                            .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
                         }
                     }
                 }

@@ -112,34 +112,54 @@ struct MessageSheet: View {
 /// Rename and Move but NO Delete, exactly as the previous milestone left them:
 /// they are read-only, so this menu does not arm an irreversible delete
 /// against a binary the user has no way to edit or reconstruct.
-struct LoreRowMenu: View {
-    let row: IndexRow
-    let ops: SidebarOperations
-
-    var body: some View {
-        Button("Rename…") { ops.beginRename(row) }
-        Button("Move to…") { ops.beginMove(row) }
-        if row.type != AttachmentEngine.identifier {
-            Divider()
-            Button("Move to Trash", role: .destructive) { ops.requestTrash(row) }
-        }
+///
+/// Built as `[AinkradMenuItem]` rather than a `View`: `.ainkradContextMenu(_:)`
+/// (the kit's chamfer/hover-scan/`AinkradKbd` menu — see
+/// `AinkradAppKit/Sources/AinkradAppKitUI/Components/AinkradContextMenu.swift`)
+/// takes an item array, not a `@ViewBuilder`, so there is no `Button`/`Divider`
+/// tree to build here. The kit has no divider primitive; the visual break
+/// `Divider()` gave the destructive row is expressed instead by
+/// `AinkradMenuItem.isDestructive`'s own tint, which is what the row-hover
+/// design already leans on to separate "safe" actions from the trash one.
+@MainActor
+func loreRowMenuItems(row: IndexRow, ops: SidebarOperations) -> [AinkradMenuItem] {
+    var items = [
+        AinkradMenuItem(title: "Rename…", systemName: "pencil") { ops.beginRename(row) },
+        AinkradMenuItem(title: "Move to…", systemName: "folder") { ops.beginMove(row) },
+    ]
+    if row.type != AttachmentEngine.identifier {
+        items.append(AinkradMenuItem(title: "Move to Trash", systemName: "trash",
+                                     isDestructive: true) { ops.requestTrash(row) })
     }
+    return items
 }
 
 /// The folder row menu. Create and trash reuse the same name-prompt and
 /// preview machinery rename already uses — `beginNewFolder`/`requestTrashFolder`
 /// on `SidebarOperations` — so a folder's three destructive-adjacent
 /// affordances share one review surface instead of three.
-struct LoreFolderMenu: View {
-    let folder: URL
-    let ops: SidebarOperations
+@MainActor
+func loreFolderMenuItems(folder: URL, ops: SidebarOperations) -> [AinkradMenuItem] {
+    [
+        AinkradMenuItem(title: "Rename Folder…", systemName: "pencil") {
+            ops.beginRenameFolder(folder)
+        },
+        AinkradMenuItem(title: "New Folder…", systemName: "folder.badge.plus") {
+            ops.beginNewFolder(in: folder)
+        },
+        AinkradMenuItem(title: "Move to Trash", systemName: "trash",
+                        isDestructive: true) { ops.requestTrashFolder(folder) },
+    ]
+}
 
-    var body: some View {
-        Button("Rename Folder…") { ops.beginRenameFolder(folder) }
-        Button("New Folder…") { ops.beginNewFolder(in: folder) }
-        Divider()
-        Button("Move to Trash", role: .destructive) { ops.requestTrashFolder(folder) }
-    }
+/// The empty-space / root menu: reachable with no subfolder yet or with the
+/// tree fully collapsed, where no folder ROW exists to host `loreFolderMenuItems`
+/// at all. Just the one action — root has nothing to rename or trash.
+@MainActor
+func loreRootMenuItems(root: URL, ops: SidebarOperations) -> [AinkradMenuItem] {
+    [AinkradMenuItem(title: "New Folder…", systemName: "folder.badge.plus") {
+        ops.beginNewFolder(in: root)
+    }]
 }
 
 extension SidebarOperations {
