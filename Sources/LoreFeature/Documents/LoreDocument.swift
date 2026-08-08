@@ -72,6 +72,12 @@ public struct EditorContext {
     public let completions: @MainActor (String) -> [IndexRow]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// Resolves an `![[target]]` embed's raw target to a file, for inline
+    /// image / chip rendering (`EmbedRendering`). Defaulted to "nothing
+    /// resolves", the same "no link layer" default `completions` and
+    /// `openLink` already have, so an engine that ignores it behaves exactly
+    /// as before.
+    public let resolveEmbedTarget: @MainActor (String) -> URL?
     /// The text to write for a picked completion. Supplied by the shell because
     /// only the shell can check that the target resolves back to that document
     /// — see `LoreStore.linkTarget(for:)`. The default is the store-blind
@@ -95,6 +101,7 @@ public struct EditorContext {
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 registerScrollHandler: @escaping @MainActor (@escaping @MainActor (Int) -> Void) -> Void
@@ -102,6 +109,7 @@ public struct EditorContext {
                 isReadOnly: Bool = false) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
+        self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler
         self.isReadOnly = isReadOnly

@@ -66,14 +66,63 @@ final class LinkTextView: NSTextView {
         didSet { if blockBackgroundPalette != oldValue { needsDisplay = true } }
     }
 
+    /// Resolved image embeds to paint where their (collapsed) source text
+    /// sits — see `MarkdownEditor.Coordinator.applyEmbeds`. Drawn in
+    /// `drawBackground`, same as `blockBackgrounds`: the embed's paragraph
+    /// style already reserves the vertical room, so drawing before the text
+    /// layer is enough — the collapsed source glyphs are visually empty and
+    /// nothing else occupies that rect.
+    var embedImages: [MarkdownEditor.Coordinator.EmbedImageRegion] = [] {
+        didSet { if embedImages != oldValue { needsDisplay = true } }
+    }
+
     /// The one drawing hook. `super` first, so the view's own background is
     /// down before the block decoration goes on top of it and the text on top
     /// of that.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        guard let palette = blockBackgroundPalette else { return }
-        MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
-                                      in: self, dirtyRect: rect)
+        if let palette = blockBackgroundPalette {
+            MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
+                                          in: self, dirtyRect: rect)
+        }
+        drawEmbedImages(in: rect)
+    }
+
+    /// Positions each region from its character rect at draw time, rather
+    /// than caching a rect computed earlier: scrolling and resizing move
+    /// glyph rects without changing the ranges `applyEmbeds` recorded them
+    /// for.
+    ///
+    /// `firstRect(forCharacterRange:actualRange:)`, not `layoutManager`:
+    /// `MarkdownStyleRenderer.viewportWindow` already documents why reading
+    /// `layoutManager` on a TextKit 2 view silently downgrades the whole view
+    /// to TextKit 1, and `caretRect(in:)` in `MarkdownEditor.swift` uses this
+    /// same version-agnostic API for the identical reason. It answers in
+    /// SCREEN coordinates, so the result is converted back through the
+    /// window before comparing against `dirtyRect`, which is in this view's
+    /// own coordinate space.
+    private func drawEmbedImages(in dirtyRect: NSRect) {
+        guard !embedImages.isEmpty, let window else { return }
+        for region in embedImages {
+            let screenRect = firstRect(forCharacterRange: region.range, actualRange: nil)
+            guard screenRect.width.isFinite, screenRect.height.isFinite else { continue }
+            let windowRect = window.convertFromScreen(screenRect)
+            let rect = convert(windowRect, from: nil)
+            guard rect.intersects(dirtyRect) else { continue }
+            // Left-aligned within the line's reserved height, at the image's
+            // own scaled size — `applyEmbeds` already capped both dimensions
+            // to the container.
+            let drawRect = NSRect(x: rect.minX, y: rect.minY,
+                                  width: region.size.width, height: region.size.height)
+            // `draw(in:)` (the single-rect convenience) does NOT respect a
+            // flipped coordinate system, and `NSTextView` IS flipped — fix
+            // round 1, Important 5. Without `respectFlipped: true` every
+            // inline embed image renders upside down. `.sourceOver` and
+            // `fraction: 1` are the same defaults `draw(in:)` uses; only the
+            // flip behaviour changes.
+            region.image.draw(in: drawRect, from: .zero, operation: .sourceOver,
+                              fraction: 1.0, respectFlipped: true, hints: nil)
+        }
     }
 
     /// Modifiers that mean the user is doing something other than "activate

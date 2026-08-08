@@ -11,6 +11,11 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Resolves an `![[target]]` embed's raw target to a file, for
+    /// `EmbedRendering`. `nil` — the default — makes every embed render
+    /// `.unresolved` (plain wikilink colouring), which is the right answer
+    /// for an engine with no link layer, exactly like `completions == nil`.
+    let resolveEmbedTarget: (@MainActor (String) -> URL?)?
     /// What a picked row inserts. Defaults to the store-blind approximation.
     let linkTarget: @MainActor (IndexRow) -> String
     /// A UTF-16 offset (into `text`) to scroll the caret to and select. Set by
@@ -27,12 +32,14 @@ public struct MarkdownEditor: NSViewRepresentable {
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 scrollTarget: Binding<Int?> = .constant(nil),
                 allowsTaskToggle: Bool = false) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
+        self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
         self.allowsTaskToggle = allowsTaskToggle
@@ -103,6 +110,7 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         context.coordinator.textView = tv
         context.coordinator.allowsTaskToggle = allowsTaskToggle
+        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
         tv.string = text
         context.coordinator.applyStyles()
@@ -132,6 +140,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         guard let tv = context.coordinator.textView else { return }
         context.coordinator.completions = completions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
@@ -176,6 +185,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         var tokens: HostThemeTokens
         var completions: (@MainActor (String) -> [IndexRow])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
+        /// practice — `makeNSView`/`updateNSView` always install at least the
+        /// "no candidates" closure, matching how `completions` degrades.
+        var resolveEmbedTarget: @MainActor (String) -> URL? = { _ in nil }
         var linkTarget: @MainActor (IndexRow) -> String
             = { LinkCompletionContext.insertableTarget(for: $0) }
         /// See `MarkdownEditor.allowsTaskToggle`.
@@ -212,6 +225,24 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// reveal state in full: if a caret move leaves this unchanged there is
         /// nothing to redraw, which is what keeps arrowing free of styling work.
         var revealedBlockIndices: Range<Int> = 0..<0
+        /// Every `.embed` span's position, source range and owning block, for
+        /// the CURRENT text. Rebuilt only when the text is re-rendered, from
+        /// the same pass that builds `revealIndex` — never on a caret move.
+        ///
+        /// Exists because an embed's reveal is NOT a block-level property:
+        /// `revealForSelectionChange` only reaches `restyleBlock` when the
+        /// set of revealed BLOCKS flips, and arrowing from inside a block
+        /// into an embed's own range is not a block flip — so without this
+        /// an image stayed collapsed and drawn with the caret invisibly
+        /// inside it until the next keystroke or the 150 ms debounce. Fix
+        /// round 2, I6. Documents contain very few embeds (usually zero), so
+        /// scanning this per caret move is cheap where scanning
+        /// `styleCache.spans` would not be.
+        var embedIndex: [(spanIndex: Int, fullRange: NSRange, block: Int)] = []
+        /// Which entries of `embedIndex` the selection is currently inside.
+        /// The embed-level analogue of `revealedBlockIndices`: if a caret
+        /// move leaves this unchanged there is no embed work to do.
+        var revealedEmbedSpans: Set<Int> = []
         /// How many times the index has been built. Exists so a test can pin
         /// the claim that a caret move never rebuilds it — the claim is the
         /// whole performance contract of the reveal path, and an earlier

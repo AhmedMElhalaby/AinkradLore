@@ -72,6 +72,21 @@ enum MarkdownParagraphStyles {
         return s
     }
 
+    /// Reserves `height` points of line height for an embedded image's
+    /// paragraph. The image's SOURCE text is collapsed to a near-zero font
+    /// (see `EmbedRendering.applyEmbeds`), which on its own would leave the
+    /// line only as tall as a collapsed glyph — a single point. Setting
+    /// `minimumLineHeight` is what makes the paragraph tall enough for
+    /// `LinkTextView` to draw the actual image into, without inserting any
+    /// character or attachment that would change what the line contains.
+    static func embedImageStyle(height: CGFloat, theme: MarkdownTheme) -> NSParagraphStyle {
+        let base = style(for: .body, theme: theme)
+        guard let s = base.mutableCopy() as? NSMutableParagraphStyle else { return base }
+        s.minimumLineHeight = height
+        s.maximumLineHeight = height
+        return s
+    }
+
     static func style(for block: MarkdownBlock, theme: MarkdownTheme) -> NSParagraphStyle {
         let s = NSMutableParagraphStyle()
         s.lineHeightMultiple = theme.lineHeightMultiple

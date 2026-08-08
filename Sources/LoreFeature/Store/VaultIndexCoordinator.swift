@@ -7,12 +7,28 @@ import Observation
 @MainActor
 @Observable
 public final class VaultIndexCoordinator {
-    public private(set) var rows: [IndexRow] = []
+    /// `didSet` drops the cached resolver below — see `currentResolver()`.
+    /// Every reassignment site (background rebuild, `activate`, `shutdown`,
+    /// `indexDocument`, the rename/trash paths) already goes through THIS
+    /// property, so one `didSet` covers every invalidation point without
+    /// hunting down each call site by hand.
+    public private(set) var rows: [IndexRow] = [] {
+        didSet { cachedResolver = nil }
+    }
     public private(set) var vaultRoot: URL?
 
     private let indexPath: URL
     private var index: LoreIndex?
     private var watcher: FolderWatcher?
+    /// `currentResolver()`'s cache. `LinkResolver.init` builds a dictionary
+    /// from every row plus a `sortByPreference` sort per key — cheap once per
+    /// vault change, ruinous per call. `EmbedRendering.applyEmbeds` calls
+    /// `resolveEmbedTarget` — which reaches `currentResolver()` — once per
+    /// `![[…]]` span on every full editor render, i.e. on every keystroke;
+    /// without this cache a note with N embeds in an M-row vault rebuilt N
+    /// whole-vault resolvers per keypress. Dropped, not refreshed, on
+    /// invalidation: the next call rebuilds it lazily, exactly once.
+    private var cachedResolver: LinkResolver?
     /// While `Date() < suppressWatcherUntil`, `FolderWatcher` callbacks are
     /// ignored — see `save(_:overwritingExternalChanges:)`.
     private var suppressWatcherUntil: Date = .distantPast
@@ -343,11 +359,17 @@ public final class VaultIndexCoordinator {
     func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
         (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []
     }
-    /// A resolver over the CURRENT index rows, for link clicks and completion.
+    /// A resolver over the CURRENT index rows, for link clicks, completion
+    /// and embed rendering. Cached against `rows`'s identity — see
+    /// `cachedResolver`'s doc comment for why this matters — and rebuilt
+    /// lazily the first time it is asked for after `rows` changes.
     func currentResolver() -> LinkResolver {
-        LinkResolver(documents: rows.map {
+        if let cachedResolver { return cachedResolver }
+        let resolver = LinkResolver(documents: rows.map {
             (url: $0.path, title: $0.title, aliases: $0.aliases)
         })
+        cachedResolver = resolver
+        return resolver
     }
 
     /// Index one document after a save, without a whole-vault rescan.

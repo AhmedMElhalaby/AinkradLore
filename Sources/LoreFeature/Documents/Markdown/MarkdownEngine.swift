@@ -122,6 +122,7 @@ private struct MarkdownDocumentEditor: View {
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
                            completions: ctx.completions, onOpenLink: ctx.openLink,
+                           resolveEmbedTarget: ctx.resolveEmbedTarget,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
                            // Task checkboxes are markdown, and only a session
                            // that can actually be written may offer to flip

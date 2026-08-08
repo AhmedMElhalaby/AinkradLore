@@ -66,6 +66,7 @@ struct DocumentPane: View {
                                   let name = LinkCompletionContext.documentName(of: target)
                                   if !store.openLink(name) { unresolved = name }
                               },
+                              resolveEmbedTarget: { store.resolveLink($0) },
                               linkTarget: { store.linkTarget(for: $0) },
                               registerScrollHandler: { handler in scrollHandler = handler },
                               isReadOnly: session.isReadOnly))
