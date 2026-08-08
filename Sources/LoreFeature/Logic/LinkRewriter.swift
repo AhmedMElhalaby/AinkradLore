@@ -110,6 +110,7 @@ public enum LinkRewriter {
         var unrewritable: [UnrewritableLink] = []
         for link in inboundLinks {
             guard let newTarget = rewritten(link.rawTarget, syntax: link.syntax,
+                                            from: source,
                                             to: destination,
                                             vaultRoot: vaultRoot) else {
                 // Not "no change needed" — no rewrite EXISTS. Recorded so the
@@ -158,6 +159,7 @@ public enum LinkRewriter {
     /// filesystem path) would hand the confirmation UI a corrupted-looking
     /// target that is worse than simply omitting the edit.
     static func rewritten(_ rawTarget: String, syntax: LinkSyntax,
+                          from source: URL,
                           to destination: URL,
                           vaultRoot: URL) -> String? {
         // Split off the fragment; it is carried through untouched.
@@ -173,8 +175,31 @@ public enum LinkRewriter {
         // SYNTAX is known and a wikilink can be excluded from encoding.
         let body = syntax == .markdown
             ? (split.body.removingPercentEncoding ?? split.body) : split.body
-        let hadExtension = body.lowercased().hasSuffix(".md")
-        let withoutExtension = hadExtension ? String(body.dropLast(3)) : body
+        // ANY explicit extension names a location precisely enough that it
+        // must track a move — not just `.md`. A bare `[[Contract.pdf]]` is as
+        // explicit as `[[Design.md]]`, and this generalizes past `.md` so a
+        // non-markdown attachment's extension is not silently dropped on
+        // rewrite (renaming `Contract.pdf` to `Agreement.pdf` used to leave
+        // the note pointing at `[[Agreement]]`, still resolvable by basename
+        // but not what the author wrote). See
+        // `M3AcceptanceTests.test_criterion7_renamingThePDFRewritesTheLinkInTheReferringNote`.
+        //
+        // BUT: `(body as NSString).pathExtension` alone cannot tell an
+        // extension from a dotted TITLE — `[[Chapter 1.1]]`, `[[v1.2]]`,
+        // `[[Report 2024.10]]` all have a non-empty trailing dot-suffix that
+        // is not an extension at all. The only ground truth for "is this
+        // suffix really an extension" is `source`, the actual file the link
+        // resolves to: a trailing dot-suffix counts as an explicit extension
+        // only when it MATCHES `source`'s real extension (case-insensitively).
+        // `source.pathExtension` naturally handles multi-dot extensions too
+        // (`archive.tar.gz` → `.pathExtension` is `"gz"`, and a body ending
+        // `.tar.gz` matches that the same way).
+        let bodyExtension = (body as NSString).pathExtension
+        let sourceExtension = source.pathExtension
+        let hadExtension = !bodyExtension.isEmpty && !sourceExtension.isEmpty
+            && bodyExtension.lowercased() == sourceExtension.lowercased()
+        let withoutExtension = hadExtension
+            ? String(body.dropLast(bodyExtension.count + 1)) : body
         let hadPath = withoutExtension.contains("/")
 
         let newBase = destination.deletingPathExtension().lastPathComponent
@@ -191,7 +216,17 @@ public enum LinkRewriter {
         } else {
             newBody = newBase
         }
-        if hadExtension { newBody += ".md" }
+        // The rewritten extension tracks `destination`'s actual extension
+        // (not a hardcoded `.md`), so a non-markdown rename keeps its own
+        // extension rather than borrowing markdown's. Guarded against an
+        // empty `destination.pathExtension`: latent today (`plan(rename:to:)`
+        // always re-appends the source's extension, so `hadExtension` implies
+        // a non-empty destination extension too), but an unguarded concat on
+        // a file-mutating path is worth closing rather than trusting a caller
+        // invariant to hold forever.
+        if hadExtension, !destination.pathExtension.isEmpty {
+            newBody += "." + destination.pathExtension
+        }
         return newBody + fragment
     }
 
