@@ -85,4 +85,95 @@ final class LinkResolverTests: XCTestCase {
         XCTAssertEqual(forward.resolve("Design")?.path, "/v/Aaa/Design.md")
         XCTAssertEqual(reversed.resolve("Design")?.path, "/v/Aaa/Design.md")
     }
+
+    func test_resolvesAnAttachmentByFilenameWithExtension() {
+        let pdf = URL(fileURLWithPath: "/v/Docs/Contract.pdf")
+        let resolver = LinkResolver(documents: [
+            (url: pdf, title: "Contract.pdf", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("Contract.pdf"), pdf)
+    }
+
+    func test_markdownNoteWinsOverAnAttachmentWithTheSameBasename() {
+        let note = URL(fileURLWithPath: "/v/Notes/Budget.md")
+        let sheet = URL(fileURLWithPath: "/v/Budget.xlsx")
+        // The attachment's path is SHORTER, so the old length-first tie-break
+        // would have picked it. `[[Budget]]` in a vault of notes must mean the note.
+        let resolver = LinkResolver(documents: [
+            (url: sheet, title: "Budget.xlsx", aliases: []),
+            (url: note, title: "Budget", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("Budget"), note)
+        XCTAssertEqual(resolver.resolve("Budget.xlsx"), sheet)
+    }
+
+    func test_explicitPathResolvesToAnAttachment() {
+        let pdf = URL(fileURLWithPath: "/v/Docs/Contract.pdf")
+        let resolver = LinkResolver(documents: [
+            (url: pdf, title: "Contract.pdf", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("Docs/Contract.pdf"), pdf)
+    }
+
+    /// CRITICAL, review-caught: an explicit path target that carries an
+    /// extension must resolve to the file with THAT extension, even when a
+    /// same-stem markdown note also exists. Before the fix, the without-
+    /// extension suffix-match pass ran unconditionally as an `||` alternative,
+    /// so `Docs/Contract.pdf` could match `Docs/Contract.md` on the stem —
+    /// and `sortedDocuments` being markdown-first meant the note always won.
+    /// `VaultIndexCoordinator` persists whatever `resolve` returns into
+    /// `links.target_path`, and `LinkRewriter` plans renames from that column,
+    /// so this bug would rewrite an embed that named the PDF as if it named
+    /// the note.
+    func test_explicitPathWithExtensionDoesNotCollideWithASameStemMarkdownNote() {
+        let pdf = URL(fileURLWithPath: "/v/Docs/Contract.pdf")
+        let note = URL(fileURLWithPath: "/v/Docs/Contract.md")
+        let resolver = LinkResolver(documents: [
+            (url: pdf, title: "Contract.pdf", aliases: []),
+            (url: note, title: "Contract", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("Docs/Contract.pdf"), pdf)
+        XCTAssertEqual(resolver.resolve("Docs/Contract.md"), note)
+        XCTAssertEqual(resolver.resolve("Docs/Contract"), note)
+    }
+
+    /// Same collision, image extension instead of a document extension —
+    /// makes sure the fix isn't accidentally `.pdf`-specific.
+    func test_explicitPathWithExtensionDoesNotCollideWithASameStemMarkdownNoteForImages() {
+        let png = URL(fileURLWithPath: "/v/a/diagram.png")
+        let note = URL(fileURLWithPath: "/v/a/diagram.md")
+        let resolver = LinkResolver(documents: [
+            (url: png, title: "diagram.png", aliases: []),
+            (url: note, title: "diagram", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("a/diagram.png"), png)
+        XCTAssertEqual(resolver.resolve("a/diagram.md"), note)
+    }
+
+    /// `[[Contract.pdf#Page]]`: the fragment must be stripped before
+    /// resolution reaches the attachment, same as it is for a markdown note.
+    func test_ignoresHeadingFragmentOnAnAttachmentTarget() {
+        let pdf = URL(fileURLWithPath: "/v/Docs/Contract.pdf")
+        let resolver = LinkResolver(documents: [
+            (url: pdf, title: "Contract.pdf", aliases: []),
+        ])
+        XCTAssertEqual(resolver.resolve("Contract.pdf#Page"), pdf)
+        XCTAssertEqual(resolver.resolve("Docs/Contract.pdf#Page"), pdf)
+    }
+
+    /// Determinism for the explicit-path, extension-bearing collision case
+    /// specifically: the same two-document vault, built with the input
+    /// tuples in both orders, must resolve `Docs/Contract.pdf` to the same
+    /// URL either way — never to whichever document happened to be built
+    /// (or iterated) first.
+    func test_explicitPathWithExtensionCollisionResolvesIdenticallyRegardlessOfInputOrder() {
+        let pdf = ("/v/Docs/Contract.pdf", "Contract.pdf", [String]())
+        let note = ("/v/Docs/Contract.md", "Contract", [String]())
+
+        let forward = resolver([pdf, note])
+        let reversed = resolver([note, pdf])
+
+        XCTAssertEqual(forward.resolve("Docs/Contract.pdf")?.path, "/v/Docs/Contract.pdf")
+        XCTAssertEqual(reversed.resolve("Docs/Contract.pdf")?.path, "/v/Docs/Contract.pdf")
+    }
 }
