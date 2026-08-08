@@ -464,4 +464,11 @@ public enum LoreError: Error, Equatable {
     /// folder name taken from untrusted document text (a `[[a/b]]` link),
     /// where a symlink inside the vault redirects the path out of it.
     case outsideVault(URL)
+    /// `createFolder`'s name is not a single path COMPONENT — empty, a
+    /// separator, `:`, `.` or `..` — and is REJECTED rather than sanitized: a
+    /// silently-renamed folder is worse than a refused one, because the user
+    /// asked for a specific name and would not know they did not get it.
+    case invalidName(String)
+    /// `createFolder`'s destination already exists.
+    case alreadyExists(URL)
 }

@@ -22,6 +22,11 @@ final class SidebarOperations {
     enum NameTarget: Equatable {
         case document(URL)
         case folder(URL)
+        /// A NEW folder about to be created inside the associated parent —
+        /// distinct from `.folder`, which names an EXISTING folder being
+        /// renamed, because the two need different verbs and different store
+        /// calls on confirm.
+        case newFolder(URL)
     }
 
     /// The plan a preview is showing, kept so `confirm()` applies exactly the
@@ -31,6 +36,7 @@ final class SidebarOperations {
     private enum Pending {
         case document(RenamePlan, isMove: Bool)
         case folder(FolderRenamePlan)
+        case trashFolder(FolderTrashPlan)
     }
 
     private let store: LoreStore
@@ -63,6 +69,15 @@ final class SidebarOperations {
         nameText = folder.lastPathComponent
     }
 
+    /// Asks for the name of a new folder inside `parent`. Unlike rename/move,
+    /// there is nothing to preview here — creating an empty directory affects
+    /// nothing else in the vault — so confirming the name sheet performs the
+    /// create directly instead of routing through a plan/preview.
+    func beginNewFolder(in parent: URL) {
+        nameTarget = .newFolder(parent)
+        nameText = ""
+    }
+
     /// Turns the typed name into a PLAN and a preview. Never writes. A refusal
     /// (empty name, path separator, `..`, escape from the vault, destination
     /// exists) arrives on the plan and is rendered instead of a preview.
@@ -78,6 +93,38 @@ final class SidebarOperations {
             let plan = store.plan(renameFolder: url, to: nameText)
             pending = .folder(plan)
             preview = RenamePreview(folder: plan)
+        case .newFolder(let parent):
+            do {
+                let created = try store.createFolder(named: nameText, in: parent)
+                message = "Created “\(created.lastPathComponent)”."
+            } catch let error as LoreError {
+                message = Self.describeCreateFolder(error)
+            } catch {
+                message = "The folder could not be created: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// `describeCreate` phrases everything as a failed document create, so
+    /// folder creation gets its own sentences — the errors that can actually
+    /// reach it (`invalidName`, `alreadyExists`, `outsideVault`) barely
+    /// overlap with the document-create ones anyway.
+    static func describeCreateFolder(_ error: LoreError) -> String {
+        switch error {
+        case .invalidName(let name):
+            return "“\(name)” is not a valid folder name. "
+                + "Folder names cannot be empty, cannot contain “/” or “:”, cannot start "
+                + "with “.”, and cannot contain control characters."
+        case .alreadyExists(let url):
+            return "A folder named “\(url.lastPathComponent)” already exists here."
+        case .outsideVault(let url):
+            return "“\(url.lastPathComponent)” is outside the vault, so nothing was created."
+        case .noVault:
+            return "No vault is open, so there is nowhere to put a new folder."
+        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
+            return "The folder could not be created: \(reason)"
+        case .externalChange(let url):
+            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
         }
     }
 
@@ -160,6 +207,11 @@ final class SidebarOperations {
             return "The document could not be created: \(reason)"
         case .externalChange(let url):
             return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
+        case .invalidName, .alreadyExists:
+            // Not reachable from a document create — those errors are raised
+            // only by `createFolder` — but the switch is exhaustive on
+            // purpose, so this says something true rather than nothing.
+            return "The document could not be created."
         }
     }
 
@@ -215,8 +267,56 @@ final class SidebarOperations {
         switch pending {
         case .document(let plan, _): report = store.apply(plan)
         case .folder(let plan): report = store.apply(plan)
+        case .trashFolder(let plan):
+            // No `RenameReport` here — `applyTrashFolder` isn't a link
+            // rewrite, it's a move-to-Trash, so it reports through `message`
+            // exactly like single-document trash's `confirmTrash` does,
+            // rather than forcing its result through a report shape built for
+            // rewritten/skipped/unchanged files.
+            preview = nil
+            do {
+                let count = try store.applyTrashFolder(plan)
+                message = "Moved “\(plan.folder.lastPathComponent)” to the Trash "
+                    + "(\(count) document\(count == 1 ? "" : "s"))."
+            } catch let error as LoreError {
+                message = Self.describe(error, folder: plan.folder)
+            } catch {
+                message = "The folder could not be moved to the Trash: "
+                    + error.localizedDescription
+            }
+            self.pending = nil
+            return
         }
         self.pending = nil
+    }
+
+    /// The user-facing sentence for each way a folder trash can be declined.
+    static func describe(_ error: LoreError, folder: URL) -> String {
+        let name = folder.lastPathComponent
+        switch error {
+        case .trashFailed(_, let reason):
+            return "“\(name)” could not be moved to the Trash: \(reason) "
+                + "Nothing was deleted — Lore never falls back to deleting it permanently."
+        case .noVault:
+            return "No vault is open, so nothing was deleted."
+        // Reachable: `applyTrashFolder` refuses per-session, before touching
+        // anything, when a tab under the folder is dirty and its flush fails
+        // — same rule and same reason as single-document `LoreStore.trash`.
+        case .unsavedEdits(_, let reason):
+            return "“\(name)” was not deleted because \(reason)"
+        // Reachable: `applyTrashFolder`'s own containment guard throws this
+        // for the vault root itself or a target outside the vault, in case a
+        // stale or forged plan reaches here without going through
+        // `planTrashFolder`'s own refusal.
+        case .outsideVault:
+            return "“\(name)” was not deleted: it is the vault's own folder, or outside "
+                + "the vault entirely."
+        case .externalChange, .invalidName, .alreadyExists:
+            // Not reachable from `applyTrashFolder` — kept for the same reason
+            // the single-document `describe(_:row:)` keeps its own unreachable
+            // cases: a true sentence rather than a silent gap in the switch.
+            return "“\(name)” was not deleted."
+        }
     }
 
     /// Dismisses the sheet in either of its states.
@@ -233,6 +333,16 @@ final class SidebarOperations {
     /// links are deliberately NOT rewritten, so the user must know they will
     /// stop resolving.
     func requestTrash(_ row: IndexRow) { pendingTrash = row }
+
+    /// Plans a recursive folder trash and shows it through the SAME `.preview`
+    /// sheet single/folder rename uses — a destructive, recursive operation
+    /// gets the full preview treatment (document count, inbound link count),
+    /// not the one-line confirm dialog a single document gets.
+    func requestTrashFolder(_ folder: URL) {
+        let plan = store.planTrashFolder(folder)
+        pending = .trashFolder(plan)
+        preview = RenamePreview(trashFolder: plan)
+    }
 
     func trashMessage(for row: IndexRow) -> String {
         let name = row.title.isEmpty ? row.path.lastPathComponent : row.title
@@ -284,6 +394,10 @@ final class SidebarOperations {
             // `create` — but the switch is exhaustive on purpose, so this says
             // something true rather than nothing.
             return "“\(url.lastPathComponent)” is outside the vault, so nothing was deleted."
+        case .invalidName, .alreadyExists:
+            // Not reachable from a document delete either — raised only by
+            // `createFolder` — kept for the same reason as `outsideVault` above.
+            return "“\(name)” was not deleted."
         }
     }
 }

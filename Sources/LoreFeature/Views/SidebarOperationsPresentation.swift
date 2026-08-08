@@ -126,16 +126,19 @@ struct LoreRowMenu: View {
     }
 }
 
-/// The folder row menu. Rename only: renaming a folder is one directory move
-/// with a full preview behind it, whereas creating and trashing folders have no
-/// store API yet — and inventing one inside a UI task is how an unreviewed
-/// data-loss path gets added. See the task report.
+/// The folder row menu. Create and trash reuse the same name-prompt and
+/// preview machinery rename already uses — `beginNewFolder`/`requestTrashFolder`
+/// on `SidebarOperations` — so a folder's three destructive-adjacent
+/// affordances share one review surface instead of three.
 struct LoreFolderMenu: View {
     let folder: URL
     let ops: SidebarOperations
 
     var body: some View {
         Button("Rename Folder…") { ops.beginRenameFolder(folder) }
+        Button("New Folder…") { ops.beginNewFolder(in: folder) }
+        Divider()
+        Button("Move to Trash", role: .destructive) { ops.requestTrashFolder(folder) }
     }
 }
 
@@ -155,6 +158,7 @@ extension SidebarOperations {
         switch nameTarget {
         case .document(let url): "Rename “\(url.lastPathComponent)”"
         case .folder(let url): "Rename folder “\(url.lastPathComponent)”"
+        case .newFolder: "New Folder"
         case nil: ""
         }
     }
