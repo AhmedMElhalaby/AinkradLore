@@ -9,13 +9,33 @@ struct FolderNode: Identifiable {
     let children: [FolderNode]
     let documents: [IndexRow]
 
-    static func tree(from rows: [IndexRow], root: URL) -> FolderNode {
+    /// `directories` is every vault-relative directory path, supplied by the
+    /// caller rather than walked here — see
+    /// `VaultIndexCoordinator.directoryPaths`'s doc comment. This function
+    /// used to walk the filesystem itself on every call, which
+    /// `FolderTreeView.body` ran on every SwiftUI redraw (including one
+    /// triggered by expanding a folder): 707 ms per call over a ~17,000-object
+    /// tree, synchronously on the main actor. `directories` being CACHED by
+    /// the caller — not this function doing its own I/O — is what fixes that;
+    /// this function itself stays pure and testable with plain arrays.
+    static func tree(from rows: [IndexRow], directories: [String], root: URL) -> FolderNode {
         let rootDepth = root.standardizedFileURL.pathComponents.count
         var byFolder: [String: [IndexRow]] = [:]
         for row in rows {
             let parts = row.path.standardizedFileURL.pathComponents.dropFirst(rootDepth)
             let folder = parts.dropLast().joined(separator: "/")
             byFolder[folder, default: []].append(row)
+        }
+        // A folder with nothing inside it (freshly created, or emptied by
+        // trashing its last child) produces zero index rows, and zero rows
+        // means zero keys in `byFolder` above — the folder simply never
+        // becomes a node, `createFolder`'s own success message notwithstanding.
+        // `directories` supplies exactly the keys a row-only `byFolder` is
+        // missing; every EXISTING key already comes from a row's real path,
+        // so this only ever ADDS keys for folders that would otherwise be
+        // invisible — it never changes how a non-empty folder is grouped.
+        for directory in directories where byFolder[directory] == nil {
+            byFolder[directory] = []
         }
         return node(named: "", path: "", byFolder: byFolder)
     }
@@ -58,7 +78,9 @@ struct FolderTreeView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if let root = store.vaultRoot {
-                    outline(FolderNode.tree(from: store.rows, root: root), depth: 0)
+                    outline(FolderNode.tree(from: store.rows,
+                                            directories: store.directoryPaths,
+                                            root: root), depth: 0)
                 }
             }
         }

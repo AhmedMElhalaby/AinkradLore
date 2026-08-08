@@ -76,12 +76,37 @@ extension LoreStore {
               parent == root || Self.isContained(parent, in: root)
         else { throw LoreError.outsideVault(parent) }
 
-        let destination = parent.appendingPathComponent(trimmed, isDirectory: true)
+        // CANONICAL ON WRITE, same discipline `VaultIndexCoordinator` uses
+        // throughout: `parent` is trusted only for containment (just
+        // checked, symlink-aware, above) — not for SPELLING. A caller that
+        // built `parent` from something other than the coordinator's own
+        // (already-canonical) `vaultRoot` — a raw `URL` a test or a future
+        // caller constructs by hand — would otherwise produce a
+        // `destination` spelled inconsistently with `root`, and
+        // `vaultRelativePath` below needs both spelled the SAME way (it is a
+        // plain string-prefix strip, deliberately not `standardizedFileURL`
+        // — see that function's own doc comment for why). `canonical` is
+        // `realpath(3)`, which needs `parent` to already exist — guaranteed
+        // here, since `parent` is the directory the new folder goes INSIDE,
+        // not the folder being created.
+        let canonicalParent = VaultIndexCoordinator.canonical(parent)
+        let destination = canonicalParent.appendingPathComponent(trimmed, isDirectory: true)
         guard !FileManager.default.fileExists(atPath: destination.path)
         else { throw LoreError.alreadyExists(destination) }
 
         try FileManager.default.createDirectory(
             at: destination, withIntermediateDirectories: false)
+        // `coordinator.rows` never gains a row for a directory, and the
+        // watcher — a single, non-recursive `DispatchSource` on the vault
+        // ROOT — fires no event for a create INSIDE a subfolder, so nothing
+        // else would ever tell `coordinator.directoryPaths` this folder now
+        // exists. Told directly, with the exact vault-relative path just
+        // created, rather than relying on a rescan this call has no reason
+        // to trigger. See `VaultIndexCoordinator.noteDirectoryCreated`'s doc
+        // comment — this was a real regression (whole-branch review round 3,
+        // Critical 1) once `directoryPaths` stopped being an uncached
+        // per-render walk that happened to self-heal on the next redraw.
+        coordinator.noteDirectoryCreated(Self.vaultRelativePath(destination, under: root))
         return destination
     }
 
@@ -254,6 +279,21 @@ extension LoreStore {
             try FileManager.default.trashItem(at: plan.folder, resultingItemURL: nil)
         } catch {
             throw LoreError.trashFailed(plan.folder, error.localizedDescription)
+        }
+
+        // `coordinator.directoryPaths` has no other path to learn this: the
+        // loop above only ever touched INDEXED rows (folders are never
+        // rows), and the watcher cannot be relied on either — it is
+        // suppressed across this whole call (`suppressWatcher` above) longer
+        // than its own debounce, and a trash INSIDE a subfolder fires no
+        // root-level event at all regardless. Without this call the trashed
+        // folder (and every empty subfolder that was inside it) stays in
+        // `directoryPaths` forever, as a ghost node `FolderTreeView` keeps
+        // showing for a folder that no longer exists on disk. See
+        // `directoryPaths`'s own doc comment for the full list of operations
+        // that must make this same call.
+        if let root = vaultRoot {
+            coordinator.noteDirectoryRemoved(Self.vaultRelativePath(plan.folder, under: root))
         }
 
         // Tabs close only once the folder is REALLY gone — the same reasoning

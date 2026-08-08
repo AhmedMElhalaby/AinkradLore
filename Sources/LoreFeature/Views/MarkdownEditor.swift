@@ -270,7 +270,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// round 2, I6. Documents contain very few embeds (usually zero), so
         /// scanning this per caret move is cheap where scanning
         /// `styleCache.spans` would not be.
-        var embedIndex: [(spanIndex: Int, fullRange: NSRange, block: Int)] = []
+        var embedIndex: [(fullRange: NSRange, block: Int)] = []
         /// Which entries of `embedIndex` the selection is currently inside.
         /// The embed-level analogue of `revealedBlockIndices`: if a caret
         /// move leaves this unchanged there is no embed work to do.

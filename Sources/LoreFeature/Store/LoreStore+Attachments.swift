@@ -61,8 +61,20 @@ public extension LoreStore {
     /// whole file into an in-memory `Data` there would beachball the app for
     /// as long as the read takes. `copyItem` streams at the filesystem
     /// level and also preserves extended attributes (Finder tags,
-    /// quarantine flags) a byte-copy would silently drop.
+    /// quarantine flags) a byte-copy would silently drop. That streaming
+    /// argument only holds for a single regular file: a DIRECTORY dropped
+    /// here has no bound on its own — `copyItem` recurses the whole
+    /// subtree synchronously on the main actor regardless of size, which is
+    /// exactly the beachball this function exists to avoid, and the result
+    /// is a permanently-unresolved `![[SomeFolder]]` embed besides
+    /// (directories are never indexed, so the link can never resolve). Only
+    /// a regular file — or a symlink that ultimately resolves to one — is
+    /// accepted; anything else is rejected before any bytes move.
     func writeAttachment(copying sourceURL: URL, besideNote noteURL: URL) throws -> URL {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else { throw LoreError.notARegularFile(sourceURL) }
         let directory = noteURL.deletingLastPathComponent()
         guard let root = vaultRoot, Self.isContained(directory, in: root) else {
             throw LoreError.outsideVault(noteURL)

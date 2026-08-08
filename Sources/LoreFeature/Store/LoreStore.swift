@@ -111,6 +111,10 @@ public final class LoreStore {
 
     public var rows: [IndexRow] { coordinator.rows }
     public var vaultRoot: URL? { coordinator.vaultRoot }
+    /// Vault-relative paths of every directory — see
+    /// `VaultIndexCoordinator.directoryPaths`'s doc comment. `FolderTreeView`
+    /// reads this (not a filesystem walk of its own) to show empty folders.
+    var directoryPaths: [String] { coordinator.directoryPaths }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
     public func rebuild() throws { try coordinator.rebuild() }
 
@@ -137,6 +141,35 @@ public final class LoreStore {
             return String(line.trimmingCharacters(in: .whitespaces).prefix(200))
         }
         return ""
+    }
+
+    /// `url`'s path relative to `root`, as a plain STRING prefix strip —
+    /// `"Parent/Q1"` for `<root>/Parent/Q1`. Deliberately NOT
+    /// `pathComponents.dropFirst(rootDepth)`: that shape (used by
+    /// `createFolder`/`applyTrashFolder`/folder-rename `apply` in earlier
+    /// drafts of this exact computation) reads `root.standardizedFileURL
+    /// .pathComponents.count` and `url.standardizedFileURL.pathComponents`
+    /// SEPARATELY, and `standardizedFileURL` on macOS inconsistently
+    /// collapses a `/private/var/…` prefix to `/var/…` depending on the
+    /// URL's OWN depth — confirmed by direct measurement: `root` alone
+    /// standardized to 7 components (`private` dropped), the same root with
+    /// one more path component appended standardized to 9 (`private` kept).
+    /// The two counts then silently disagreed by exactly one component,
+    /// which strips one component too few or too many depending on
+    /// direction — the round-4 bug (`directoryPaths` after a real trash/
+    /// rename computed a garbage vault-"relative" path that still had the
+    /// system temp directory's own name in it, so it never matched anything
+    /// already in `directoryPaths` and the removal/rename silently no-opped).
+    /// A raw string-prefix strip on `.path` has no such inconsistency: both
+    /// `url` and `root` are expected to already be canonical (realpath'd via
+    /// `VaultIndexCoordinator.canonical`, or built by literally appending
+    /// path components to an already-canonical root, as `createFolder`'s
+    /// `destination` and `FolderTreeView.folderURL` both do) — same spelling
+    /// in, same spelling out, no re-interpretation in between.
+    static func vaultRelativePath(_ url: URL, under root: URL) -> String {
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard url.path.hasPrefix(rootPath) else { return url.lastPathComponent }
+        return String(url.path.dropFirst(rootPath.count))
     }
 
     public func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
@@ -471,4 +504,11 @@ public enum LoreError: Error, Equatable {
     case invalidName(String)
     /// `createFolder`'s destination already exists.
     case alreadyExists(URL)
+    /// `writeAttachment(copying:besideNote:)` was handed something other
+    /// than a regular file (or a symlink resolving to one) — a directory,
+    /// most commonly a Finder folder dropped where an attachment was
+    /// expected. `copyItem` has no size bound on a directory and would
+    /// recurse the whole subtree synchronously on the main actor, so this
+    /// is refused before any bytes move rather than left to beachball.
+    case notARegularFile(URL)
 }

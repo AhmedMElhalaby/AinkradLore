@@ -16,6 +16,75 @@ public final class VaultIndexCoordinator {
         didSet { cachedResolver = nil }
     }
     public private(set) var vaultRoot: URL?
+    /// Vault-relative paths of every directory — what `FolderTreeView` needs
+    /// to show an EMPTY folder, which produces zero index rows and so has no
+    /// other representation.
+    ///
+    /// A STORED value, NOT a lazily-cached one computed on the main actor the
+    /// first time something asks — that was this property's Round 2 shape,
+    /// and it had two real bugs the reviewer caught (Round 3 fixed both):
+    ///
+    /// 1. `createFolder` writes a directory directly and never touches
+    ///    `rows` (folders are not index rows), so a `didSet`-driven
+    ///    invalidation never fired for it — the exact bug this property
+    ///    exists to fix, reintroduced for any folder created inside a
+    ///    subfolder (Round 1's uncached per-`body`-call walk accidentally
+    ///    self-healed on the very next redraw; the cache removed that
+    ///    accident along with the walk).
+    /// 2. Computing the walk lazily on first main-actor access meant every
+    ///    document SAVE (`indexDocument`/`removeFromIndex` both reassign
+    ///    `rows`) turned the next folder-tree redraw into a synchronous
+    ///    ~500ms main-actor stall on a large vault.
+    ///
+    /// **Every operation that changes what directories exist on disk must
+    /// keep this property current — there is no automatic invalidation path
+    /// (no `didSet`, no cache) for it to fall back on if a call site forgets.**
+    /// As of Round 4, that is every one of the following, and each is the
+    /// exhaustive list — if a future folder-mutating operation is added
+    /// elsewhere, it must extend this list AND call one of the three
+    /// `note*` methods below, or it will reproduce Round 3/4's exact bug:
+    ///
+    /// - **Create** (`LoreStore.createFolder`) → `noteDirectoryCreated(_:)`,
+    ///   called synchronously right after the directory is written.
+    /// - **Trash** (`LoreStore.applyTrashFolder`) → `noteDirectoryRemoved(_:)`
+    ///   — Round 4's fix. Missing this left a trashed folder as a permanent
+    ///   ghost node: `directoryPaths` kept the entry, `rows` had nothing to
+    ///   say about it either way (folders are never rows), and the watcher
+    ///   cannot save it — `suppressWatcher` is armed across the whole trash
+    ///   (1.0 s) longer than the debounce (0.3 s) even for a root-level
+    ///   trash, and a SUBFOLDER trash fires no root event at all. The ghost
+    ///   survived until relaunch.
+    /// - **Rename** (`LoreStore.apply(_: FolderRenamePlan)`) →
+    ///   `noteDirectoryRenamed(from:to:)` — Round 4's fix, same root cause:
+    ///   the old name became a ghost AND the new name's empty subfolders (if
+    ///   any) went missing, since nothing told `directoryPaths` about either
+    ///   half of the rewrite.
+    /// - **Background/synchronous rescan** (`performBackgroundRebuild`,
+    ///   `rebuild()`) → recomputed wholesale via `scanDirectories(under:)`,
+    ///   off the main actor for the background path — this is the ground
+    ///   truth every targeted `note*` call above is an optimization over, and
+    ///   the reason none of Rounds 1–3 caught the create-path bug: the
+    ///   uncached walk (Round 1) and the `rows`-keyed cache (Round 2) both
+    ///   self-healed on ANY subsequent full rescan, so only an operation with
+    ///   NO other path to a rescan (create, trash, rename — none of which
+    ///   touch `rows`, and trash/rename can target a subfolder the watcher
+    ///   never sees) can go stale silently.
+    ///
+    /// Known limitation, not fixed: `FolderWatcher` is a single
+    /// `DispatchSource` on the vault ROOT only, non-recursive (same
+    /// limitation `rows` has always had for document changes made inside a
+    /// subfolder by something other than Lore itself — this property
+    /// inherits it rather than introduces it). A folder created, trashed, or
+    /// renamed in a SUBFOLDER by an external tool (Finder, `mkdir`, another
+    /// app) fires no watcher event and so is not picked up until an unrelated
+    /// root-level change or the next full rescan/relaunch. Lore's OWN
+    /// mutations are unaffected (the three targeted calls above are
+    /// synchronous and need no watcher), so this limitation is scoped to
+    /// changes made entirely outside Lore. A recursive watcher would need one
+    /// `DispatchSource` per directory (or FSEvents' own recursive API in
+    /// place of `DispatchSource`) — flagged as a follow-up, not attempted in
+    /// this wave.
+    public private(set) var directoryPaths: [String] = []
 
     private let indexPath: URL
     private var index: LoreIndex?
@@ -81,6 +150,7 @@ public final class VaultIndexCoordinator {
         rebuildRequestedAgain = false
         index = nil
         rows = []
+        directoryPaths = []
         vaultRoot = nil
     }
 
@@ -134,16 +204,44 @@ public final class VaultIndexCoordinator {
         // Walk, read and parse every note off the main actor, then apply the
         // whole result in one transaction. `LoreIndex` is Sendable (it holds
         // only a GRDB `DatabaseQueue`, which serializes its own access).
-        let refreshed: [IndexRow]? = await Task.detached(priority: .utility) { () -> [IndexRow]? in
+        // `scanDirectories` runs in the SAME detached task, alongside
+        // `scanVault` — both are `nonisolated static` walks of the same
+        // vault tree, and computing the directory set here (rather than
+        // lazily on the main actor the first time `directoryPaths` is read)
+        // is what keeps a post-save rescan from turning the next folder-tree
+        // redraw into a synchronous stall — see `directoryPaths`'s own
+        // doc comment for the measured before/after.
+        let refreshed: (rows: [IndexRow], directories: [String])?
+            = await Task.detached(priority: .utility) {
+                () -> (rows: [IndexRow], directories: [String])? in
             let notes = Self.scanVault(at: root)
+            let directories = Self.scanDirectories(under: root)
             do {
                 try index.replaceAll(with: notes)
-                return try index.all()
+                return (rows: try index.all(), directories: directories)
             } catch {
                 return nil
             }
         }.value
-        if let refreshed { rows = refreshed }
+        // KNOWN, UNFIXED RACE (recorded, not fixed — rated theoretical/low):
+        // `directories` above is a snapshot of disk taken when THIS task's
+        // `scanDirectories` ran, at the START of this detached task. If a
+        // `noteDirectoryCreated`/`noteDirectoryRemoved`/`noteDirectoryRenamed`
+        // call (from `createFolder`, `applyTrashFolder`, or folder rename)
+        // lands on the main actor AFTER that snapshot was taken but BEFORE
+        // this assignment runs, this line clobbers it: the targeted call's
+        // precise update is silently overwritten by this task's now-stale
+        // snapshot. The window is only the tail of the walk itself (the
+        // `scanDirectories` call above, ~0.5 s here) against a
+        // `performBackgroundRebuild` that overall runs much longer (the
+        // `scanVault` parse pass, tens of seconds on a large vault) — so a
+        // user-initiated folder mutation would need to land in that narrow
+        // tail specifically. Not attempted: closing it properly needs either
+        // a generation counter (reject a stale detached task's result if a
+        // targeted call happened after it started) or re-deriving
+        // `directoryPaths` from `rows` plus the targeted deltas instead of a
+        // flat overwrite — both are more than a one-line guard.
+        if let refreshed { rows = refreshed.rows; directoryPaths = refreshed.directories }
     }
 
     /// Pure, off-actor: every engine-openable file under `root`, loaded and
@@ -186,7 +284,8 @@ public final class VaultIndexCoordinator {
             // every folder would otherwise become a row. A PACKAGE is also a
             // directory, but `.skipsPackageDescendants` above means its
             // internals are never walked — so unlike a plain directory, the
-            // package itself must be indexed as a single unclaimed row, or it
+            // package itself must be indexed as a single `attachment` row
+            // (no engine claims a package as its own file type), or it
             // (and everything a user would recognize as "the document")
             // disappears from the vault entirely.
             let values = try? url.resourceValues(
@@ -298,6 +397,7 @@ public final class VaultIndexCoordinator {
         guard let root = vaultRoot, let index else { return }
         try index.replaceAll(with: Self.scanVault(at: root))
         rows = try index.all()
+        directoryPaths = Self.scanDirectories(under: root)
     }
 
     public func search(_ query: String) -> [IndexRow] {
@@ -370,6 +470,80 @@ public final class VaultIndexCoordinator {
         })
         cachedResolver = resolver
         return resolver
+    }
+
+    /// `createFolder`'s own notification that it just created `path`
+    /// (vault-relative) directly on disk, bypassing both `rows` (folders are
+    /// never index rows) and the watcher (a create INSIDE a subfolder fires
+    /// no event on the root-only, non-recursive `FolderWatcher` — see
+    /// `directoryPaths`'s own doc comment). A plain append: cheap, exact, and
+    /// avoids re-running the whole-vault walk synchronously on the main actor
+    /// for a change whose entire content this method's caller already knows
+    /// precisely. Idempotent (checks `contains` first) so a redundant call
+    /// costs nothing beyond that check.
+    func noteDirectoryCreated(_ path: String) {
+        guard !directoryPaths.contains(path) else { return }
+        directoryPaths.append(path)
+    }
+
+    /// The trash counterpart to `noteDirectoryCreated`, same reasoning: tells
+    /// `directoryPaths` directly that `path` (vault-relative) is gone from
+    /// disk, rather than relying on `rows`/the watcher to notice. Removes
+    /// `path` itself AND every entry beneath it (`path + "/…"`) — trashing a
+    /// folder takes every subfolder inside it with it, and each of those was
+    /// its own `directoryPaths` entry (an empty one, most likely — exactly the
+    /// case `noteDirectoryCreated` exists to surface — so leaving it behind
+    /// after the folder is gone is the same "ghost node" bug in reverse).
+    /// Called from `LoreStore.applyTrashFolder` — see its own call site.
+    func noteDirectoryRemoved(_ path: String) {
+        let prefix = path + "/"
+        directoryPaths.removeAll { $0 == path || $0.hasPrefix(prefix) }
+    }
+
+    /// The rename counterpart: `from` (and everything beneath it) becomes
+    /// `to`, in place, preserving every subfolder entry a naive
+    /// remove-then-rediscover would lose — folder rename already knows the
+    /// exact rewrite from the move it just performed, so there is no need to
+    /// re-walk disk to find empty subfolders again. Called from
+    /// `LoreStore.apply(_: FolderRenamePlan)` — see its own call site.
+    func noteDirectoryRenamed(from: String, to: String) {
+        let prefix = from + "/"
+        directoryPaths = directoryPaths.map { entry in
+            if entry == from { return to }
+            if entry.hasPrefix(prefix) { return to + "/" + entry.dropFirst(prefix.count) }
+            return entry
+        }
+        // `from` itself might not have been a `directoryPaths` entry (e.g. it
+        // held only indexed documents, no empty subfolders of its own) — the
+        // map above would then leave `to` absent entirely. Appended
+        // unconditionally-but-deduped so the renamed folder is always
+        // representable, the same guarantee `noteDirectoryCreated` gives a
+        // brand new folder.
+        if !directoryPaths.contains(to) { directoryPaths.append(to) }
+    }
+
+    /// Pure, off-actor-safe: every directory under `root`, vault-relative,
+    /// skipping dot-prefixed components and package internals — the same
+    /// rules `scanVault` applies to files. `nonisolated` so it can run inside
+    /// `performBackgroundRebuild`'s detached task without a main-actor hop —
+    /// see that method and `directoryPaths`'s own doc comment for why it must.
+    nonisolated static func scanDirectories(under root: URL) -> [String] {
+        let root = Self.canonical(root)
+        let rootDepth = root.standardizedFileURL.pathComponents.count
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
+            options: [.skipsPackageDescendants])
+        else { return [] }
+        var result: [String] = []
+        while let url = enumerator.nextObject() as? URL {
+            let relative = url.standardizedFileURL.pathComponents.dropFirst(rootDepth)
+            if relative.contains(where: { $0.hasPrefix(".") }) { continue }
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+            guard values?.isDirectory == true, values?.isPackage != true else { continue }
+            result.append(relative.joined(separator: "/"))
+        }
+        return result
     }
 
     /// Index one document after a save, without a whole-vault rescan.

@@ -78,9 +78,13 @@ final class SidebarOperations {
         nameText = ""
     }
 
-    /// Turns the typed name into a PLAN and a preview. Never writes. A refusal
-    /// (empty name, path separator, `..`, escape from the vault, destination
-    /// exists) arrives on the plan and is rendered instead of a preview.
+    /// Turns the typed name into a PLAN and a preview for the `.document` and
+    /// `.folder` (rename) targets — those two never write, a refusal (empty
+    /// name, path separator, `..`, escape from the vault, destination exists)
+    /// arriving on the plan and rendered instead of a preview. `.newFolder` is
+    /// NOT plan-and-preview: it calls `store.createFolder` directly and does
+    /// write a real directory immediately (see `beginNewFolder`'s doc comment
+    /// on why folder creation skips the plan/preview step the other two use).
     func commitName() {
         guard let target = nameTarget else { return }
         nameTarget = nil
@@ -125,6 +129,11 @@ final class SidebarOperations {
             return "The folder could not be created: \(reason)"
         case .externalChange(let url):
             return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
+        case .notARegularFile:
+            // Not reachable from `createFolder` — raised only by
+            // `writeAttachment(copying:besideNote:)` — kept for the same
+            // reason the other unreachable cases are kept.
+            return "The folder could not be created."
         }
     }
 
@@ -212,6 +221,52 @@ final class SidebarOperations {
             // only by `createFolder` — but the switch is exhaustive on
             // purpose, so this says something true rather than nothing.
             return "The document could not be created."
+        case .notARegularFile:
+            // Not reachable from a document create — raised only by
+            // `writeAttachment(copying:besideNote:)` — kept for the same
+            // reason as `invalidName`/`alreadyExists` above.
+            return "The document could not be created."
+        }
+    }
+
+    /// The user-facing sentence for a failed paste-image or drop-file
+    /// attachment write (`LoreStore.writeAttachment`'s two overloads).
+    ///
+    /// Whole-branch review round 3, Important 3: `DocumentPane` used to
+    /// format these with bare `error.localizedDescription`. That reads fine
+    /// for a genuine `NSError` (`Data.write` on the paste path throws a real
+    /// `CocoaError` with a real message), but `LoreError` — thrown by both
+    /// overloads' own guards — is a plain `Error, Equatable` with no
+    /// `LocalizedError` conformance, so the SAME formatting produced
+    /// `"The operation couldn't be completed. (LoreFeature.LoreError error
+    /// 8.)"` for exactly the case this wave's directory-drop guard exists to
+    /// explain. `LoreError` cases get the same hand-written treatment
+    /// `describeCreate`/`describeCreateFolder` already give the errors THEY
+    /// see; anything else (a `CocoaError` from the underlying write, a
+    /// filesystem error from `copyItem`) falls back to its own
+    /// `localizedDescription`, which is reliable for those types.
+    static func describeAttachmentWrite(_ error: Error) -> String {
+        guard let loreError = error as? LoreError else {
+            return error.localizedDescription
+        }
+        switch loreError {
+        case .notARegularFile(let url):
+            return "“\(url.lastPathComponent)” is a folder, not a file, so it "
+                + "was not added. Only individual files can be attached."
+        case .outsideVault(let url):
+            return "“\(url.lastPathComponent)” would have been written outside "
+                + "the vault, so nothing was added."
+        case .noVault:
+            return "No vault is open, so there is nowhere to put the attachment."
+        case .externalChange(let url):
+            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was added."
+        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
+            return "The attachment could not be added: \(reason)"
+        case .invalidName, .alreadyExists:
+            // Not reachable from an attachment write — raised only by
+            // `createFolder` — kept for the same reason the other
+            // "not reachable" arms in this file are kept.
+            return "The attachment could not be added."
         }
     }
 
@@ -311,7 +366,7 @@ final class SidebarOperations {
         case .outsideVault:
             return "“\(name)” was not deleted: it is the vault's own folder, or outside "
                 + "the vault entirely."
-        case .externalChange, .invalidName, .alreadyExists:
+        case .externalChange, .invalidName, .alreadyExists, .notARegularFile:
             // Not reachable from `applyTrashFolder` — kept for the same reason
             // the single-document `describe(_:row:)` keeps its own unreachable
             // cases: a true sentence rather than a silent gap in the switch.
@@ -394,9 +449,10 @@ final class SidebarOperations {
             // `create` — but the switch is exhaustive on purpose, so this says
             // something true rather than nothing.
             return "“\(url.lastPathComponent)” is outside the vault, so nothing was deleted."
-        case .invalidName, .alreadyExists:
+        case .invalidName, .alreadyExists, .notARegularFile:
             // Not reachable from a document delete either — raised only by
-            // `createFolder` — kept for the same reason as `outsideVault` above.
+            // `createFolder` / `writeAttachment(copying:besideNote:)` — kept
+            // for the same reason as `outsideVault` above.
             return "“\(name)” was not deleted."
         }
     }

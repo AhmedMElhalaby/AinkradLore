@@ -97,11 +97,6 @@ final class EmbedImageCache: @unchecked Sendable {
 
     private init() {}
 
-    func removeAll() {
-        lock.lock(); defer { lock.unlock() }
-        storage.removeAll(); order.removeAll()
-    }
-
     func image(for url: URL) -> NSImage? {
         guard let key = Self.key(for: url) else { return NSImage(contentsOf: url) }
         lock.lock()
@@ -229,9 +224,8 @@ extension MarkdownEditor.Coordinator {
             case .unresolved:
                 continue   // Fallback colour already applied by `add(.embed:)`.
 
-            case .chip(let url):
+            case .chip:
                 EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
-                _ = url   // The URL only matters for the icon `applyChipStyling` explains skipping.
 
             case .image(let url):
                 guard let image = EmbedImageCache.shared.image(for: url) else {
@@ -333,13 +327,13 @@ extension MarkdownEditor.Coordinator {
     /// from `renderStyles()` only — a text change or a full redraw — beside
     /// the `revealIndex` build it mirrors.
     func rebuildEmbedIndex() {
-        embedIndex = styleCache.spans.enumerated().compactMap { position, span in
+        embedIndex = styleCache.spans.compactMap { span in
             guard case .embed(_, let fullRange) = span.kind else { return nil }
             let ns = NSRange(location: fullRange.lowerBound, length: fullRange.count)
             guard let block = MarkdownEditorReveal.blockIndex(of: ns.location,
                                                               in: revealIndex.blocks)
             else { return nil }
-            return (spanIndex: position, fullRange: ns, block: block)
+            return (fullRange: ns, block: block)
         }
         revealedEmbedSpans = currentlyRevealedEmbedSpans()
     }

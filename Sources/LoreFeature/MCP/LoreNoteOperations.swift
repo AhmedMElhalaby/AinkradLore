@@ -345,6 +345,9 @@ struct LoreNoteOperations {
             return "“\(name)” is not a valid folder name."
         case .alreadyExists(let url):
             return "\(relative(url)) already exists."
+        case .notARegularFile(let url):
+            return "\(relative(url)) is not a regular file, so it was not copied as an "
+                + "attachment."
         }
     }
 

@@ -195,11 +195,13 @@ extension MarkdownEditor.Coordinator {
         // embed?" without walking the document — see `embedIndex`.
         rebuildEmbedIndex()
         collapseHiddenMarkers(in: storage, window: window)
-        // AFTER marker collapsing: an embed collapses its OWN whole range the
-        // same way, and must win if the two ever overlapped (they should
-        // not, since `WikilinkSpanBuilder` emits an embed as ONE span with no
-        // separate marker spans — but running last keeps that an invariant
-        // this file enforces, not one the span builder alone guarantees).
+        // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
+        // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see
+        // `EmbedRendering.swift`'s doc comment on the chip pill), collapsed
+        // by the same machinery as any other marker; the embed span itself
+        // covers only the target text. Running `applyEmbeds` after that
+        // collapse is what lets it repaint that target range (image or chip)
+        // without a marker-collapse pass clobbering it back afterward.
         applyEmbeds(to: storage, window: window)
         // Code panels, quote bars and collapsed list markers are DRAWN, not
         // attributed — see

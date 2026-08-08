@@ -1,6 +1,43 @@
 import SwiftUI
 import AinkradAppKit
 
+/// The result of attempting a paste/drop attachment write: embed syntax to
+/// insert on success, or a human-readable failure message to surface, never
+/// both and never neither.
+struct AttachmentWriteResult {
+    let embedSyntax: String?
+    let failureMessage: String?
+}
+
+/// Attempts an attachment write and turns the outcome into
+/// `AttachmentWriteResult`, with NO SwiftUI dependency — this is the seam
+/// `AttachmentWriteTests` exercises directly.
+///
+/// Exists because whole-branch review round 2 fixed `DocumentPane`'s
+/// `try? … else { return nil }` (which silently dropped `LoreError
+/// .notARegularFile` — a dropped Finder folder did nothing with no
+/// explanation) by inlining a `do`/`catch` straight into the view's body.
+/// That fix was correct but UNTESTABLE where it lived: nothing outside a
+/// running SwiftUI host could prove the catch block still runs, still calls
+/// `SidebarOperations.describeAttachmentWrite`, and still returns `nil`
+/// rather than partial embed syntax — so a future edit reverting the
+/// `do`/`catch` back to a `try?` would compile clean and break silently
+/// again. Pulling the logic out here — pure, synchronous, no `@State` — is
+/// what lets a test call it directly and assert on `failureMessage` without
+/// standing up a view host.
+@MainActor
+func attemptAttachmentWrite(
+    write: () throws -> URL, embedSyntax: (URL) -> String
+) -> AttachmentWriteResult {
+    do {
+        let written = try write()
+        return AttachmentWriteResult(embedSyntax: embedSyntax(written), failureMessage: nil)
+    } catch {
+        return AttachmentWriteResult(embedSyntax: nil,
+                                     failureMessage: SidebarOperations.describeAttachmentWrite(error))
+    }
+}
+
 /// Routes one session to its engine's editor, and owns the banners that are
 /// shared by every document type: read-only, save failure, and conflict.
 struct DocumentPane: View {
@@ -72,30 +109,47 @@ struct DocumentPane: View {
                               isReadOnly: session.isReadOnly,
                               // Beside `session.url`, never in a vault-wide
                               // folder — see `LoreStore.writeAttachment`'s doc
-                              // comment. `try?`: a failed write (no vault,
-                              // permission denied, outside-vault guard) means
-                              // "insert nothing" here, same as the store API's
-                              // own contract for its callers. Gated on
-                              // `session.isReadOnly` FIRST — same reasoning
-                              // as `allowsTaskToggle: !ctx.isReadOnly` below:
-                              // a read-only session's `saveNow()` refuses to
-                              // write, so letting these two closures write a
-                              // real file into the vault and insert an embed
-                              // `saveNow()` will then never persist is
-                              // exactly the affordance `EditorContext.isReadOnly`
-                              // exists to withhold.
+                              // comment. A failed write (no vault, permission
+                              // denied, outside-vault guard, or — since the
+                              // directory-drop guard — a Finder folder) means
+                              // "insert nothing" into the document, same as
+                              // before, but is no longer swallowed silently:
+                              // it now surfaces through `createFailure`, the
+                              // same "Not done" sheet an unresolved-link
+                              // create failure already uses below, so a
+                              // refused drop is visible rather than a drop
+                              // that just does nothing with no explanation.
+                              // Gated on `session.isReadOnly` FIRST — same
+                              // reasoning as `allowsTaskToggle: !ctx.isReadOnly`
+                              // below: a read-only session's `saveNow()`
+                              // refuses to write, so letting these two
+                              // closures write a real file into the vault and
+                              // insert an embed `saveNow()` will then never
+                              // persist is exactly the affordance
+                              // `EditorContext.isReadOnly` exists to withhold
+                              // — read-only stays a silent no-op, not an
+                              // error, since it is not a failure but the
+                              // expected behavior of a read-only tab.
                               writePastedImage: { data, name in
-                                  guard !session.isReadOnly,
-                                        let written = try? store.writeAttachment(
-                                            data: data, preferredName: name,
-                                            besideNote: session.url) else { return nil }
-                                  return store.embedSyntax(for: written)
+                                  guard !session.isReadOnly else { return nil }
+                                  let result = attemptAttachmentWrite(write: {
+                                      try store.writeAttachment(
+                                          data: data, preferredName: name, besideNote: session.url)
+                                  }, embedSyntax: { store.embedSyntax(for: $0) })
+                                  if let failure = result.failureMessage {
+                                      createFailure = "Couldn't paste that image: \(failure)"
+                                  }
+                                  return result.embedSyntax
                               },
                               writeDroppedFile: { url in
-                                  guard !session.isReadOnly,
-                                        let written = try? store.writeAttachment(
-                                            copying: url, besideNote: session.url) else { return nil }
-                                  return store.embedSyntax(for: written)
+                                  guard !session.isReadOnly else { return nil }
+                                  let result = attemptAttachmentWrite(write: {
+                                      try store.writeAttachment(copying: url, besideNote: session.url)
+                                  }, embedSyntax: { store.embedSyntax(for: $0) })
+                                  if let failure = result.failureMessage {
+                                      createFailure = "Couldn't add \"\(url.lastPathComponent)\": \(failure)"
+                                  }
+                                  return result.embedSyntax
                               }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so
@@ -105,25 +159,30 @@ struct DocumentPane: View {
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
 
-            // Only markdown documents contribute to the link graph — plain-
-            // text and attachment documents would show an empty panel, which
-            // is noise, not information.
+            // Outbound links (the outline, and — inside `BacklinksPanel` —
+            // the unresolved-links list) only exist for markdown documents:
+            // only `MarkdownEngine` parses a body for headings or `[[…]]`/
+            // `![[…]]` syntax, so an attachment or plain-text document has
+            // no outbound link graph to show. RECEIVING backlinks is a
+            // different question: any document type can be a link TARGET
+            // (Task 7 made attachments resolvable targets), so a PDF or
+            // other attachment can have referrers even though it emits none
+            // itself. `BacklinksPanel` therefore always renders; only the
+            // markdown-only outline is gated on the engine type.
             if session.engine is MarkdownEngine {
                 // Gated on the CACHED outline being non-empty, not merely on
                 // the document being markdown: a markdown note with no
                 // headings yet is exactly as noise-free a case as a
                 // plain-text file, and showing an empty "Outline (0)" here
-                // would contradict the reasoning that already justifies
-                // gating `BacklinksPanel` on the engine type in the first
-                // place — an empty panel either way is noise.
+                // would be noise, not information.
                 if !outline.isEmpty {
                     OutlineSection(store: store, outline: outline,
                                   theme: theme) { offset in scrollHandler?(offset) }
                         .frame(maxHeight: 200)
                 }
-                BacklinksPanel(store: store, url: session.url, theme: theme)
-                    .frame(maxHeight: 200)
             }
+            BacklinksPanel(store: store, url: session.url, theme: theme)
+                .frame(maxHeight: 200)
         }
         .background(theme.tokens.background)
         .onAppear { refreshOutline() }

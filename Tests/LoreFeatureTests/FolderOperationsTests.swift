@@ -452,4 +452,59 @@ final class FolderOperationsTests: XCTestCase {
                       "a document outside the trashed folder was removed from the index")
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsider.path))
     }
+
+    // MARK: - directoryPaths (whole-branch review round 4, Critical)
+
+    /// Trashing a folder must not leave it as a ghost node in
+    /// `directoryPaths`. Goes through the REAL `applyTrashFolder` API — no
+    /// manual rebuild — the shape the reviewer's probe used to reproduce the
+    /// bug (`directoryPaths after trash = ["Parent/Q1"]` with the directory
+    /// already gone from disk). Nested one level, the exact case that
+    /// defeats the root-only watcher too.
+    func test_applyTrashFolder_removesTheFolderFromDirectoryPaths() async throws {
+        let root = try vault()
+        let parent = root.appendingPathComponent("Parent")
+        let child = parent.appendingPathComponent("Q1")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let s = try store(root)
+        await s.settleForTesting(); try s.rebuild()
+        XCTAssertTrue(s.directoryPaths.contains("Parent/Q1"))
+
+        _ = try s.applyTrashFolder(s.planTrashFolder(parent))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: parent.path))
+        XCTAssertFalse(s.directoryPaths.contains("Parent"),
+                       "the trashed folder must not survive as a ghost node: \(s.directoryPaths)")
+        XCTAssertFalse(s.directoryPaths.contains("Parent/Q1"),
+                       "a subfolder of the trashed folder must not survive either: "
+                       + "\(s.directoryPaths)")
+    }
+
+    /// Renaming a folder must retire the OLD name from `directoryPaths` and
+    /// carry its empty subfolders over to the NEW name — through the real
+    /// `plan(renameFolder:to:)`/`apply(_:)` API, no manual rebuild.
+    func test_renameFolder_updatesDirectoryPathsForOldAndNewNames() async throws {
+        let root = try vault()
+        let parent = root.appendingPathComponent("Parent")
+        let child = parent.appendingPathComponent("Q1")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let s = try store(root)
+        await s.settleForTesting(); try s.rebuild()
+        XCTAssertTrue(s.directoryPaths.contains("Parent/Q1"))
+
+        let plan = s.plan(renameFolder: parent, to: "Renamed")
+        XCTAssertNil(plan.refusal)
+        let report = s.apply(plan)
+        XCTAssertTrue(report.failed.isEmpty, "rename must not fail: \(report.failed)")
+
+        XCTAssertFalse(s.directoryPaths.contains("Parent"),
+                       "the old folder name must not survive as a ghost node: \(s.directoryPaths)")
+        XCTAssertFalse(s.directoryPaths.contains("Parent/Q1"),
+                       "nor should its old-named subfolder: \(s.directoryPaths)")
+        XCTAssertTrue(s.directoryPaths.contains("Renamed"),
+                      "the new name must be visible: \(s.directoryPaths)")
+        XCTAssertTrue(s.directoryPaths.contains("Renamed/Q1"),
+                      "and its empty subfolder must have moved with it, not gone missing: "
+                      + "\(s.directoryPaths)")
+    }
 }

@@ -229,6 +229,73 @@ final class AttachmentWriteTests: XCTestCase {
         XCTAssertFalse(interior.contains("]]"))
     }
 
+    /// Whole-branch review Important 3: dropping a FOLDER must be rejected,
+    /// not recursively copied. `FileManager.copyItem`'s "streams at the
+    /// filesystem level" justification only holds for a single regular
+    /// file — a directory has no size bound and `performDragOperation` runs
+    /// synchronously on the main actor, so a brushed-in Finder folder would
+    /// otherwise beachball the app for as long as the whole subtree takes to
+    /// copy, and leave a permanently-unresolved `![[Folder]]` behind
+    /// (directories are never indexed).
+    func test_copyingADirectoryIsRejected() throws {
+        let root = try vault()
+        let note = root.appendingPathComponent("Notes/n.md")
+        try "body".write(to: note, atomically: true, encoding: .utf8)
+        let droppedFolder = root.appendingPathComponent("DroppedFolder")
+        try FileManager.default.createDirectory(
+            at: droppedFolder, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(
+            to: droppedFolder.appendingPathComponent("inside.txt"))
+        let s = try store(root)
+
+        XCTAssertThrowsError(
+            try s.writeAttachment(copying: droppedFolder, besideNote: note)
+        ) { error in
+            guard case LoreError.notARegularFile(let url) = error else {
+                return XCTFail("expected .notARegularFile, got \(error)")
+            }
+            XCTAssertEqual(url.path, droppedFolder.path)
+        }
+        // Nothing was copied into the vault beside the note.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Notes/DroppedFolder").path))
+    }
+
+    /// Round 3 / Important 4: the test above proves the STORE throws
+    /// `.notARegularFile` — which already passed before round 2's
+    /// `DocumentPane` change, so it never covered the actual round-2 fix.
+    /// The round-2 fix was entirely in the VIEW layer: `DocumentPane` used
+    /// to swallow this exact error in `try? … else { return nil }`, so a
+    /// dropped folder did nothing with no explanation. `attemptAttachmentWrite`
+    /// (`DocumentPane.swift`) is the pulled-out, SwiftUI-free seam that view
+    /// layer now runs through — this calls it directly, the same way
+    /// `writeDroppedFile` does, and asserts the failure actually surfaces as
+    /// a message rather than being dropped. Also guards Important 3: the
+    /// message must be human-readable, not
+    /// `LoreFeature.LoreError error 8`.
+    func test_droppingAFolderOnANoteSurfacesAReadableFailureNotSilence() throws {
+        let root = try vault()
+        let note = root.appendingPathComponent("Notes/n.md")
+        try "body".write(to: note, atomically: true, encoding: .utf8)
+        let droppedFolder = root.appendingPathComponent("DroppedFolder")
+        try FileManager.default.createDirectory(
+            at: droppedFolder, withIntermediateDirectories: true)
+        let s = try store(root)
+
+        let result = attemptAttachmentWrite(write: {
+            try s.writeAttachment(copying: droppedFolder, besideNote: note)
+        }, embedSyntax: { s.embedSyntax(for: $0) })
+
+        XCTAssertNil(result.embedSyntax, "a rejected drop must insert nothing")
+        let message = try XCTUnwrap(result.failureMessage, "the failure must surface a message")
+        XCTAssertFalse(message.contains("LoreError"),
+                       "the message must be human-readable, not the raw enum: \(message)")
+        XCTAssertFalse(message.contains("couldn't be completed"),
+                       "must not be the generic Foundation fallback: \(message)")
+        XCTAssertTrue(message.contains("folder"),
+                      "must actually explain WHY it was refused: \(message)")
+    }
+
     /// Fix round 2 / Minor A: the length cap must be a BYTE budget, not a
     /// code-point budget — a 400-character CJK name still fits in 200 code
     /// points but, at 3 bytes/scalar, blows well past the 255-byte

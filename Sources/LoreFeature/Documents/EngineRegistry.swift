@@ -1,9 +1,13 @@
 import Foundation
 
 /// Ordered engine lookup. Order is significance order: the first engine whose
-/// `canOpen` returns true wins. Engines are required to be mutually exclusive,
-/// so order is a tie-break that should never actually be needed — it exists so
-/// a bug produces deterministic behavior rather than a coin flip.
+/// `canOpen` returns true wins. Within `specificEngines`, engines are required
+/// to be mutually exclusive with one another, so order among THEM is a
+/// tie-break that should never actually be needed — it exists so a bug there
+/// produces deterministic behavior rather than a coin flip. `fallbackEngine`
+/// is the opposite case: `AttachmentEngine` claims everything, so it being
+/// consulted LAST is not a tie-break at all but the entire point — it is
+/// where order genuinely matters.
 public enum EngineRegistry {
     /// Engines that claim specific formats. Required to be mutually exclusive
     /// with one another — `EngineRegistryTests` enforces it.
