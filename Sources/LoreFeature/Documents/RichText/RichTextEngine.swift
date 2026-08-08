@@ -89,13 +89,29 @@ public final class RichTextEngine: DocumentEngine {
                      plaintext: VaultIndexCoordinator.capped(attributed.string))
     }
 
+    /// Computed rather than stored: `attributed.string` is already resident
+    /// (it backs the viewer), so re-deriving this from it costs one more
+    /// `capped` call — cheap relative to holding a stale flag that could drift
+    /// from `attributed` after `replaceContents`.
+    public var isContentTruncated: Bool {
+        let raw = attributed.string
+        return VaultIndexCoordinator.capped(raw).utf8.count < raw.utf8.count
+    }
+
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
         if let loadFailure {
             return AnyView(DocumentErrorCard(url: sourceURL, message: loadFailure,
                                              theme: ctx.theme))
         }
-        return AnyView(RichTextViewer(attributed: attributed)
+        var view = AnyView(RichTextViewer(attributed: attributed)
             .background(ctx.theme.tokens.background))
+        if isContentTruncated {
+            view = AnyView(VStack(spacing: 0) {
+                TruncationNotice(theme: ctx.theme)
+                view
+            })
+        }
+        return view
     }
 }
 

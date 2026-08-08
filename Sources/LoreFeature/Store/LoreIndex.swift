@@ -46,10 +46,20 @@ public struct IndexEntry: Sendable {
     public let payload: IndexPayload
     public let updated: Date
     public let resolvedLinks: [ResolvedLink]
+    public let isEditable: Bool
+    public let byteSize: Int
+    /// True when `payload.plaintext` was cut short by
+    /// `VaultIndexCoordinator.capped` (or an engine's own equivalent cap).
+    /// Without it a partially-indexed document is indistinguishable from one
+    /// indexed whole — see `LoreIndex.schemaVersion`'s `7:` note.
+    public let isTruncated: Bool
     public init(url: URL, type: String, payload: IndexPayload, updated: Date,
-                resolvedLinks: [ResolvedLink] = []) {
+                resolvedLinks: [ResolvedLink] = [],
+                isEditable: Bool = true, byteSize: Int = 0, isTruncated: Bool = false) {
         self.url = url; self.type = type; self.payload = payload; self.updated = updated
         self.resolvedLinks = resolvedLinks
+        self.isEditable = isEditable; self.byteSize = byteSize
+        self.isTruncated = isTruncated
     }
 }
 
@@ -62,6 +72,21 @@ public struct IndexRow: Equatable, Sendable {
     public let updated: Date
     public let type: String
     public let properties: [FrontmatterPair]
+    public let isEditable: Bool
+    public let byteSize: Int
+    public let isTruncated: Bool
+
+    // Explicit init (rather than the implicit memberwise one) so existing
+    // fixtures across the test suite that predate `isEditable`/`byteSize`/
+    // `isTruncated` keep compiling — defaults match `IndexEntry`'s.
+    public init(path: URL, id: String, title: String, tags: [String], aliases: [String],
+                updated: Date, type: String, properties: [FrontmatterPair],
+                isEditable: Bool = true, byteSize: Int = 0, isTruncated: Bool = false) {
+        self.path = path; self.id = id; self.title = title; self.tags = tags
+        self.aliases = aliases; self.updated = updated; self.type = type
+        self.properties = properties
+        self.isEditable = isEditable; self.byteSize = byteSize; self.isTruncated = isTruncated
+    }
 }
 
 /// `@unchecked Sendable`: the only stored property is a GRDB `DatabaseQueue`,
@@ -91,7 +116,12 @@ public final class LoreIndex: @unchecked Sendable {
     /// version-5 index therefore holds an M1 link graph while the code answers
     /// M2a, and `LinkRewriter` reads that index when renaming. Discard and
     /// rebuild — the mechanism this constant exists for.
-    static let schemaVersion: Int32 = 6
+    ///
+    /// 7: M3 added `documents.is_editable` and `documents.byte_size`. A v6
+    /// index has neither, and every row in it predates the read-only engines —
+    /// so its `type` column holds `unclaimed` for files that are now `pdf`,
+    /// `richtext` or `attachment`. Discard and rebuild.
+    static let schemaVersion: Int32 = 7
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -125,7 +155,11 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS documents(
                     path TEXT PRIMARY KEY, id TEXT, title TEXT, tags TEXT,
-                    aliases TEXT, updated DOUBLE, plaintext TEXT, type TEXT, properties TEXT);
+                    aliases TEXT, updated DOUBLE, plaintext TEXT, type TEXT,
+                    properties TEXT,
+                    is_editable INTEGER NOT NULL DEFAULT 1,
+                    byte_size INTEGER NOT NULL DEFAULT 0,
+                    is_truncated INTEGER NOT NULL DEFAULT 0);
             """)
             // Standalone FTS5 index keyed by the same rowid as `documents` (NOT
             // external-content: external-content tables corrupt on the manual
@@ -259,19 +293,23 @@ public final class LoreIndex: @unchecked Sendable {
         // rather than removing the enforcement.
         let path = canonical(entry.url)
         try db.execute(sql: """
-            INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties,
+                                   is_editable,byte_size,is_truncated)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(path) DO UPDATE SET
                 id=excluded.id, title=excluded.title, tags=excluded.tags,
                 aliases=excluded.aliases,
                 updated=excluded.updated, plaintext=excluded.plaintext,
-                type=excluded.type, properties=excluded.properties;
+                type=excluded.type, properties=excluded.properties,
+                is_editable=excluded.is_editable, byte_size=excluded.byte_size,
+                is_truncated=excluded.is_truncated;
         """, arguments: [path, entry.payload.id ?? path, entry.payload.title,
                          entry.payload.tags.joined(separator: ","),
                          entry.payload.aliases.joined(separator: ","),
                          entry.updated.timeIntervalSince1970,
                          entry.payload.plaintext, entry.type,
-                         encode(entry.payload.properties)])
+                         encode(entry.payload.properties),
+                         entry.isEditable, entry.byteSize, entry.isTruncated])
         let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
                                        arguments: [path])
         try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
@@ -393,7 +431,10 @@ public final class LoreIndex: @unchecked Sendable {
                  aliases: (r["aliases"] as String).split(separator: ",").map(String.init),
                  updated: Date(timeIntervalSince1970: r["updated"]),
                  type: r["type"],
-                 properties: decode(r["properties"]))
+                 properties: decode(r["properties"]),
+                 isEditable: r["is_editable"] ?? true,
+                 byteSize: r["byte_size"] ?? 0,
+                 isTruncated: r["is_truncated"] ?? false)
     }
 
     // MARK: - Links

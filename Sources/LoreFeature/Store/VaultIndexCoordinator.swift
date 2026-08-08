@@ -195,10 +195,26 @@ public final class VaultIndexCoordinator {
             // it. `AttachmentEngine.load` cannot fail, so a load failure now
             // means a specific engine rejected a file it claimed.
             guard let engine = try? engineType.load(url) else { continue }
+            // Captured ONCE: `indexPayload` re-runs a full markdown parse plus
+            // link scan on markdown documents, so comparing before/after by
+            // calling it twice would double that cost for every document in
+            // the vault. See `DocumentEngine.indexTitle`'s comment on the same
+            // cost, and the `is_truncated` note on `LoreIndex.schemaVersion`.
             var payload = engine.indexPayload
+            let uncappedByteCount = payload.plaintext.utf8.count
             payload.plaintext = Self.capped(payload.plaintext)
+            // OR'd with the engine's own report: PDFEngine and RichTextEngine
+            // cap their text before `indexPayload` returns it, so the
+            // before/after comparison above cannot see their truncation — see
+            // `DocumentEngine.isContentTruncated`.
+            let isTruncated = payload.plaintext.utf8.count < uncappedByteCount
+                || engine.isContentTruncated
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let byteSize = (attributes?[.size] as? Int) ?? 0
             entries.append(IndexEntry(url: url, type: engineType.identifier,
-                                      payload: payload, updated: updated))
+                                      payload: payload, updated: updated,
+                                      isEditable: engine.isEditable, byteSize: byteSize,
+                                      isTruncated: isTruncated))
         }
         // Resolution is a second pass because a link can point at any document
         // in the vault, including one the enumerator has not reached yet.
@@ -224,7 +240,9 @@ public final class VaultIndexCoordinator {
                                         targetPath: resolver.resolve($0.resolutionTarget),
                                         isEmbed: $0.isEmbed,
                                         syntax: $0.syntax)
-                       })
+                       },
+                       isEditable: entry.isEditable, byteSize: entry.byteSize,
+                       isTruncated: entry.isTruncated)
         }
     }
 
@@ -350,7 +368,16 @@ public final class VaultIndexCoordinator {
         // and the resolved link targets are all one spelling.
         let url = Self.canonical(url)
         let type = type(of: engine).identifier
-        let payload = engine.indexPayload
+        // Capped here too: `scanVault` already caps every payload it writes,
+        // but `indexDocument` — the per-save path — did not, so saving a large
+        // document wrote its uncapped text straight into the index.
+        var payload = engine.indexPayload
+        let uncappedByteCount = payload.plaintext.utf8.count
+        payload.plaintext = Self.capped(payload.plaintext)
+        let isTruncated = payload.plaintext.utf8.count < uncappedByteCount
+            || engine.isContentTruncated
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let byteSize = (attributes?[.size] as? Int) ?? 0
         // Exclude the STALE row for this same document (if it already exists in
         // `rows`): otherwise its old title/alias keys would stay resolvable
         // until the next full rescan, alongside the fresh keys appended below.
@@ -371,7 +398,9 @@ public final class VaultIndexCoordinator {
                          syntax: $0.syntax)
         }
         try index.upsert(IndexEntry(url: url, type: type, payload: payload,
-                                    updated: Date(), resolvedLinks: resolvedLinks))
+                                    updated: Date(), resolvedLinks: resolvedLinks,
+                                    isEditable: engine.isEditable, byteSize: byteSize,
+                                    isTruncated: isTruncated))
         rows = try index.all()
     }
 

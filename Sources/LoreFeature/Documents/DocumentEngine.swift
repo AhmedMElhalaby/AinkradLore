@@ -39,6 +39,19 @@ public protocol DocumentEngine: AnyObject {
     /// Defaulted to true so the two editable engines are untouched.
     var isEditable: Bool { get }
 
+    /// True when this engine's OWN extraction already cut the document's text
+    /// short, before `indexPayload` is even called — e.g. `PDFEngine` caps
+    /// `document.string` inside `load`, and `RichTextEngine` caps inside
+    /// `indexPayload` itself. A generic before/after comparison around
+    /// `indexPayload` (what `VaultIndexCoordinator.scanVault` does for engines
+    /// that DON'T pre-cap) cannot see either case: the string it receives is
+    /// already capped, so the two lengths match and truncation would be
+    /// reported as false. Engines that cap early must say so themselves here.
+    ///
+    /// Defaulted to false so engines that never cap (Markdown, plain text,
+    /// attachments) are untouched.
+    var isContentTruncated: Bool { get }
+
     /// Adopt `other`'s contents in place.
     ///
     /// `DocumentSession.engine` is `let`, so a reload copies fresh contents into
@@ -53,4 +66,5 @@ public protocol DocumentEngine: AnyObject {
 public extension DocumentEngine {
     var indexTitle: String { indexPayload.title }
     var isEditable: Bool { true }
+    var isContentTruncated: Bool { false }
 }

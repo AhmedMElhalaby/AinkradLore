@@ -58,3 +58,24 @@ struct DocumentErrorCard: View {
         .background(theme.tokens.background)
     }
 }
+
+/// One-line banner shown above a read-only viewer whose engine capped its own
+/// extraction (`DocumentEngine.isContentTruncated`) — e.g. `PDFEngine` and
+/// `RichTextEngine`, which cap before `indexPayload` even runs and so cannot
+/// rely on `VaultIndexCoordinator.scanVault`'s generic before/after check.
+/// Without this, a search that finds nothing past the cut is indistinguishable
+/// from the phrase genuinely being absent from the document.
+@MainActor
+struct TruncationNotice: View {
+    let theme: HostTheme
+
+    var body: some View {
+        Text("Only the first part of this document is searchable.")
+            .font(.caption)
+            .foregroundStyle(theme.tokens.foreground.opacity(0.8))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(theme.tokens.background.opacity(0.9))
+    }
+}

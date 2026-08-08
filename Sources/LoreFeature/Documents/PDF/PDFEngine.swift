@@ -20,13 +20,18 @@ public final class PDFEngine: DocumentEngine {
     /// one. Many PDFs carry a generator's junk title, so the filename wins
     /// unless this is present AND non-blank.
     public private(set) var metadataTitle: String?
+    /// Set in `load` by comparing the raw `document.string` length against the
+    /// capped `extractedText` length — the original is discarded immediately
+    /// after, so this is the only place that comparison can happen.
+    public private(set) var isContentTruncated: Bool
 
     private init(sourceURL: URL, extractedText: String,
-                 loadFailure: String?, metadataTitle: String?) {
+                 loadFailure: String?, metadataTitle: String?, isContentTruncated: Bool = false) {
         self.sourceURL = sourceURL
         self.extractedText = extractedText
         self.loadFailure = loadFailure
         self.metadataTitle = metadataTitle
+        self.isContentTruncated = isContentTruncated
     }
 
     public static func canOpen(_ url: URL) -> Bool {
@@ -47,11 +52,14 @@ public final class PDFEngine: DocumentEngine {
         // `document.string` concatenates every page. Capped at the index limit
         // here rather than downstream so a 900-page scan never holds its whole
         // text resident during a vault rescan.
-        let text = VaultIndexCoordinator.capped(document.string ?? "")
+        let raw = document.string ?? ""
+        let text = VaultIndexCoordinator.capped(raw)
+        let truncated = text.utf8.count < raw.utf8.count
         let title = (document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return PDFEngine(sourceURL: url, extractedText: text, loadFailure: nil,
-                         metadataTitle: (title?.isEmpty == false) ? title : nil)
+                         metadataTitle: (title?.isEmpty == false) ? title : nil,
+                         isContentTruncated: truncated)
     }
 
     public func save(to url: URL) throws {
@@ -65,6 +73,7 @@ public final class PDFEngine: DocumentEngine {
         extractedText = other.extractedText
         loadFailure = other.loadFailure
         metadataTitle = other.metadataTitle
+        isContentTruncated = other.isContentTruncated
     }
 
     public var indexTitle: String {
@@ -80,7 +89,14 @@ public final class PDFEngine: DocumentEngine {
             return AnyView(DocumentErrorCard(url: sourceURL, message: loadFailure,
                                              theme: ctx.theme))
         }
-        return AnyView(PDFViewer(url: sourceURL).background(ctx.theme.tokens.background))
+        var view = AnyView(PDFViewer(url: sourceURL).background(ctx.theme.tokens.background))
+        if isContentTruncated {
+            view = AnyView(VStack(spacing: 0) {
+                TruncationNotice(theme: ctx.theme)
+                view
+            })
+        }
+        return view
     }
 }
 
