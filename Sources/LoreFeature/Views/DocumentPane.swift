@@ -150,6 +150,9 @@ struct DocumentPane: View {
                                       createFailure = "Couldn't add \"\(url.lastPathComponent)\": \(failure)"
                                   }
                                   return result.embedSyntax
+                              },
+                              commitTitle: { newTitle in
+                                  store.commitTitleChange(for: session, to: newTitle)
                               }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so

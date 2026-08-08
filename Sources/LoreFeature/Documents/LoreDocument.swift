@@ -109,6 +109,16 @@ public struct EditorContext {
     /// returns the `![[name]]` embed text to insert. Same "nil means declined
     /// or failed" contract as `writePastedImage`.
     public let writeDroppedFile: @MainActor (URL) -> String?
+    /// Called when the title field is COMMITTED — blur or Enter, never per
+    /// keystroke — with the field's current text. Renames the file to match
+    /// and rewrites inbound links. Returns a `LoreStore.TitleCommitOutcome`:
+    /// `.success` (nothing to show), `.refused` (revert the field — nothing
+    /// was written), or `.partial` (the file WAS renamed; show the message
+    /// but do NOT revert the field, or the field would desynchronize from a
+    /// rename that already happened). Defaulted to "always refuse" — same
+    /// "declined" shape as `writePastedImage` — so an engine with no
+    /// title-field story, or a test that does not care, needs no changes.
+    public let commitTitle: @MainActor (String) -> LoreStore.TitleCommitOutcome
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
@@ -120,7 +130,9 @@ public struct EditorContext {
                     = { _ in },
                 isReadOnly: Bool = false,
                 writePastedImage: @escaping @MainActor (Data, String) -> String? = { _, _ in nil },
-                writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil }) {
+                writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil },
+                commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
+                    = { _ in .refused("Renaming is unavailable here.") }) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
         self.resolveEmbedTarget = resolveEmbedTarget
@@ -129,5 +141,6 @@ public struct EditorContext {
         self.isReadOnly = isReadOnly
         self.writePastedImage = writePastedImage
         self.writeDroppedFile = writeDroppedFile
+        self.commitTitle = commitTitle
     }
 }

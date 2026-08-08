@@ -105,6 +105,23 @@ private struct MarkdownDocumentEditor: View {
     let ctx: EditorContext
     @State private var title: String = ""
     @State private var body_: String = ""
+    /// The title as of the last COMMIT (blur/Enter), never per keystroke —
+    /// what a refused rename reverts `title` back to. Kept separate from
+    /// `engine.note.title` because that field is mutated live, on every
+    /// keystroke, below.
+    @State private var lastCommittedTitle: String = ""
+    /// The text as of the moment the title field last GAINED focus — see
+    /// `onChange(of: titleFocused)`'s doc comment.
+    @State private var titleAtFocusStart: String = ""
+    @State private var titleRefusal: String?
+    /// The alert's own title — distinct from "Couldn't rename" for
+    /// `.partial`, where the rename actually SUCCEEDED and only something
+    /// afterward (persisting the title, an unrewritable link) did not; that
+    /// case previously reused "Couldn't rename" verbatim, which is simply
+    /// false when the file has, in fact, been renamed (whole-branch review,
+    /// fix round 2, Minor D).
+    @State private var titleAlertTitle: String = "Couldn't rename"
+    @FocusState private var titleFocused: Bool
     /// Set by `ctx.registerScrollHandler`'s callback, which `OutlineSection`
     /// invokes through the closure the shell captured. Body-relative UTF-16 —
     /// see `MarkdownEngine.outline`'s doc comment for why that is what
@@ -115,7 +132,36 @@ private struct MarkdownDocumentEditor: View {
         VStack(spacing: 0) {
             AinkradTextField(text: $title, placeholder: "Title")
                 .padding(AinkradSpacing.md)
+                .focused($titleFocused)
+                // Live text and the in-memory model track every keystroke —
+                // unchanged from before — so the editor's content (and its
+                // debounced autosave of BODY/tag changes) keeps working
+                // exactly as it did. What is NEW is that the FILE rename is
+                // gated on commit, below: renaming the file on every
+                // keystroke would thrash the filesystem and rewrite inbound
+                // links dozens of times for one typed word.
                 .onChange(of: title) { engine.note.title = title; ctx.onChange() }
+                // `onSubmit` (Enter/Return) and losing focus (Tab away, click
+                // elsewhere) are the two "commit" gestures the owner asked
+                // for. Both funnel into the same commit function so there is
+                // exactly one rename per commit, never two.
+                .onSubmit { if title != titleAtFocusStart { commitTitle() } }
+                .onChange(of: titleFocused) { _, isFocused in
+                    // Record the text as it stood the moment editing STARTED,
+                    // so blur can tell "the user actually typed something"
+                    // apart from "the user merely clicked in and back out".
+                    // Without this, `commitTitle()` fired unconditionally on
+                    // every blur, and for a note whose title and filename
+                    // already diverge (the owner's explicitly-uncovered
+                    // case), that alone renamed the file and mass-rewrote
+                    // every inbound link with no edit and no confirmation —
+                    // whole-branch review, Critical 1.
+                    if isFocused {
+                        titleAtFocusStart = title
+                    } else if title != titleAtFocusStart {
+                        commitTitle()
+                    }
+                }
 
             // Only markdown gets the link affordances: wikilinks are markdown
             // syntax, and offering completion inside a plain-text file would
@@ -135,7 +181,49 @@ private struct MarkdownDocumentEditor: View {
         .background(ctx.theme.tokens.background)
         .onAppear {
             title = engine.note.title; body_ = engine.note.body
+            lastCommittedTitle = engine.note.title
+            titleAtFocusStart = engine.note.title
             ctx.registerScrollHandler { offset in scrollTarget = offset }
+        }
+        .alert(titleAlertTitle,
+               isPresented: Binding(get: { titleRefusal != nil },
+                                    set: { if !$0 { titleRefusal = nil } })) {
+            Button("OK") { titleRefusal = nil }
+        } message: {
+            Text(titleRefusal ?? "")
+        }
+    }
+
+    /// The one place a title-field edit turns into a file rename. Called only
+    /// when the commit gesture (`onSubmit`, focus loss) fires AND the text
+    /// actually changed since focus was gained — see `titleAtFocusStart`.
+    ///
+    /// On `.refused` (illegal title, or a collision), the field — and
+    /// `engine.note.title`, which the per-keystroke `onChange` above already
+    /// pushed the illegal text into — are both reverted to
+    /// `lastCommittedTitle`, so the title field never shows text the file on
+    /// disk does not have. The owner's ruling: refused, not sanitized, and
+    /// reverted to the last VALID value.
+    ///
+    /// On `.partial`, the file WAS renamed — the field is deliberately NOT
+    /// reverted, only the message is shown, or the field would disagree with
+    /// the rename that already happened.
+    private func commitTitle() {
+        switch ctx.commitTitle(title) {
+        case .success:
+            lastCommittedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            titleAtFocusStart = title
+        case .refused(let reason):
+            titleAlertTitle = "Couldn't rename"
+            titleRefusal = reason
+            title = lastCommittedTitle
+            engine.note.title = lastCommittedTitle
+            titleAtFocusStart = lastCommittedTitle
+        case .partial(let reason):
+            titleAlertTitle = "Renamed, with a problem"
+            titleRefusal = reason
+            lastCommittedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            titleAtFocusStart = title
         }
     }
 }

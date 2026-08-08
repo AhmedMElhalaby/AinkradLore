@@ -320,7 +320,19 @@ final class SidebarOperations {
     func confirm() {
         guard let pending, preview?.canConfirm == true else { return }
         switch pending {
-        case .document(let plan, _): report = store.apply(plan)
+        case .document(let plan, let isMove):
+            let result = store.apply(plan)
+            report = result
+            // Only an actual RENAME (basename change) needs the title synced
+            // — a plain move to another folder (`isMove`) keeps its name, so
+            // its title (already equal to that name) is untouched. Only on
+            // full success: a partial rename (e.g. the move itself failed,
+            // or the destination was left at the source because of a
+            // refusal) must not go patch a title onto a file that never
+            // actually got the new name.
+            if !isMove, let moved = result.movedTo, result.failed.isEmpty {
+                store.syncTitleAfterFileRename(at: moved)
+            }
         case .folder(let plan): report = store.apply(plan)
         case .trashFolder(let plan):
             // No `RenameReport` here — `applyTrashFolder` isn't a link
