@@ -28,13 +28,18 @@ struct ImportPreviewRow: View {
         .opacity(isAlreadyImported ? 0.5 : 1)
     }
 
+    /// Deliberately an INDICATOR, not a control. `AinkradToggle` is a `Button`,
+    /// and a button nested inside `AinkradListRow`'s `onTapGesture` gave the row
+    /// two independent toggle paths: clicking the checkbox fired both and the
+    /// selection landed back where it started. The row owns the single tap
+    /// target; this only reports what that tap did.
     @ViewBuilder private var checkbox: some View {
-        if isAlreadyImported {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(theme.foreground.opacity(0.4))
-        } else {
-            AinkradToggle(isOn: Binding(get: { isSelected }, set: { _ in toggle() }))
-        }
+        Image(systemName: isAlreadyImported || isSelected ? "checkmark.circle.fill" : "circle")
+            .foregroundStyle(isAlreadyImported
+                ? theme.foreground.opacity(0.4)
+                : (isSelected ? theme.accentPrimary : theme.foreground.opacity(0.35)))
+            .accessibilityLabel(isAlreadyImported ? "Already imported"
+                : (isSelected ? "Selected for import" : "Not selected"))
     }
 
     private var subtitle: String {

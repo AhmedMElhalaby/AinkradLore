@@ -63,9 +63,26 @@ public struct AppleNotesScriptSource: ImportSource {
 
     public init(runner: ScriptRunner = OSAScriptRunner()) { self.runner = runner }
 
-    /// Emits six fields per note, one per line, records separated by a line
+    /// Notes that Notes.app itself has already thrown away. Importing them
+    /// would resurrect deleted content into the vault, where the user has no
+    /// obvious way to tell it apart from what they meant to keep.
+    static let excludedFolder = "Recently Deleted"
+
+    /// Emits seven fields per note, one per line, records separated by a line
     /// holding only ASCII 30 (RECORD SEPARATOR) — a control character that
     /// cannot occur in a note title or body, unlike any printable delimiter.
+    ///
+    /// **Iterates accounts → folders → notes, never `notes` directly.** Asking
+    /// a note for `name of container of n` fails outright against the real
+    /// Notes.app — AppleScript will not coerce the `«class cntr»` reference to
+    /// text, and the whole script errors with -1700 before emitting a single
+    /// record. Descending from the folder means the folder is already in hand
+    /// and is never asked of the note. The unit tests parse canned output and
+    /// so could never have caught this; only running it against Notes.app did.
+    ///
+    /// Account and folder are SEPARATE fields because a real library holds one
+    /// folder called "Notes" per account. Flattening them to a single container
+    /// name merges unrelated accounts into one vault directory.
     ///
     /// Dates are emitted as SECONDS SINCE THE UNIX EPOCH rather than
     /// `as string`. An AppleScript date string is formatted in the user's
@@ -85,13 +102,22 @@ public struct AppleNotesScriptSource: ImportSource {
     set time of epoch to 0
     set zone to (time to GMT)
     set out to ""
+    set RS to (ASCII character 30)
     tell application "Notes"
-      repeat with n in notes
-        set out to out & (id of n) & linefeed & (name of n) & linefeed & ¬
-          (name of container of n) & linefeed & ¬
-          (((creation date of n) - epoch - zone) as string) & linefeed & ¬
-          (((modification date of n) - epoch - zone) as string) & linefeed & ¬
-          (body of n) & linefeed & (ASCII character 30) & linefeed
+      repeat with a in accounts
+        set acct to name of a
+        repeat with f in folders of a
+          set fname to name of f
+          if fname is not "\(excludedFolder)" then
+            repeat with n in notes of f
+              set out to out & (id of n) & linefeed & (name of n) & linefeed & ¬
+                acct & linefeed & fname & linefeed & ¬
+                (((creation date of n) - epoch - zone) as string) & linefeed & ¬
+                (((modification date of n) - epoch - zone) as string) & linefeed & ¬
+                (body of n) & linefeed & RS & linefeed
+            end repeat
+          end if
+        end repeat
       end repeat
     end tell
     return out
@@ -120,28 +146,37 @@ public struct AppleNotesScriptSource: ImportSource {
                   last.trimmingCharacters(in: .whitespaces).isEmpty {
                 lines.removeLast()
             }
-            guard lines.count >= 6 else { return nil }
-            // The body is everything from field six on: an HTML body spans as
+            guard lines.count >= 7 else { return nil }
+            // The body is everything from field seven on: an HTML body spans as
             // many lines as it likes, and rejoining them is the only way to
             // keep a multi-line note intact.
-            let html = lines[5...].joined(separator: "\n")
+            let html = lines[6...].joined(separator: "\n")
+            // Account first, then folder. An empty component is dropped rather
+            // than turned into an empty directory name, but a note with no
+            // folder still belongs under its account.
+            let folderPath = [lines[2], lines[3]].filter { !$0.isEmpty }
             return ImportItem(
                 sourceID: "\(identifier):\(lines[0])",
                 title: lines[1],
                 body: .html(html),
                 attachments: [],
-                folderPath: lines[2].isEmpty ? [] : [lines[2]],
-                created: Self.date(lines[3]),
-                modified: Self.date(lines[4]),
+                folderPath: folderPath,
+                created: Self.date(lines[4]),
+                modified: Self.date(lines[5]),
                 fidelity: [],
                 kind: .note)
         }
     }
 
-    /// AppleScript renders a whole-number difference without a decimal point,
-    /// but a locale using `,` as the decimal mark could still reach here — so
-    /// an unparseable value becomes the epoch rather than crashing the run.
-    /// A wrong date on an imported note is recoverable; losing the note is not.
+    /// A nine-digit seconds difference comes back from AppleScript in
+    /// SCIENTIFIC NOTATION — `1.660637018E+9`, observed against the real
+    /// Notes.app, not the plain integer this comment used to claim. `Double`
+    /// parses that form to the exact second, so no coercion is needed here.
+    ///
+    /// A locale using `,` as the decimal mark would still render `1,66…E+9`,
+    /// which does not parse — so an unparseable value becomes the epoch rather
+    /// than crashing the run. A wrong date on an imported note is recoverable;
+    /// losing the note is not.
     static func date(_ raw: String) -> Date {
         Date(timeIntervalSince1970: Double(raw.trimmingCharacters(in: .whitespaces)) ?? 0)
     }

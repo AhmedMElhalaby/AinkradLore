@@ -28,6 +28,14 @@ struct ImportEntryView: View {
                     onCancel: onClose)
             case .finished(let report):
                 report_(report)
+            case .needsAutomation(let detail):
+                AinkradEmptyState(
+                    icon: "lock.shield",
+                    title: "Lore needs permission to read Notes",
+                    message: detail + "\n\nTurn Lore on under Notes, then come back and "
+                        + "try again. Nothing has been written to your vault.",
+                    actionTitle: "Open Automation settings…",
+                    action: coordinator.openAutomationSettings)
             case .failed(let message):
                 AinkradEmptyState(
                     icon: "exclamationmark.triangle",
@@ -42,18 +50,38 @@ struct ImportEntryView: View {
         .environment(\.ainkradTheme, theme.tokens)
     }
 
-    /// Obsidian only, and it says so. Apple Notes is not offered as a disabled
-    /// row: an affordance that cannot be used teaches the user it is broken.
-    /// It appears when the source behind it does.
+    /// The two sources that actually work. Neither is offered as a disabled
+    /// row — an affordance that cannot be used teaches the user it is broken.
+    /// Each appears because the source behind it does.
     private var sourcePicker: some View {
-        AinkradEmptyState(
-            icon: "square.and.arrow.down",
-            title: "Import an Obsidian vault",
-            message: "Lore copies the vault in, keeps your [[wikilinks]], and shows you "
-                + "every file before anything is written. Notes you have already "
-                + "imported are skipped.",
-            actionTitle: "Choose vault…",
-            action: coordinator.chooseObsidianVault)
+        VStack(alignment: .leading, spacing: AinkradSpacing.md) {
+            Text("Import into this vault")
+                .font(.headline)
+                .foregroundStyle(theme.tokens.foreground)
+            Text("Lore shows you everything it would write, and writes nothing until you "
+                 + "approve it. Anything you have already imported is skipped.")
+                .font(.callout)
+                .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+                .fixedSize(horizontal: false, vertical: true)
+            AinkradListRow(
+                onTap: coordinator.chooseObsidianVault,
+                leading: { AinkradIconGlyph(systemName: "folder") },
+                title: "Obsidian vault",
+                subtitle: "Copies the vault in and keeps your [[wikilinks]] working.",
+                trailing: { Image(systemName: "chevron.right")
+                    .foregroundStyle(theme.tokens.foreground.opacity(0.4)) })
+            AinkradListRow(
+                onTap: coordinator.importAppleNotes,
+                leading: { AinkradIconGlyph(systemName: "note.text") },
+                title: "Apple Notes",
+                subtitle: "Asks Notes for every note in every account. Locked notes and "
+                    + "the Recently Deleted folder are left alone.",
+                trailing: { Image(systemName: "chevron.right")
+                    .foregroundStyle(theme.tokens.foreground.opacity(0.4)) })
+            Spacer()
+        }
+        .padding(AinkradSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Named with a trailing underscore to avoid colliding with the `report`
