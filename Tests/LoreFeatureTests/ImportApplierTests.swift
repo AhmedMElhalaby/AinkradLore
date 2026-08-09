@@ -304,10 +304,14 @@ final class ImportApplierTests: XCTestCase {
     /// markdown body and itself as the sole attachment. Before the fix,
     /// `apply` wrote a note file for that too — a 500-image vault imported
     /// as 500 real images PLUS 500 junk empty `pic.png.md` notes. An
-    /// attachment-only item (empty body, at least one attachment) must
+    /// attachment-only item — one the SOURCE declared as `kind: .file` — must
     /// write the attachment(s) only, no note file, and `report.imported`
     /// must point at the attachment that actually landed on disk, not a
     /// note URL that was never written.
+    ///
+    /// `kind` is now declared rather than inferred from an empty body; see
+    /// `testAnEmptyBodiedNoteIsStillWrittenWhenTheSourceCallsItANote` for the
+    /// case that inference got wrong.
     func testAttachmentOnlyItemWritesTheAttachmentAndNoNoteFile() async throws {
         let vault = try makeVault()
         let sourceDir = try makeVault()
@@ -319,7 +323,8 @@ final class ImportApplierTests: XCTestCase {
                              attachments: [ImportAttachment(sourceID: "obsidian:pic.png",
                                                             preferredName: "pic.png",
                                                             sourceURL: source)],
-                             folderPath: [], created: Date(), modified: Date(), fidelity: [])
+                             folderPath: [], created: Date(), modified: Date(), fidelity: [],
+                             kind: .file)
         let plan = ImportPlanner.plan(items: [bad], vaultRoot: vault, existingImportIDs: [])
         let report = await ImportApplier(vaultRoot: vault).apply(plan)
 
@@ -331,6 +336,63 @@ final class ImportApplierTests: XCTestCase {
         // The attachment itself landed intact, and `imported` points at it.
         XCTAssertEqual(report.imported[0].lastPathComponent, "pic.png")
         XCTAssertEqual(try Data(contentsOf: report.imported[0]), Data([0xDE, 0xAD, 0xBE, 0xEF]))
+    }
+
+    /// THE CASE THE OLD SHAPE TEST GOT WRONG. An Apple note that is just a
+    /// photo with a title is completely ordinary: empty body, one attachment.
+    /// Inferring "attachment-only" from that shape imported it as a bare
+    /// image, throwing away the title, both dates and any fidelity warnings —
+    /// silent data loss on an entirely normal note.
+    ///
+    /// Now the SOURCE declares what the item is, so a `.note` gets its note
+    /// file no matter how empty its body is.
+    func testAnEmptyBodiedNoteIsStillWrittenWhenTheSourceCallsItANote() async throws {
+        let vault = try makeVault()
+        let sourceDir = try makeVault()
+        let source = sourceDir.appendingPathComponent("photo.jpg")
+        try Data([0x01, 0x02]).write(to: source)
+
+        let photoNote = ImportItem(
+            sourceID: "apple-notes:N1", title: "Sunset",
+            body: .markdown(""),
+            attachments: [ImportAttachment(sourceID: "apple-notes:N1/1",
+                                           preferredName: "photo.jpg",
+                                           sourceURL: source)],
+            folderPath: [], created: Date(timeIntervalSince1970: 1),
+            modified: Date(timeIntervalSince1970: 2), fidelity: [],
+            kind: .note)
+        let plan = ImportPlanner.plan(items: [photoNote], vaultRoot: vault,
+                                      existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+
+        XCTAssertEqual(report.failed.count, 0)
+        let note = vault.appendingPathComponent("Sunset.md")
+        let landed = try FileManager.default.contentsOfDirectory(atPath: vault.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: note.path),
+                      "the note must survive; got \(landed)")
+        let text = try String(contentsOf: note, encoding: .utf8)
+        XCTAssertTrue(text.contains("title: Sunset"), "got \(text)")
+        XCTAssertTrue(text.contains("lore_import_id: apple-notes:N1")
+                      || text.contains("lore_import_id: \"apple-notes:N1\""), "got \(text)")
+        // And the photo landed beside it.
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: vault.appendingPathComponent("photo.jpg").path))
+    }
+
+    /// A `.file` with no attachments would write nothing at all. It is
+    /// malformed, so it falls through to the note path and produces a visible
+    /// empty note rather than silently vanishing from the import.
+    func testAFileItemWithNoAttachmentsStillProducesSomethingVisible() async throws {
+        let vault = try makeVault()
+        let broken = ImportItem(sourceID: "obsidian:gone.png", title: "gone.png",
+                                body: .markdown(""), attachments: [], folderPath: [],
+                                created: Date(), modified: Date(), fidelity: [],
+                                kind: .file)
+        let plan = ImportPlanner.plan(items: [broken], vaultRoot: vault, existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+
+        XCTAssertEqual(report.imported.count, 1)
+        XCTAssertTrue(report.imported[0].lastPathComponent.hasSuffix(".md"))
     }
 
     /// Finding 1 counterpart: an item with a real body AND an attachment is

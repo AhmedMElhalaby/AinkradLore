@@ -66,7 +66,10 @@ public struct ObsidianSource: ImportSource {
                     folderPath: folders,
                     created: modified,
                     modified: modified,
-                    fidelity: []))
+                    fidelity: [],
+                    // Declared, not inferred: in an Obsidian vault a non-`.md`
+                    // file IS the item, and there is no note to write for it.
+                    kind: .file))
             }
         }
         return items
