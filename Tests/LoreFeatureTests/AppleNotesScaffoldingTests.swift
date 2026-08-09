@@ -246,8 +246,8 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         1.695563356E+9
         <p>x</p>
         """)
-        XCTAssertEqual(items[0].created, Date(timeIntervalSince1970: 1_660_637_018))
-        XCTAssertEqual(items[0].modified, Date(timeIntervalSince1970: 1_695_563_356))
+        XCTAssertEqual(items.first?.created, Date(timeIntervalSince1970: 1_660_637_018))
+        XCTAssertEqual(items.first?.modified, Date(timeIntervalSince1970: 1_695_563_356))
     }
 
     /// The folder name is dropped from the path when empty, but the account is
@@ -262,7 +262,7 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         0
         <p>x</p>
         """)
-        XCTAssertEqual(items[0].folderPath, ["iCloud"])
+        XCTAssertEqual(items.first?.folderPath, ["iCloud"])
     }
 
     /// A note from this source is always a `.note`, never a `.file` — an Apple
@@ -331,15 +331,125 @@ final class AppleNotesScriptSourceTests: XCTestCase {
     /// that is what the Dev Host walkthrough is for. What it CAN do is stop the
     /// one construction already known to be fatal from coming back.
     func testTheScriptNeverAsksANoteForItsContainer() {
-        XCTAssertFalse(AppleNotesScriptSource.script.contains("container of"))
-        XCTAssertTrue(AppleNotesScriptSource.script.contains("notes of f"))
+        let script = AppleNotesScriptSource.script(stagingRoot: "/tmp/x")
+        XCTAssertFalse(script.contains("container of"))
+        XCTAssertTrue(script.contains("notes of f"))
+    }
+
+    /// The staging root has to reach the script, or `save` writes nowhere the
+    /// caller can find and every attachment silently becomes unavailable.
+    func testTheStagingRootReachesTheScript() {
+        XCTAssertTrue(AppleNotesScriptSource.script(stagingRoot: "/tmp/stage-me")
+            .contains("\"/tmp/stage-me\""))
     }
 
     /// Importing the trash would resurrect deleted notes into the vault, where
     /// nothing distinguishes them from what the user meant to keep.
     func testTheScriptSkipsRecentlyDeleted() {
-        XCTAssertTrue(AppleNotesScriptSource.script
+        XCTAssertTrue(AppleNotesScriptSource.script(stagingRoot: "/tmp/x")
             .contains("if fname is not \"Recently Deleted\""))
+    }
+
+    // MARK: - attachments
+
+    private let US = "\u{1F}"
+
+    private func withAttachments(_ block: String) -> String {
+        """
+        x-coredata://N1
+        Holiday
+        iCloud
+        Notes
+        0
+        0
+        <p>see photo</p>
+        \(US)
+        \(block)
+        """
+    }
+
+    /// Every accessor here is unwrapped rather than subscripted. A test that
+    /// indexes an empty array TRAPS, which takes the whole runner down and
+    /// makes xcodebuild restart it — and the summary then sums totals across
+    /// launches, so a crash reads as a larger passing run. Found the hard way:
+    /// a mutation check crashed here instead of failing.
+    func testAnAttachmentCarriesItsRealNameAndStagedBytes() throws {
+        let items = AppleNotesScriptSource.parse(
+            withAttachments("x-coredata://A1\(US)Pasted Graphic.png\(US)/tmp/stage/1-1.png"))
+        let attachment = try XCTUnwrap(items.first?.attachments.first)
+        XCTAssertEqual(items.first?.attachments.count, 1)
+        XCTAssertEqual(attachment.preferredName, "Pasted Graphic.png")
+        XCTAssertEqual(attachment.sourceURL?.path, "/tmp/stage/1-1.png")
+        XCTAssertEqual(attachment.sourceID, "apple-notes:x-coredata://A1")
+    }
+
+    /// The body must stop at the marker. If the attachment block leaked into
+    /// the body, every note with a photo would render its own manifest.
+    func testTheAttachmentBlockIsNotPartOfTheBody() throws {
+        let items = AppleNotesScriptSource.parse(
+            withAttachments("x-coredata://A1\(US)pic.png\(US)/tmp/stage/1-1.png"))
+        guard case .html(let raw) = try XCTUnwrap(items.first).body else {
+            return XCTFail("expected .html")
+        }
+        XCTAssertEqual(raw, "<p>see photo</p>")
+    }
+
+    /// A link preview has `name == missing value` and cannot be saved. It is
+    /// KEPT with a warning rather than dropped — a body referring to an image
+    /// that is silently absent is the half-import this milestone exists to stop.
+    func testAnUnexportableAttachmentIsWarnedAboutRatherThanDropped() throws {
+        let items = AppleNotesScriptSource.parse(
+            withAttachments("x-coredata://A1\(US)\(US)"))
+        let item = try XCTUnwrap(items.first)
+        XCTAssertEqual(item.attachments.count, 1)
+        XCTAssertNil(item.attachments.first?.sourceURL)
+        XCTAssertEqual(item.fidelity.map(\.kind), [.attachmentUnavailable])
+    }
+
+    /// A named attachment that failed to save says WHICH one. "An attachment"
+    /// is not actionable when the note has four.
+    func testAFailedNamedAttachmentIsNamedInItsWarning() throws {
+        let items = AppleNotesScriptSource.parse(
+            withAttachments("x-coredata://A1\(US)invoice.pdf\(US)"))
+        let warning = try XCTUnwrap(items.first?.fidelity.first)
+        XCTAssertTrue(warning.detail.contains("invoice.pdf"))
+    }
+
+    func testEveryAttachmentOfANoteIsCarried() {
+        let items = AppleNotesScriptSource.parse(withAttachments("""
+        x-coredata://A1\(US)a.png\(US)/tmp/stage/1-1.png
+        x-coredata://A2\(US)b.png\(US)/tmp/stage/1-2.png
+        x-coredata://A3\(US)c.png\(US)/tmp/stage/1-3.png
+        """))
+        XCTAssertEqual(items.first?.attachments.map(\.preferredName), ["a.png", "b.png", "c.png"])
+        XCTAssertEqual(items.first?.fidelity.isEmpty, true)
+    }
+
+    /// A note that is nothing but a photo is ORDINARY in Apple Notes. Inferring
+    /// `.file` from that shape is what loses its title and dates.
+    func testAPhotoOnlyNoteIsStillANote() {
+        let items = AppleNotesScriptSource.parse("""
+        x-coredata://N1
+        Beach
+
+        Notes
+        0
+        0
+
+        \(US)
+        x-coredata://A1\(US)beach.png\(US)/tmp/stage/1-1.png
+        """)
+        XCTAssertEqual(items.first?.kind, .note)
+        XCTAssertEqual(items.first?.title, "Beach")
+        XCTAssertEqual(items.first?.attachments.count, 1)
+    }
+
+    /// Every fixture written before attachments existed has no marker, and must
+    /// keep parsing as a note with no attachments rather than becoming invalid.
+    func testARecordWithNoAttachmentMarkerStillParses() {
+        let items = AppleNotesScriptSource.parse(canned)
+        XCTAssertEqual(items.count, 2)
+        XCTAssertTrue(items.allSatisfy { $0.attachments.isEmpty })
     }
 
     func testScanRunsTheScriptThroughTheInjectedRunner() async throws {
