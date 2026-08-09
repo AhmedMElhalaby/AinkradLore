@@ -192,9 +192,9 @@ final class ImportApplierTests: XCTestCase {
     }
 
     /// Finding 6 (minor, review round 1): an item that fails before writing
-    /// anything real must not leave a freshly-created empty folder behind in
-    /// the user's vault.
-    func testAnItemThatFailsBeforeWritingAnythingLeavesNoFreshEmptyFolder() async throws {
+    /// anything real must not remove a folder the user already had, even
+    /// though it is left empty by the failure.
+    func testAnItemThatFailsLeavesAPreexistingFolderAlone() async throws {
         let vault = try makeVault()
         let bad = ImportItem(sourceID: "obsidian:bad", title: "Bad", body: .markdown("x"),
                              attachments: [], folderPath: ["Sub"], created: Date(),
@@ -225,6 +225,44 @@ final class ImportApplierTests: XCTestCase {
         // directory IT created for a totally-failed item, never one that was
         // already there.
         XCTAssertTrue(FileManager.default.fileExists(atPath: vault.appendingPathComponent("Sub").path))
+    }
+
+    /// Finding 6 (minor, review round 1), the branch the test above never
+    /// covered: when THIS call is the one that creates the target
+    /// directory, and the item then fails before writing anything real,
+    /// that freshly-created directory must be removed again rather than
+    /// left behind as a fresh empty folder in the user's vault.
+    func testAnItemThatFailsBeforeWritingAnythingLeavesNoFreshEmptyFolder() async throws {
+        let vault = try makeVault()
+        // `Sub` does not exist yet, and `vault` stays fully writable, so
+        // `createDirectory(at: vault/Sub, withIntermediateDirectories: true)`
+        // succeeds — this call alone creates `Sub`. The note reservation
+        // that follows must then fail WITHOUT that permission change also
+        // blocking the `mkdir` above it (that would throw before the `do`
+        // block that owns `rollback()` even runs, which is the trap the
+        // renamed test above already covers and this one must not repeat).
+        // `umask` gets there cleanly: dropping the write bit from the
+        // process umask before the call means `Sub` itself is CREATED with
+        // no write permission (mkdir only needs write access on `vault`,
+        // its parent, to succeed) while writing a file INTO `Sub` right
+        // after — the note's placeholder reservation — needs write access
+        // on `Sub` and fails.
+        let originalUmask = umask(0o222)
+        addTeardownBlock { _ = umask(originalUmask) }
+
+        let bad = ImportItem(sourceID: "obsidian:bad", title: "Bad", body: .markdown("x"),
+                             attachments: [], folderPath: ["Sub"], created: Date(),
+                             modified: Date(), fidelity: [])
+        let plan = ImportPlanner.plan(items: [bad], vaultRoot: vault, existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+        _ = umask(originalUmask)
+        XCTAssertTrue(report.imported.isEmpty)
+        XCTAssertEqual(report.failed.count, 1)
+        // `Sub` was created fresh by this call and ends up with nothing in
+        // it — the applier must remove it again rather than leave a fresh
+        // empty folder behind.
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: vault.appendingPathComponent("Sub").path))
     }
 
     /// Findings 3 & 4 (important, review round 1): timestamps must survive
@@ -259,5 +297,85 @@ final class ImportApplierTests: XCTestCase {
                        created.timeIntervalSince1970.rounded())
         XCTAssertEqual(note.updated.timeIntervalSince1970.rounded(),
                        modified.timeIntervalSince1970.rounded())
+    }
+
+    /// Finding 1 (important, whole-branch review): `ObsidianSource` emits
+    /// every non-`.md` file (images, PDFs, ...) as an item with an empty
+    /// markdown body and itself as the sole attachment. Before the fix,
+    /// `apply` wrote a note file for that too — a 500-image vault imported
+    /// as 500 real images PLUS 500 junk empty `pic.png.md` notes. An
+    /// attachment-only item (empty body, at least one attachment) must
+    /// write the attachment(s) only, no note file, and `report.imported`
+    /// must point at the attachment that actually landed on disk, not a
+    /// note URL that was never written.
+    func testAttachmentOnlyItemWritesTheAttachmentAndNoNoteFile() async throws {
+        let vault = try makeVault()
+        let sourceDir = try makeVault()
+        let source = sourceDir.appendingPathComponent("pic.png")
+        try Data([0xDE, 0xAD, 0xBE, 0xEF]).write(to: source)
+
+        let bad = ImportItem(sourceID: "obsidian:pic.png", title: "pic.png",
+                             body: .markdown(""),
+                             attachments: [ImportAttachment(sourceID: "obsidian:pic.png",
+                                                            preferredName: "pic.png",
+                                                            sourceURL: source)],
+                             folderPath: [], created: Date(), modified: Date(), fidelity: [])
+        let plan = ImportPlanner.plan(items: [bad], vaultRoot: vault, existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+
+        XCTAssertEqual(report.failed.count, 0)
+        XCTAssertEqual(report.imported.count, 1)
+        // No `pic.png.md` (or any `.md` at all) was written.
+        let entries = try FileManager.default.contentsOfDirectory(atPath: vault.path)
+        XCTAssertFalse(entries.contains { $0.hasSuffix(".md") })
+        // The attachment itself landed intact, and `imported` points at it.
+        XCTAssertEqual(report.imported[0].lastPathComponent, "pic.png")
+        XCTAssertEqual(try Data(contentsOf: report.imported[0]), Data([0xDE, 0xAD, 0xBE, 0xEF]))
+    }
+
+    /// Finding 1 counterpart: an item with a real body AND an attachment is
+    /// NOT attachment-only — both the note and the attachment must still
+    /// land, exactly as before this fix.
+    func testItemWithBodyAndAttachmentWritesBoth() async throws {
+        let vault = try makeVault()
+        let sourceDir = try makeVault()
+        let source = sourceDir.appendingPathComponent("diagram.png")
+        try Data([0x01, 0x02]).write(to: source)
+
+        let plan = ImportPlanner.plan(
+            items: [item("apple-notes:N1", "Plan", body: .markdown("hello"),
+                        attachments: [ImportAttachment(sourceID: "att-1",
+                                                       preferredName: "diagram.png",
+                                                       sourceURL: source)])],
+            vaultRoot: vault, existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+
+        XCTAssertEqual(report.failed.count, 0)
+        // One note plus one attachment landed on disk.
+        let entries = try FileManager.default.contentsOfDirectory(atPath: vault.path)
+        XCTAssertTrue(entries.contains("Plan.md"))
+        XCTAssertTrue(entries.contains("diagram.png"))
+        let noteText = try String(contentsOf: vault.appendingPathComponent("Plan.md"),
+                                  encoding: .utf8)
+        XCTAssertTrue(noteText.contains("hello"))
+        XCTAssertEqual(try Data(contentsOf: vault.appendingPathComponent("diagram.png")),
+                       Data([0x01, 0x02]))
+    }
+
+    /// Finding 1, the deliberate pin for the case the attachment-only guard
+    /// must NOT swallow: an empty body with NO attachments is a genuinely
+    /// empty note (the user wrote nothing, or `ObsidianSource` flagged an
+    /// unreadable file via a fidelity warning and imported it empty) — it
+    /// still gets written as a note, same as before this fix.
+    func testEmptyBodyWithNoAttachmentsStillWritesAnEmptyNote() async throws {
+        let vault = try makeVault()
+        let plan = ImportPlanner.plan(
+            items: [item("obsidian:empty", "Empty", body: .markdown(""))],
+            vaultRoot: vault, existingImportIDs: [])
+        let report = await ImportApplier(vaultRoot: vault).apply(plan)
+
+        XCTAssertEqual(report.imported.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: vault.appendingPathComponent("Empty.md").path))
     }
 }

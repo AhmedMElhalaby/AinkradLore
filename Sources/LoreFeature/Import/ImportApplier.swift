@@ -83,6 +83,47 @@ public struct ImportApplier {
         }
 
         do {
+            // Attachment-only items (every non-`.md` file in an Obsidian
+            // vault: images, PDFs, etc. — see `ObsidianSource.scanSync`)
+            // arrive with an empty body and themselves as the sole
+            // attachment. Writing a note file for one of those produces a
+            // junk `pic.png.md` alongside the real `pic.png` for every
+            // binary file in the vault. "Empty body" is checked precisely:
+            // whitespace-only markdown counts (a note that is truly nothing
+            // but blank lines earns the same treatment), and `.html("")`
+            // counts too since it collapses to the same empty markdown via
+            // `HTMLToMarkdown.convert`. An empty body with NO attachments is
+            // NOT attachment-only — that's a genuinely empty note the user
+            // wrote (or a corrupt/unreadable one flagged via fidelity
+            // warnings), and it still gets written so the fidelity warning
+            // has something to attach to.
+            let isEmptyBody: Bool
+            switch planned.item.body {
+            case .markdown(let text):
+                isEmptyBody = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .html(let html):
+                isEmptyBody = html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            let isAttachmentOnly = isEmptyBody && !planned.item.attachments.isEmpty
+
+            if isAttachmentOnly {
+                for attachment in planned.item.attachments {
+                    guard let source = attachment.sourceURL else {
+                        report.failed.append((attachment.sourceID, "no data available"))
+                        continue
+                    }
+                    do {
+                        let destination = LoreStore.nonCollidingURL(
+                            in: directory, preferredName: LoreStore.sanitized(attachment.preferredName))
+                        try FileManager.default.copyItem(at: source, to: destination)
+                        report.imported.append(destination)
+                    } catch {
+                        report.failed.append((attachment.sourceID, error.localizedDescription))
+                    }
+                }
+                return
+            }
+
             // The planner only resolves collisions WITHIN the selection
             // being imported (see `ImportPlanner`'s doc comment). It has no
             // view of what is already on disk — a note the user wrote
