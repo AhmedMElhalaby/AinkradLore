@@ -15,6 +15,10 @@ struct LoreRootView: View {
     /// Rename / move / trash for both sidebar modes. Created here so the two
     /// sidebars share one state machine and one set of modals.
     @State private var ops: SidebarOperations
+    /// Non-nil while the import sheet is up. Built per presentation, so a
+    /// finished import cannot leave its report showing the next time the sheet
+    /// opens — the coordinator's whole lifetime is one import.
+    @State private var importing: ImportCoordinator?
 
     init(store: LoreStore, theme: HostTheme) {
         self.store = store
@@ -55,6 +59,12 @@ struct LoreRootView: View {
                             ops.beginNewFolder(in: root)
                         }
                     }
+                    if let root = store.vaultRoot {
+                        AinkradIconButton(systemName: "square.and.arrow.down",
+                                         tooltip: "Import…") {
+                            importing = ImportCoordinator(vaultRoot: root)
+                        }
+                    }
                     AinkradIconButton(systemName: "plus", action: quickCapture)
                         .keyboardShortcut("n", modifiers: .command)
                 }
@@ -84,6 +94,15 @@ struct LoreRootView: View {
                                onSelect: { _ in attempted = nil })
                 }
                 content
+            }
+            // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
+            // already owns a `.sheet` on the root view, and two `.sheet`
+            // modifiers on the same view are unreliable on macOS — with the
+            // failure mode being a dialog that silently never appears (see
+            // `SidebarOperationsPresentation`).
+            .sheet(item: $importing) { coordinator in
+                ImportEntryView(coordinator: coordinator, theme: theme,
+                                onClose: { importing = nil })
             }
         }
         .background(theme.tokens.background)

@@ -107,6 +107,7 @@ public struct ImportApplier {
             let isAttachmentOnly = isEmptyBody && !planned.item.attachments.isEmpty
 
             if isAttachmentOnly {
+                var landed: URL?
                 for attachment in planned.item.attachments {
                     guard let source = attachment.sourceURL else {
                         report.failed.append((attachment.sourceID, "no data available"))
@@ -117,8 +118,33 @@ public struct ImportApplier {
                             in: directory, preferredName: LoreStore.sanitized(attachment.preferredName))
                         try FileManager.default.copyItem(at: source, to: destination)
                         report.imported.append(destination)
+                        if landed == nil { landed = destination }
                     } catch {
                         report.failed.append((attachment.sourceID, error.localizedDescription))
+                    }
+                }
+                // A binary cannot carry `lore_import_id` — a PNG has nowhere to
+                // put a YAML header — so the ONLY record that this item was
+                // imported is the ledger. Without it a re-scan re-copies every
+                // image as `pic 2.png`, `pic 3.png`, … unbounded. Recorded
+                // AFTER the copies and only when at least one landed, so a
+                // wholly failed item is never marked as imported; keyed to the
+                // first landed file so deleting it un-marks the item (see
+                // `ImportLedger`).
+                if let landed {
+                    do {
+                        try ImportLedger.record(id: planned.item.sourceID,
+                                                landedAt: landed, vaultRoot: vaultRoot)
+                    } catch {
+                        // The bytes DID land, so this is not an item failure —
+                        // but staying silent would mean a re-import duplicates
+                        // this file with nothing to warn the user. It is
+                        // reported alongside the successful import, which is
+                        // exactly the truth of what happened.
+                        report.failed.append((
+                            planned.item.sourceID,
+                            "imported, but its import id could not be recorded "
+                                + "(re-importing may duplicate it): \(error.localizedDescription)"))
                     }
                 }
                 return
@@ -240,7 +266,13 @@ public struct ImportApplier {
     /// comment-truncated by any real YAML reader, including Obsidian's own
     /// properties pane. `yamlScalar` is what already solves this for
     /// `title`; there is no reason `lore_import_id` should be exempt.
-    static func frontmatterBody(_ markdown: String, item: ImportItem) -> String {
+    ///
+    /// `nonisolated`: this is a pure string function, and its main-actor
+    /// isolation was only ever INHERITED from `ImportApplier` (which is
+    /// `@MainActor` for `LoreStore.nonCollidingURL`'s sake, not this). Same
+    /// call as `LoreStore.sanitized` — an incidental isolation that stops
+    /// callers off the main actor for no reason of its own.
+    nonisolated static func frontmatterBody(_ markdown: String, item: ImportItem) -> String {
         let iso = ISO8601DateFormatter()
         let lines = [
             "id: \(Frontmatter.yamlScalar(UUID().uuidString))",
