@@ -37,6 +37,12 @@ public struct ImportApplier {
     /// failure mode of its own on a path that already failed once, and a
     /// stray attachment file is recoverable by hand while a half-imported
     /// note silently missing its media is not. See task-11-report.md.
+    ///
+    /// What IS rolled back on failure: the note's own placeholder and its
+    /// `.original.html` sidecar placeholder, IF they were never filled with
+    /// real content, plus the directory itself if this call created it and
+    /// nothing at all ended up inside. Those are pure applier bookkeeping,
+    /// not user data, so there is no honesty trade-off in removing them.
     public func apply(_ plan: ImportPlan) async -> ImportReport {
         var report = ImportReport()
 
@@ -56,80 +62,152 @@ public struct ImportApplier {
 
     private func apply(_ planned: PlannedItem, into report: inout ImportReport) throws {
         let directory = planned.targetURL.deletingLastPathComponent()
+        let directoryPreexisted = FileManager.default.fileExists(atPath: directory.path)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        // The planner only resolves collisions WITHIN the selection being
-        // imported (see `ImportPlanner`'s doc comment). It has no view of
-        // what is already on disk — a note the user wrote themselves, or a
-        // survivor of a previous partial import. Re-resolving against the
-        // real directory here, with the SAME Finder-style " 2" scheme
-        // `writeAttachment` uses, is what keeps this from ever overwriting
-        // the user's own data.
-        let noteURL = LoreStore.nonCollidingURL(
-            in: directory, preferredName: planned.targetURL.lastPathComponent)
+        // Placeholders reserved up front, and which of them ended up with
+        // real content. Anything left reserved-but-not-final when this item
+        // fails is applier bookkeeping, not user data — see `rollback` below.
+        var reserved: [URL] = []
+        var finalized: Set<URL> = []
 
-        // Attachments before the note: a written note must never point at an
-        // attachment that does not exist yet.
-        for attachment in planned.item.attachments {
-            guard let source = attachment.sourceURL else {
-                report.failed.append((attachment.sourceID, "no data available"))
-                continue
+        func rollback() {
+            for url in reserved where !finalized.contains(url) {
+                try? FileManager.default.removeItem(at: url)
             }
-            do {
-                let destination = LoreStore.nonCollidingURL(
-                    in: directory, preferredName: LoreStore.sanitized(attachment.preferredName))
-                try FileManager.default.copyItem(at: source, to: destination)
-            } catch {
-                report.failed.append((attachment.sourceID, error.localizedDescription))
+            if !directoryPreexisted,
+               let remaining = try? FileManager.default.contentsOfDirectory(atPath: directory.path),
+               remaining.isEmpty {
+                try? FileManager.default.removeItem(at: directory)
             }
         }
 
-        let markdown: String
-        switch planned.item.body {
-        case .markdown(let text):
-            markdown = text
-        case .html(let html):
-            let converted = HTMLToMarkdown.convert(html)
-            markdown = converted.markdown
-            // Keep the original beside the note: a lossy HTML->Markdown
-            // conversion must stay recoverable without going back to the
-            // source app. Unlike the brief's `try?`, a failure here THROWS —
-            // a silently missing original defeats that guarantee, so it is
-            // treated as a failure of the whole item rather than swallowed.
-            let original = noteURL.deletingPathExtension().appendingPathExtension("original.html")
-            try html.write(to: original, atomically: true, encoding: .utf8)
-        }
+        do {
+            // The planner only resolves collisions WITHIN the selection
+            // being imported (see `ImportPlanner`'s doc comment). It has no
+            // view of what is already on disk — a note the user wrote
+            // themselves, or the survivor of a previous partial import.
+            // Re-resolving against the real directory here, with the SAME
+            // Finder-style " 2" scheme `writeAttachment` uses, is what keeps
+            // this from ever overwriting the user's own data.
+            let noteURL = LoreStore.nonCollidingURL(
+                in: directory, preferredName: planned.targetURL.lastPathComponent)
+            try Self.reserve(noteURL)
+            reserved.append(noteURL)
 
-        try Self.frontmatterBody(markdown, item: planned.item)
-            .write(to: noteURL, atomically: true, encoding: .utf8)
-        report.imported.append(noteURL)
+            // The `.original.html` sidecar goes through the SAME on-disk
+            // collision check as the note — a user who already owns
+            // `Bold.original.html` (their own file, or a leftover from a
+            // previous partial import) must not have it silently truncated.
+            //
+            // Both the note's and the sidecar's names are reserved with an
+            // empty placeholder BEFORE the attachment loop below runs, not
+            // just resolved. Resolving without reserving would leave a
+            // window where an attachment whose sanitized name happens to
+            // collide with either (a note called `Plan.md` importing an
+            // attachment literally named `Plan.md`) sees an empty directory,
+            // gets copied to that exact path, and is then silently
+            // overwritten — data loss with no `failed` entry — when the
+            // note/sidecar write happens for real.
+            var sidecarURL: URL?
+            if case .html = planned.item.body {
+                let sidecarName = noteURL.deletingPathExtension()
+                    .appendingPathExtension("original.html").lastPathComponent
+                let resolved = LoreStore.nonCollidingURL(in: directory, preferredName: sidecarName)
+                try Self.reserve(resolved)
+                reserved.append(resolved)
+                sidecarURL = resolved
+            }
+
+            // Attachments before the note: a written note must never point
+            // at an attachment that does not exist yet.
+            for attachment in planned.item.attachments {
+                guard let source = attachment.sourceURL else {
+                    report.failed.append((attachment.sourceID, "no data available"))
+                    continue
+                }
+                do {
+                    let destination = LoreStore.nonCollidingURL(
+                        in: directory, preferredName: LoreStore.sanitized(attachment.preferredName))
+                    try FileManager.default.copyItem(at: source, to: destination)
+                } catch {
+                    report.failed.append((attachment.sourceID, error.localizedDescription))
+                }
+            }
+
+            let markdown: String
+            switch planned.item.body {
+            case .markdown(let text):
+                markdown = text
+            case .html(let html):
+                let converted = HTMLToMarkdown.convert(html)
+                markdown = converted.markdown
+                // Keep the original beside the note: a lossy HTML->Markdown
+                // conversion must stay recoverable without going back to the
+                // source app. Unlike the brief's `try?`, a failure here
+                // THROWS — a silently missing original defeats that
+                // guarantee, so it is treated as a failure of the whole item
+                // rather than swallowed.
+                guard let sidecarURL else {
+                    preconditionFailure("sidecarURL is reserved for every .html item above")
+                }
+                try html.write(to: sidecarURL, atomically: true, encoding: .utf8)
+                finalized.insert(sidecarURL)
+            }
+
+            try Self.frontmatterBody(markdown, item: planned.item)
+                .write(to: noteURL, atomically: true, encoding: .utf8)
+            finalized.insert(noteURL)
+            report.imported.append(noteURL)
+        } catch {
+            rollback()
+            throw error
+        }
     }
 
-    /// Builds the note text via `Frontmatter.serialize`, not string
-    /// interpolation: a title containing a colon, a leading `-`, or a
-    /// newline would otherwise produce invalid YAML that `Frontmatter.parse`
-    /// could then mis-read. `lore_import_id` is not one of `Frontmatter`'s
-    /// modelled keys, so it is spliced into the header as an extra line —
-    /// `Frontmatter.parse` reads any unmodelled key back untouched, and
-    /// preserves it verbatim on every future save.
+    /// Creates an empty placeholder at `url` so a later `nonCollidingURL`
+    /// scan sees the name as taken. Throws on failure (e.g. an unwritable
+    /// directory) rather than silently proceeding as if the name were free.
+    private static func reserve(_ url: URL) throws {
+        guard FileManager.default.createFile(atPath: url.path, contents: Data()) else {
+            throw ReservationFailed(path: url.path)
+        }
+    }
+
+    private struct ReservationFailed: Error, LocalizedError {
+        let path: String
+        var errorDescription: String? { "could not reserve \(path)" }
+    }
+
+    /// Builds the note text by hand, not via `Frontmatter.serialize`'s
+    /// no-raw-frontmatter path: that path (`serializeFromModel`) formats
+    /// `created`/`updated` as `yyyy-MM-dd`, silently dropping time-of-day for
+    /// every note in what is usually a one-shot migration of the user's
+    /// whole library. `ISO8601DateFormatter` — the brief's original choice —
+    /// keeps it.
+    ///
+    /// Every value that is not a fixed literal goes through
+    /// `Frontmatter.yamlScalar`, INCLUDING `lore_import_id`. That key is not
+    /// one of `Frontmatter`'s modelled keys, but `sourceID` is not
+    /// codebase-controlled either — `ObsidianSource` builds it from a user
+    /// filesystem path (`"obsidian:\(relativePath)"`), and a path may
+    /// legally contain a newline or a `#` on disk. Unescaped, a newline
+    /// injects a bogus top-level YAML line and truncates the ID (so
+    /// `existingImportIDs` never matches it again and a re-run duplicates
+    /// the note — the exact failure idempotency exists to prevent), and a
+    /// `#` is read back fine by this codebase's own lenient scanner but
+    /// comment-truncated by any real YAML reader, including Obsidian's own
+    /// properties pane. `yamlScalar` is what already solves this for
+    /// `title`; there is no reason `lore_import_id` should be exempt.
     static func frontmatterBody(_ markdown: String, item: ImportItem) -> String {
-        let note = Note(path: URL(fileURLWithPath: "/dev/null"), id: UUID().uuidString,
-                        title: item.title, tags: [], created: item.created,
-                        updated: item.modified, body: markdown)
-        let serialized = Frontmatter.serialize(note)
-        return withImportID(item.sourceID, insertedInto: serialized)
-    }
-
-    /// Inserts `lore_import_id: <id>` as the last line of the frontmatter
-    /// header, right before the closing `---` fence. `sourceID` is a value
-    /// this codebase constructs itself (`"apple-notes:<id>"`,
-    /// `"obsidian:<path>"`) rather than arbitrary user text, so it is
-    /// written unquoted and verbatim — matching how every scanner and test
-    /// in this milestone expects to find it.
-    private static func withImportID(_ id: String, insertedInto serialized: String) -> String {
-        var lines = serialized.components(separatedBy: "\n")
-        guard let closeOffset = lines.dropFirst().firstIndex(of: "---") else { return serialized }
-        lines.insert("lore_import_id: \(id)", at: closeOffset)
-        return lines.joined(separator: "\n")
+        let iso = ISO8601DateFormatter()
+        let lines = [
+            "id: \(Frontmatter.yamlScalar(UUID().uuidString))",
+            "title: \(Frontmatter.yamlScalar(item.title))",
+            "lore_import_id: \(Frontmatter.yamlScalar(item.sourceID))",
+            "created: \(iso.string(from: item.created))",
+            "updated: \(iso.string(from: item.modified))",
+        ]
+        return "---\n" + lines.joined(separator: "\n") + "\n---\n\n" + markdown
     }
 }
