@@ -48,4 +48,30 @@ final class HTMLToMarkdownTests: XCTestCase {
         XCTAssertTrue(out.contains("line one"))
         XCTAssertTrue(out.contains("line two"))
     }
+
+    func testScriptContentIsNotLeakedIntoOutput() {
+        let result = HTMLToMarkdown.convert(
+            "<p>before</p><script>if (a > b) { doEvil(); }</script><p>after</p>")
+        XCTAssertFalse(result.markdown.contains("doEvil"))
+        XCTAssertFalse(result.markdown.contains("a > b"))
+        XCTAssertTrue(result.markdown.contains("before"))
+        XCTAssertTrue(result.markdown.contains("after"))
+    }
+
+    func testStyleContentIsNotLeakedIntoOutput() {
+        let result = HTMLToMarkdown.convert(
+            "<p>before</p><style>p { color: red; }</style><p>after</p>")
+        XCTAssertFalse(result.markdown.contains("color: red"))
+        XCTAssertTrue(result.markdown.contains("before"))
+        XCTAssertTrue(result.markdown.contains("after"))
+    }
+
+    func testCommentsContainingGreaterThanAreFullySkipped() {
+        let out = md("<!-- a > b --><p>x</p>")
+        XCTAssertEqual(out, "x")
+    }
+
+    func testUnmatchedClosingAnchorIsANoOp() {
+        XCTAssertEqual(md("<p>no link</a> here</p>"), "no link here")
+    }
 }

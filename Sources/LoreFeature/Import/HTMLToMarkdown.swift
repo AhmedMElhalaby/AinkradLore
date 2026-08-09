@@ -59,8 +59,10 @@ public enum HTMLToMarkdown {
                 case "ul", "ol": listDepth = max(listDepth - 1, 0); out += "\n"
                 case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6": out += "\n"
                 case "a":
-                    let href = hrefStack.popLast() ?? ""
-                    out += "](\(href))"
+                    // An unmatched </a> with no prior <a> is a no-op, not a stray "]()"
+                    if let href = hrefStack.popLast() {
+                        out += "](\(href))"
+                    }
                 default: break
                 }
             }
@@ -142,15 +144,25 @@ struct Tokenizer: Sequence {
     }
 }
 
+/// Elements whose content is raw text per the HTML spec — it must never be interpreted
+/// as markup or copied into the markdown output, only scanned for the matching close tag.
+private let rawTextElements: Set<String> = ["script", "style"]
+
 struct TokenizerIterator: IteratorProtocol {
     private let chars: [Character]
     private var i = 0
+    private var pendingRawSkip: String?
 
     init(chars: [Character]) {
         self.chars = chars
     }
 
     mutating func next() -> Tokenizer.Token? {
+        if let rawName = pendingRawSkip {
+            pendingRawSkip = nil
+            skipRawTextContent(of: rawName)
+            return .close(name: rawName)
+        }
         guard i < chars.count else { return nil }
         if chars[i] == "<" {
             return parseTag()
@@ -165,6 +177,13 @@ struct TokenizerIterator: IteratorProtocol {
 
     private mutating func parseTag() -> Tokenizer.Token? {
         i += 1 // consume '<'
+
+        if i < chars.count, chars[i] == "!", i + 1 < chars.count,
+           chars[i + 1] == "-", i + 2 < chars.count, chars[i + 2] == "-" {
+            i += 3 // consume '!--'
+            skipUntilAndConsume("-->")
+            return next()
+        }
 
         if i < chars.count, chars[i] == "!" || chars[i] == "?" {
             skipUntilAndConsume(">")
@@ -190,7 +209,32 @@ struct TokenizerIterator: IteratorProtocol {
 
         let attributes = readAttributes()
         skipUntilAndConsume(">")
+        if rawTextElements.contains(name) {
+            pendingRawSkip = name
+        }
         return .open(name: name, attributes: attributes)
+    }
+
+    /// Advances past a raw-text element's content up to (and consuming) its closing tag,
+    /// e.g. `</script>`. If no closing tag is found, consumes to end of input.
+    private mutating func skipRawTextContent(of name: String) {
+        let closeTag = Array("</\(name)".lowercased())
+        while i < chars.count {
+            if chars[i] == "<", matches(closeTag, at: i) {
+                i += closeTag.count
+                skipUntilAndConsume(">")
+                return
+            }
+            i += 1
+        }
+    }
+
+    private func matches(_ pattern: [Character], at start: Int) -> Bool {
+        guard start + pattern.count <= chars.count else { return false }
+        for offset in 0..<pattern.count {
+            if chars[start + offset].lowercased() != String(pattern[offset]) { return false }
+        }
+        return true
     }
 
     private mutating func readName() -> String {
@@ -269,5 +313,18 @@ struct TokenizerIterator: IteratorProtocol {
     private mutating func skipUntilAndConsume(_ target: Character) {
         while i < chars.count, chars[i] != target { i += 1 }
         if i < chars.count { i += 1 }
+    }
+
+    /// Skips forward until the literal `target` sequence is found and consumes it too
+    /// (e.g. `"-->"` for HTML comments). If never found, consumes to end of input.
+    private mutating func skipUntilAndConsume(_ target: String) {
+        let pattern = Array(target)
+        while i < chars.count {
+            if matches(pattern, at: i) {
+                i += pattern.count
+                return
+            }
+            i += 1
+        }
     }
 }
