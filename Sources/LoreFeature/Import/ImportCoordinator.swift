@@ -4,15 +4,19 @@ import Observation
 
 /// What the import surface is currently showing.
 ///
-/// The Apple Notes permission states (`.needsFullDiskAccess`, `.needsAutomation`)
-/// are deliberately absent: nothing can produce them until `NotesStoreLocator`
-/// exists, and a state no code path can reach is a state no test can prove
-/// works. They arrive with the source that needs them.
+/// `.needsAutomation` arrives with `AppleNotesScriptSource`, the source that can
+/// produce it. `.needsFullDiskAccess` is still deliberately absent: the SQLite
+/// fast path is not wired to any call site, so nothing can reach that state and
+/// a state no code path reaches is a state no test can prove works.
 public enum ImportEntryState {
     case choosingSource
     case scanning
     case previewing(ImportSelection)
     case finished(ImportReport)
+    /// Distinct from `.failed` because it is FIXABLE by the user, and the fix is
+    /// one button away. A denial rendered as a generic error sentence leaves
+    /// them reading about a switch with no way to reach it.
+    case needsAutomation(String)
     case failed(String)
 }
 
@@ -49,6 +53,27 @@ public final class ImportCoordinator: Identifiable {
         Task { await scan(ObsidianSource(vaultURL: folder), sourceRoot: folder) }
     }
 
+    /// Imports Apple Notes through `AppleNotesScriptSource` — the AppleScript
+    /// route, not the SQLite one.
+    ///
+    /// The fast path reads `NoteStore.sqlite`, which needs Full Disk Access;
+    /// that grant could not be obtained on this machine, and the note body in
+    /// that store is an undocumented gzipped protobuf whose layout is still
+    /// unverified. This route asks Notes.app itself: slower on a large library,
+    /// blind to locked notes, and supported.
+    public func importAppleNotes() {
+        Task { await scan(AppleNotesScriptSource(), sourceRoot: nil) }
+    }
+
+    /// Opens the Automation pane directly. Telling the user where the switch is
+    /// and making them find it are different products.
+    public func openAutomationSettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     /// Scans `source` and moves to the preview.
     ///
     /// `sourceRoot` is separate from the source object because the nesting
@@ -64,7 +89,9 @@ public final class ImportCoordinator: Identifiable {
         do {
             let items = try await source.scan()
             guard !items.isEmpty else {
-                state = .failed("There was nothing to import in that folder.")
+                state = .failed(sourceRoot == nil
+                    ? "There were no notes to import."
+                    : "There was nothing to import in that folder.")
                 return
             }
             // The reader runs HERE, once, against the live vault — not at
@@ -75,7 +102,16 @@ public final class ImportCoordinator: Identifiable {
             state = .previewing(ImportSelection(items: items, vaultRoot: vaultRoot,
                                                 existingImportIDs: existing))
         } catch let error as ImportSourceError {
-            state = .failed(Self.describe(error))
+            // Only Apple Notes maps a denial to the Automation state. An
+            // unreadable Obsidian folder is also `.permissionDenied`, and
+            // pointing THAT at the Automation pane would send the user to flip
+            // a switch that has nothing to do with their problem.
+            if case .permissionDenied(let detail) = error,
+               type(of: source).identifier == AppleNotesScriptSource.identifier {
+                state = .needsAutomation(detail)
+            } else {
+                state = .failed(Self.describe(error))
+            }
         } catch {
             state = .failed(error.localizedDescription)
         }

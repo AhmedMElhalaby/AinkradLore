@@ -187,11 +187,18 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         }
     }
 
-    /// Two records. Dates are seconds since the Unix epoch, which is what the
-    /// script emits — deliberately not a localised date string.
+    /// Two records in the SEVEN-field shape the script emits: id, title,
+    /// account, folder, created, modified, body. Account and folder are
+    /// separate fields because a Notes library routinely holds several folders
+    /// all named "Notes" — one per account — and a single container field
+    /// would silently merge them into one vault directory.
+    ///
+    /// Dates are seconds since the Unix epoch, deliberately not a localised
+    /// date string.
     private let canned = """
     x-coredata://N1
     Groceries
+    iCloud
     Shopping
     978307200
     978307300
@@ -199,6 +206,7 @@ final class AppleNotesScriptSourceTests: XCTestCase {
     \u{1E}
     x-coredata://N2
     Ideas
+    iCloud
     Notes
     978307200
     978307300
@@ -209,10 +217,52 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         let items = AppleNotesScriptSource.parse(canned)
         XCTAssertEqual(items.map(\.title), ["Groceries", "Ideas"])
         XCTAssertEqual(items[0].sourceID, "apple-notes:x-coredata://N1")
-        XCTAssertEqual(items[0].folderPath, ["Shopping"])
         XCTAssertEqual(items[0].created, Date(timeIntervalSince1970: 978307200))
         guard case .html(let raw) = items[1].body else { return XCTFail("expected .html") }
         XCTAssertTrue(raw.contains("<b>bold</b>"))
+    }
+
+    /// Real libraries hold one "Notes" folder PER ACCOUNT. Keying the vault
+    /// path on the folder name alone merges an Exchange note into the iCloud
+    /// tree; the account has to be a path component of its own.
+    func testTheAccountIsAPathComponentAboveTheFolder() {
+        let items = AppleNotesScriptSource.parse(canned)
+        XCTAssertEqual(items[0].folderPath, ["iCloud", "Shopping"])
+        XCTAssertEqual(items[1].folderPath, ["iCloud", "Notes"])
+    }
+
+    /// AppleScript renders a nine-digit seconds difference in SCIENTIFIC
+    /// NOTATION (`1.660637018E+9`), not as a plain integer — observed against
+    /// the real Notes.app, and the reason the previous doc comment here was
+    /// wrong. Swift's `Double` parses that form exactly, but a fixture written
+    /// only with plain integers never proved it.
+    func testParsesTheScientificNotationRealAppleScriptActuallyEmits() {
+        let items = AppleNotesScriptSource.parse("""
+        x-coredata://N1
+        Exponent
+        iCloud
+        Notes
+        1.660637018E+9
+        1.695563356E+9
+        <p>x</p>
+        """)
+        XCTAssertEqual(items[0].created, Date(timeIntervalSince1970: 1_660_637_018))
+        XCTAssertEqual(items[0].modified, Date(timeIntervalSince1970: 1_695_563_356))
+    }
+
+    /// The folder name is dropped from the path when empty, but the account is
+    /// still a real location — an unfoldered note must not land at the root.
+    func testANoteWithNoFolderStillLandsUnderItsAccount() {
+        let items = AppleNotesScriptSource.parse("""
+        x-coredata://N1
+        Loose
+        iCloud
+
+        0
+        0
+        <p>x</p>
+        """)
+        XCTAssertEqual(items[0].folderPath, ["iCloud"])
     }
 
     /// A note from this source is always a `.note`, never a `.file` — an Apple
@@ -226,6 +276,7 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         let items = AppleNotesScriptSource.parse("""
         x-coredata://N1
         Long
+        iCloud
         Notes
         0
         0
@@ -244,6 +295,16 @@ final class AppleNotesScriptSourceTests: XCTestCase {
     /// or date. Dropping it loses one note from a run the user can repeat.
     func testDropsATruncatedRecordRatherThanGuessingAtItsFields() {
         XCTAssertTrue(AppleNotesScriptSource.parse("x-coredata://N1\nJust a title").isEmpty)
+        // Six fields was the OLD complete record and is now a truncated one.
+        // Accepting it would read the created date as a folder name.
+        XCTAssertTrue(AppleNotesScriptSource.parse("""
+        x-coredata://N1
+        Groceries
+        Shopping
+        978307200
+        978307300
+        <p>milk</p>
+        """).isEmpty)
     }
 
     /// An Automation denial is a DIFFERENT grant from Full Disk Access, and
@@ -259,6 +320,26 @@ final class AppleNotesScriptSourceTests: XCTestCase {
         } catch {
             XCTFail("unexpected \(error)")
         }
+    }
+
+    /// `name of container of n` errors with -1700 against the real Notes.app —
+    /// AppleScript will not coerce the `«class cntr»` reference to text, and
+    /// the script dies before emitting a single record. It shipped that way
+    /// because every test here parses canned output and none run the script.
+    ///
+    /// This assertion cannot prove the script works; only executing it can, and
+    /// that is what the Dev Host walkthrough is for. What it CAN do is stop the
+    /// one construction already known to be fatal from coming back.
+    func testTheScriptNeverAsksANoteForItsContainer() {
+        XCTAssertFalse(AppleNotesScriptSource.script.contains("container of"))
+        XCTAssertTrue(AppleNotesScriptSource.script.contains("notes of f"))
+    }
+
+    /// Importing the trash would resurrect deleted notes into the vault, where
+    /// nothing distinguishes them from what the user meant to keep.
+    func testTheScriptSkipsRecentlyDeleted() {
+        XCTAssertTrue(AppleNotesScriptSource.script
+            .contains("if fname is not \"Recently Deleted\""))
     }
 
     func testScanRunsTheScriptThroughTheInjectedRunner() async throws {

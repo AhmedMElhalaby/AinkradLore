@@ -145,6 +145,82 @@ final class ImportCoordinatorTests: XCTestCase {
         }
     }
 
+    // MARK: - the Apple Notes route
+
+    /// Denies with the same error `OSAScriptRunner` raises on a -1743.
+    private struct DenyingRunner: ScriptRunner {
+        func run(_ source: String) throws -> String {
+            throw ImportSourceError.permissionDenied("Allow Ainkrad to control Notes.")
+        }
+    }
+
+    private struct StubRunner: ScriptRunner {
+        let output: String
+        func run(_ source: String) throws -> String { output }
+    }
+
+    /// A denial from Notes is FIXABLE, and its own state, so the view can put
+    /// the Automation pane one button away instead of describing where it is.
+    func testAnAutomationDenialBecomesItsOwnFixableState() async throws {
+        let coordinator = ImportCoordinator(vaultRoot: try makeDirectory())
+        await coordinator.scan(AppleNotesScriptSource(runner: DenyingRunner()),
+                               sourceRoot: nil)
+        guard case .needsAutomation(let detail) = coordinator.state else {
+            throw WrongState(expected: ".needsAutomation", actual: "\(coordinator.state)")
+        }
+        XCTAssertTrue(detail.contains("Notes"))
+    }
+
+    /// The counterpart that stops the mapping being a blanket one. An
+    /// unreadable Obsidian folder is ALSO `.permissionDenied`; routing it to
+    /// the Automation pane would send the user to flip an unrelated switch.
+    func testAnObsidianDenialIsNotReportedAsAnAutomationProblem() async throws {
+        struct DeniedSource: ImportSource {
+            static let identifier = "obsidian"
+            func scan() async throws -> [ImportItem] {
+                throw ImportSourceError.permissionDenied("no read access")
+            }
+        }
+        let coordinator = ImportCoordinator(vaultRoot: try makeDirectory())
+        await coordinator.scan(DeniedSource(), sourceRoot: nil)
+        guard case .failed = coordinator.state else {
+            throw WrongState(expected: ".failed", actual: "\(coordinator.state)")
+        }
+    }
+
+    /// The Apple Notes route reaches the same preview as every other source —
+    /// it is not a second pipeline, which is what keeps the dry-run promise,
+    /// the id skipping and the link rewriting true for notes as well.
+    func testScriptedNotesReachTheSamePreviewAsAnyOtherSource() async throws {
+        let canned = """
+        x-coredata://N1
+        Groceries
+        iCloud
+        Shopping
+        978307200
+        978307300
+        <p>milk</p>
+        """
+        let coordinator = ImportCoordinator(vaultRoot: try makeDirectory())
+        await coordinator.scan(AppleNotesScriptSource(runner: StubRunner(output: canned)),
+                               sourceRoot: nil)
+        let selection = try selection(of: coordinator.state)
+        XCTAssertEqual(selection.items.map(\.title), ["Groceries"])
+        XCTAssertEqual(selection.plan.creating.count, 1)
+    }
+
+    /// An empty Notes library is not a folder, so it must not be explained as
+    /// one. The old sentence said "in that folder" for every source.
+    func testAnEmptyNotesLibraryIsNotExplainedAsAnEmptyFolder() async throws {
+        let coordinator = ImportCoordinator(vaultRoot: try makeDirectory())
+        await coordinator.scan(AppleNotesScriptSource(runner: StubRunner(output: "")),
+                               sourceRoot: nil)
+        guard case .failed(let message) = coordinator.state else {
+            throw WrongState(expected: ".failed", actual: "\(coordinator.state)")
+        }
+        XCTAssertFalse(message.contains("folder"))
+    }
+
     // MARK: - nesting
 
     func testImportingTheVaultIntoItselfIsRefusedBeforeAnythingIsRead() async throws {
