@@ -158,7 +158,7 @@ public extension LoreStore {
     /// that by budgeting BYTES and walking back to a scalar boundary —
     /// the exact technique `VaultIndexCoordinator.capped` already uses for
     /// the same reason, copied rather than reinvented.
-    static func sanitized(_ name: String) -> String {
+    nonisolated static func sanitized(_ name: String) -> String {
         let forbidden = CharacterSet(charactersIn: "/:]|#\u{0}").union(.newlines)
         var cleaned = String(String.UnicodeScalarView(
             name.unicodeScalars.map { forbidden.contains($0) ? "-" : $0 }))
@@ -175,14 +175,14 @@ public extension LoreStore {
     /// base name alone: the extension, the ` NN` collision suffix
     /// `nonCollidingURL` may still append, and the `.` separators all still
     /// need to fit inside the same 255-byte limit.
-    private static let maxBaseNameBytes = 200
+    private nonisolated static let maxBaseNameBytes = 200
 
     /// Truncates `text` to at most `maxBytes` UTF-8 bytes WITHOUT splitting
     /// a multi-byte scalar in half — the same walk-back-to-a-lead-byte
     /// technique `VaultIndexCoordinator.capped` uses for indexed plaintext,
     /// copied here because the problem (cut a UTF-8 string to a byte budget
     /// without producing invalid UTF-8) is identical.
-    private static func cappedToBytes(_ text: String, maxBytes: Int) -> String {
+    private nonisolated static func cappedToBytes(_ text: String, maxBytes: Int) -> String {
         guard text.utf8.count > maxBytes else { return text }
         var bytes = Array(text.utf8.prefix(maxBytes))
         // Walk back to the last lead byte (anything that is not a 10xxxxxx

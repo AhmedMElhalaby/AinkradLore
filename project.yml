@@ -114,7 +114,10 @@ targets:
   LoreFeatureTests:
     type: bundle.unit-test
     platform: macOS
-    sources: [Tests/LoreFeatureTests]
+    sources:
+      - path: Tests/LoreFeatureTests
+      - path: Tests/Fixtures
+        buildPhase: resources
     dependencies:
       - target: LoreFeature
       - package: GRDB
