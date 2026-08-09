@@ -10,7 +10,6 @@ import Foundation
 /// that equality is the entire dry-run promise. `nonCollidingURL` is
 /// deliberately NOT used here: it resolves against files already on disk,
 /// which is the applier's job (Task 11), not the planner's.
-@MainActor
 public enum ImportPlanner {
     public static func plan(items: [ImportItem],
                             vaultRoot: URL,
@@ -53,25 +52,22 @@ public enum ImportPlanner {
     /// Builds `vaultRoot/comp1/comp2/...` with every component sanitized AND
     /// guaranteed not to be a traversal segment.
     ///
-    /// `LoreStore.sanitized` strips `/` and `:` but has no opinion on `.` —
-    /// it exists to make a single path COMPONENT safe, and `.`/`..` are
-    /// already valid, harmless component text in that context. It is this
-    /// call site's job to reject them as directory names: a `folderPath` of
-    /// `["..", "..", "etc"]` sanitizes to the same `[".." , "..", "etc"]`
-    /// untouched, and `appendingPathComponent` would then walk the result
-    /// straight out of the vault. Any component that sanitizes to `.` or
-    /// `..` is replaced with a literal placeholder so it stays inert.
+    /// `LoreStore.sanitized` drops leading dots from a component and falls
+    /// back to a fixed placeholder (`"attachment"`) when nothing is left —
+    /// see its doc comment. That means a component of `"."` or `".."` can
+    /// never survive sanitization as a literal `.`/`..`: both drop to empty
+    /// and fall back, so `sanitized("..") == "attachment"`, not `".."`. That
+    /// fallback is what actually keeps a `folderPath` of `["..", "..", "etc"]`
+    /// from producing a traversal segment here.
+    ///
+    /// The `standardizedFileURL` prefix check below is the real backstop:
+    /// it is what the planner's "never a target outside the vault root"
+    /// guarantee actually rests on, independent of `sanitized`'s current
+    /// behavior — if that fallback ever changed, this check still holds.
     private static func containedDirectory(for folderPath: [String], under vaultRoot: URL) -> URL {
         let directory = folderPath.reduce(vaultRoot) { partial, component in
-            let sanitizedComponent = LoreStore.sanitized(component)
-            let safeComponent = (sanitizedComponent == "." || sanitizedComponent == "..")
-                ? "-" : sanitizedComponent
-            return partial.appendingPathComponent(safeComponent)
+            partial.appendingPathComponent(LoreStore.sanitized(component))
         }
-        // Defensive containment check: standardizing resolves any residual
-        // `.`/`..` segments before comparing, so this only ever fires if the
-        // per-component guard above had a gap — but the planner promising
-        // "never a target outside the vault root" must hold even then.
         let standardizedDirectory = directory.standardizedFileURL
         let standardizedRoot = vaultRoot.standardizedFileURL
         guard standardizedDirectory.path == standardizedRoot.path

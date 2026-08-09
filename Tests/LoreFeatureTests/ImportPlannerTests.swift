@@ -1,7 +1,6 @@
 import XCTest
 @testable import LoreFeature
 
-@MainActor
 final class ImportPlannerTests: XCTestCase {
     private func item(_ id: String, _ title: String,
                       folders: [String] = []) -> ImportItem {
@@ -116,5 +115,23 @@ final class ImportPlannerTests: XCTestCase {
                                       vaultRoot: vault, existingImportIDs: [])
         let targetPath = plan.items[0].targetURL.standardizedFileURL.path
         XCTAssertTrue(targetPath.hasPrefix(vault.standardizedFileURL.path + "/"))
+    }
+
+    /// Pins the purity requirement itself: `plan(...)` must be callable with
+    /// no main-actor hop, since the preview needs to re-run it cheaply from
+    /// wherever a checkbox toggle happens. A test that only ever called
+    /// `plan` from the (implicitly main-actor) test method would pass even
+    /// if `ImportPlanner` were `@MainActor`-isolated — that isolation would
+    /// just be silently satisfied by the test runner's own context. Running
+    /// inside `Task.detached` proves the call compiles and succeeds with NO
+    /// actor context at all.
+    func testPlanIsCallableFromANonisolatedDetachedContext() async {
+        let items = [item("a", "Plan"), item("b", "Plan")]
+        let names: [String] = await Task.detached {
+            let plan = ImportPlanner.plan(items: items, vaultRoot: URL(fileURLWithPath: "/vault"),
+                                          existingImportIDs: [])
+            return plan.items.map(\.targetURL.lastPathComponent)
+        }.value
+        XCTAssertEqual(names, ["Plan.md", "Plan 2.md"])
     }
 }
