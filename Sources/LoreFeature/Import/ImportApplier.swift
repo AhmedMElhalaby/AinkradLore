@@ -329,15 +329,19 @@ public struct ImportApplier {
 
     // MARK: - helpers
 
+    /// Asks the item what it is, rather than inferring it from its shape.
+    ///
+    /// This used to be `emptyBody && !attachments.isEmpty`. That test is
+    /// correct for Obsidian and WRONG for Apple Notes, where a note that is
+    /// just a photo with a title is ordinary — it would have imported as a
+    /// bare image with the title, dates and fidelity warnings gone. See
+    /// `ImportItemKind`.
+    ///
+    /// A `.file` with no attachments would write nothing at all, so it is
+    /// treated as the malformed item it is and left to the note path, where
+    /// it produces a visible empty note instead of silently vanishing.
     static func isAttachmentOnly(_ item: ImportItem) -> Bool {
-        let isEmptyBody: Bool
-        switch item.body {
-        case .markdown(let text):
-            isEmptyBody = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .html(let html):
-            isEmptyBody = html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return isEmptyBody && !item.attachments.isEmpty
+        item.kind == .file && !item.attachments.isEmpty
     }
 
     /// Creates an empty placeholder at `url` so a later `nonCollidingURL`
