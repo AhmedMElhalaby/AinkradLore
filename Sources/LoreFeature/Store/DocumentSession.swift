@@ -65,6 +65,27 @@ public final class DocumentSession: Identifiable {
     /// actor. See `DocumentEngine.indexTitle`.
     private var cachedTitle: String
 
+    /// The title as of the last LOAD, RELOAD, or explicit title-sync commit —
+    /// deliberately NEVER updated by an ordinary `write()` (which backs both
+    /// `saveNow()` and the 500ms debounced autosave that follows every
+    /// keystroke via `markChanged()`).
+    ///
+    /// This exists ONLY for `LoreStore.commitTitleChange`'s no-op guard, and
+    /// it has to be a DIFFERENT value from `cachedTitle` for that guard to
+    /// work at all. `cachedTitle` tracks the live-typed text within ~500ms
+    /// (every autosave refreshes it), so the dominant real gesture — type a
+    /// new title, pause a beat, click away — lands the debounced autosave
+    /// BEFORE the click-away's commit runs. A guard keyed on `cachedTitle`
+    /// would then see the field's text already equal to "the title", call it
+    /// a no-op, and never rename the file or rewrite a single link — while
+    /// the autosave had already written the NEW title into the OLD filename,
+    /// creating the exact divergence this feature exists to prevent, and one
+    /// no future commit of that same text could ever repair (whole-branch
+    /// review, fix round 2, Critical A). `titleAtLoad` holds still while the
+    /// user types and pauses, so a genuine retitle is correctly seen as
+    /// "changed" whether the user clicks away in 50ms or 5 seconds.
+    private var titleAtLoad: String
+
     private static let autosaveDelay: Duration = .milliseconds(500)
     /// One policy, one owner: the coordinator decides how long its own watcher
     /// ignores the echo of our writes.
@@ -78,14 +99,28 @@ public final class DocumentSession: Identifiable {
         self.coordinator = coordinator
         self.baseline = Self.mtime(of: url) ?? .distantPast
         self.cachedTitle = engine.indexTitle
-        // Same honest-but-temporary type switch as `copyState(from:)`; M3/M4
-        // replace both with protocol requirements.
-        self.isReadOnly = (engine as? PlainTextEngine)?.isLossilyDecoded == true
+        self.titleAtLoad = engine.indexTitle
+        self.isReadOnly = !engine.isEditable
     }
 
     public static func open(url: URL, coordinator: VaultIndexCoordinator) throws -> DocumentSession {
         let engine = try EngineRegistry.load(url)
         return DocumentSession(url: url, engine: engine, coordinator: coordinator)
+    }
+
+    /// `LoreStore.commitTitleChange`'s no-op guard: has the title genuinely
+    /// changed since the last load/reload/explicit sync — see `titleAtLoad`'s
+    /// own doc comment for why this must NOT be `cachedTitle`.
+    public var titleSinceLoad: String { titleAtLoad }
+
+    /// Called by `LoreStore.commitTitleChange` once a rename it initiated has
+    /// actually happened (`RenameReport.movedTo != nil`), regardless of
+    /// whether the frontmatter write that follows succeeds. Advances the
+    /// no-op baseline to `title` so a LATER, unrelated commit is measured
+    /// against what was just deliberately synced, not the session's original
+    /// load.
+    public func noteTitleSynced(_ title: String) {
+        titleAtLoad = title
     }
 
     /// The title as of the last load or save — see `cachedTitle`.
@@ -163,6 +198,8 @@ public final class DocumentSession: Identifiable {
         try copyState(from: fresh)
         baseline = Self.mtime(of: url) ?? .distantPast
         cachedTitle = engine.indexTitle
+        titleAtLoad = engine.indexTitle
+        isReadOnly = !engine.isEditable
         conflict = false
         isDirty = false
         lastSaveError = nil
@@ -251,22 +288,21 @@ public final class DocumentSession: Identifiable {
         try? coordinator.indexDocument(engine, at: url)
     }
 
-    /// Replaces this session's engine contents with `fresh`'s. Implemented per
-    /// engine because only the engine knows its own document model.
+    /// Replaces this session's engine contents with `fresh`'s, via the engine's
+    /// own `replaceContents(with:)`.
     ///
-    /// This switch is the one place M0 leaks engine knowledge into the shell.
-    /// M3/M4 must replace it with a `replaceContents(with:)` requirement on
-    /// `DocumentEngine`; with two engines that requirement is still
-    /// speculative, and the switch is honest about being temporary.
+    /// Passing `engine` (an `any DocumentEngine`) as the argument to a generic
+    /// parameter constrained to `DocumentEngine` implicitly opens the
+    /// existential (SE-0352), recovering the concrete type `E`. The inner
+    /// closure then checks that `fresh` is that SAME concrete type. A mismatch
+    /// means the file changed type under us (a `.md` replaced by a `.pdf` at
+    /// the same path) and is an `unsupported` error, exactly as before.
     private func copyState(from fresh: any DocumentEngine) throws {
-        switch (engine, fresh) {
-        case let (mine as MarkdownEngine, theirs as MarkdownEngine):
-            mine.note = theirs.note
-        case let (mine as PlainTextEngine, theirs as PlainTextEngine):
-            mine.text = theirs.text
-        default:
-            throw EngineError.unsupported(url)
+        func adopt<E: DocumentEngine>(_ mine: E) throws {
+            guard let theirs = fresh as? E else { throw EngineError.unsupported(url) }
+            mine.replaceContents(with: theirs)
         }
+        try adopt(engine)
     }
 
     private static func mtime(of url: URL) -> Date? {

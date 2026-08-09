@@ -32,9 +32,39 @@ public protocol DocumentEngine: AnyObject {
     /// overrides and the parse disappears.
     var indexTitle: String { get }
 
+    /// False for read-only citizens (PDF, rich text, attachments). The session
+    /// gates autosave on this: a read-only document is never marked dirty, so a
+    /// keystroke cannot become one failed write per typing pause.
+    ///
+    /// Defaulted to true so the two editable engines are untouched.
+    var isEditable: Bool { get }
+
+    /// True when this engine's OWN extraction already cut the document's text
+    /// short, before `indexPayload` is even called — e.g. `PDFEngine` caps
+    /// `document.string` inside `load`, and `RichTextEngine` caps inside
+    /// `indexPayload` itself. A generic before/after comparison around
+    /// `indexPayload` (what `VaultIndexCoordinator.scanVault` does for engines
+    /// that DON'T pre-cap) cannot see either case: the string it receives is
+    /// already capped, so the two lengths match and truncation would be
+    /// reported as false. Engines that cap early must say so themselves here.
+    ///
+    /// Defaulted to false so engines that never cap (Markdown, plain text,
+    /// attachments) are untouched.
+    var isContentTruncated: Bool { get }
+
+    /// Adopt `other`'s contents in place.
+    ///
+    /// `DocumentSession.engine` is `let`, so a reload copies fresh contents into
+    /// the engine the session already owns rather than swapping the object.
+    /// Implemented per engine because only the engine knows its document model;
+    /// this requirement replaces the shell-side type switch that M0 left behind.
+    func replaceContents(with other: Self)
+
     @MainActor func makeEditor(_ ctx: EditorContext) -> AnyView
 }
 
 public extension DocumentEngine {
     var indexTitle: String { indexPayload.title }
+    var isEditable: Bool { true }
+    var isContentTruncated: Bool { false }
 }

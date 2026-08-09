@@ -164,4 +164,32 @@ final class LoreIndexTests: XCTestCase {
         let index = try LoreIndex(path: path)
         XCTAssertTrue(try index.all().isEmpty)
     }
+
+    func test_isEditableAndByteSize_roundTrip() throws {
+        let index = try makeIndex()
+        let url = URL(fileURLWithPath: "/tmp/lore-test/Contract.pdf")
+        try index.upsert(IndexEntry(
+            url: url, type: PDFEngine.identifier,
+            payload: IndexPayload(title: "Contract", plaintext: "revenue"),
+            updated: Date(), resolvedLinks: [], isEditable: false, byteSize: 4096))
+        let row = try XCTUnwrap(try index.all().first { $0.path.lastPathComponent == "Contract.pdf" })
+        XCTAssertFalse(row.isEditable)
+        XCTAssertEqual(row.byteSize, 4096)
+    }
+
+    func test_schemaVersion_isSeven() {
+        XCTAssertEqual(LoreIndex.schemaVersion, 7)
+    }
+
+    func test_isTruncated_roundTrips() throws {
+        let index = try makeIndex()
+        let url = URL(fileURLWithPath: "/tmp/lore-test/Huge.pdf")
+        try index.upsert(IndexEntry(
+            url: url, type: PDFEngine.identifier,
+            payload: IndexPayload(title: "Huge", plaintext: "start"),
+            updated: Date(), resolvedLinks: [], isEditable: false,
+            byteSize: 90_000_000, isTruncated: true))
+        let row = try XCTUnwrap(try index.all().first { $0.path.lastPathComponent == "Huge.pdf" })
+        XCTAssertTrue(row.isTruncated)
+    }
 }

@@ -13,7 +13,7 @@ final class M2aSchemaVersionTests: XCTestCase {
     /// graph when renaming. The version bump is the discard-and-rebuild the
     /// constant exists for.
     func test_theSchemaVersionWasBumpedForTheNewLinkExtractor() {
-        XCTAssertEqual(LoreIndex.schemaVersion, 6,
+        XCTAssertGreaterThanOrEqual(LoreIndex.schemaVersion, 6,
                        "M2a changed link extraction; a version-5 index holds an M1 graph")
     }
 

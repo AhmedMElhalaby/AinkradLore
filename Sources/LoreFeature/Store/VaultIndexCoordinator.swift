@@ -7,12 +7,93 @@ import Observation
 @MainActor
 @Observable
 public final class VaultIndexCoordinator {
-    public private(set) var rows: [IndexRow] = []
+    /// `didSet` drops the cached resolver below — see `currentResolver()`.
+    /// Every reassignment site (background rebuild, `activate`, `shutdown`,
+    /// `indexDocument`, the rename/trash paths) already goes through THIS
+    /// property, so one `didSet` covers every invalidation point without
+    /// hunting down each call site by hand.
+    public private(set) var rows: [IndexRow] = [] {
+        didSet { cachedResolver = nil }
+    }
     public private(set) var vaultRoot: URL?
+    /// Vault-relative paths of every directory — what `FolderTreeView` needs
+    /// to show an EMPTY folder, which produces zero index rows and so has no
+    /// other representation.
+    ///
+    /// A STORED value, NOT a lazily-cached one computed on the main actor the
+    /// first time something asks — that was this property's Round 2 shape,
+    /// and it had two real bugs the reviewer caught (Round 3 fixed both):
+    ///
+    /// 1. `createFolder` writes a directory directly and never touches
+    ///    `rows` (folders are not index rows), so a `didSet`-driven
+    ///    invalidation never fired for it — the exact bug this property
+    ///    exists to fix, reintroduced for any folder created inside a
+    ///    subfolder (Round 1's uncached per-`body`-call walk accidentally
+    ///    self-healed on the very next redraw; the cache removed that
+    ///    accident along with the walk).
+    /// 2. Computing the walk lazily on first main-actor access meant every
+    ///    document SAVE (`indexDocument`/`removeFromIndex` both reassign
+    ///    `rows`) turned the next folder-tree redraw into a synchronous
+    ///    ~500ms main-actor stall on a large vault.
+    ///
+    /// **Every operation that changes what directories exist on disk must
+    /// keep this property current — there is no automatic invalidation path
+    /// (no `didSet`, no cache) for it to fall back on if a call site forgets.**
+    /// As of Round 4, that is every one of the following, and each is the
+    /// exhaustive list — if a future folder-mutating operation is added
+    /// elsewhere, it must extend this list AND call one of the three
+    /// `note*` methods below, or it will reproduce Round 3/4's exact bug:
+    ///
+    /// - **Create** (`LoreStore.createFolder`) → `noteDirectoryCreated(_:)`,
+    ///   called synchronously right after the directory is written.
+    /// - **Trash** (`LoreStore.applyTrashFolder`) → `noteDirectoryRemoved(_:)`
+    ///   — Round 4's fix. Missing this left a trashed folder as a permanent
+    ///   ghost node: `directoryPaths` kept the entry, `rows` had nothing to
+    ///   say about it either way (folders are never rows), and the watcher
+    ///   cannot save it — `suppressWatcher` is armed across the whole trash
+    ///   (1.0 s) longer than the debounce (0.3 s) even for a root-level
+    ///   trash, and a SUBFOLDER trash fires no root event at all. The ghost
+    ///   survived until relaunch.
+    /// - **Rename** (`LoreStore.apply(_: FolderRenamePlan)`) →
+    ///   `noteDirectoryRenamed(from:to:)` — Round 4's fix, same root cause:
+    ///   the old name became a ghost AND the new name's empty subfolders (if
+    ///   any) went missing, since nothing told `directoryPaths` about either
+    ///   half of the rewrite.
+    /// - **Background/synchronous rescan** (`performBackgroundRebuild`,
+    ///   `rebuild()`) → recomputed wholesale via `scanDirectories(under:)`,
+    ///   off the main actor for the background path — this is the ground
+    ///   truth every targeted `note*` call above is an optimization over, and
+    ///   the reason none of Rounds 1–3 caught the create-path bug: the
+    ///   uncached walk (Round 1) and the `rows`-keyed cache (Round 2) both
+    ///   self-healed on ANY subsequent full rescan, so only an operation with
+    ///   NO other path to a rescan (create, trash, rename — none of which
+    ///   touch `rows`, and trash/rename can target a subfolder the watcher
+    ///   never sees) can go stale silently.
+    ///
+    /// Previously a known limitation, now fixed: `FolderWatcher` is an
+    /// `FSEventStream` on the vault root, which is recursive by
+    /// construction — a folder created, trashed, or renamed in a SUBFOLDER
+    /// by an external tool (Finder, `mkdir`, another app, a sync client) now
+    /// fires the same `onChange` a root-level change always did, triggering
+    /// `startBackgroundRebuild()` the same way. The three targeted `note*`
+    /// calls above remain because they are still strictly cheaper than a
+    /// full rescan for Lore's OWN mutations (synchronous, exact, no need to
+    /// wait on FSEvents' coalescing latency) — not because the watcher can't
+    /// see those changes anymore.
+    public private(set) var directoryPaths: [String] = []
 
     private let indexPath: URL
     private var index: LoreIndex?
     private var watcher: FolderWatcher?
+    /// `currentResolver()`'s cache. `LinkResolver.init` builds a dictionary
+    /// from every row plus a `sortByPreference` sort per key — cheap once per
+    /// vault change, ruinous per call. `EmbedRendering.applyEmbeds` calls
+    /// `resolveEmbedTarget` — which reaches `currentResolver()` — once per
+    /// `![[…]]` span on every full editor render, i.e. on every keystroke;
+    /// without this cache a note with N embeds in an M-row vault rebuilt N
+    /// whole-vault resolvers per keypress. Dropped, not refreshed, on
+    /// invalidation: the next call rebuilds it lazily, exactly once.
+    private var cachedResolver: LinkResolver?
     /// While `Date() < suppressWatcherUntil`, `FolderWatcher` callbacks are
     /// ignored — see `save(_:overwritingExternalChanges:)`.
     private var suppressWatcherUntil: Date = .distantPast
@@ -65,6 +146,7 @@ public final class VaultIndexCoordinator {
         rebuildRequestedAgain = false
         index = nil
         rows = []
+        directoryPaths = []
         vaultRoot = nil
     }
 
@@ -118,31 +200,53 @@ public final class VaultIndexCoordinator {
         // Walk, read and parse every note off the main actor, then apply the
         // whole result in one transaction. `LoreIndex` is Sendable (it holds
         // only a GRDB `DatabaseQueue`, which serializes its own access).
-        let refreshed: [IndexRow]? = await Task.detached(priority: .utility) { () -> [IndexRow]? in
+        // `scanDirectories` runs in the SAME detached task, alongside
+        // `scanVault` — both are `nonisolated static` walks of the same
+        // vault tree, and computing the directory set here (rather than
+        // lazily on the main actor the first time `directoryPaths` is read)
+        // is what keeps a post-save rescan from turning the next folder-tree
+        // redraw into a synchronous stall — see `directoryPaths`'s own
+        // doc comment for the measured before/after.
+        let refreshed: (rows: [IndexRow], directories: [String])?
+            = await Task.detached(priority: .utility) {
+                () -> (rows: [IndexRow], directories: [String])? in
             let notes = Self.scanVault(at: root)
+            let directories = Self.scanDirectories(under: root)
             do {
                 try index.replaceAll(with: notes)
-                return try index.all()
+                return (rows: try index.all(), directories: directories)
             } catch {
                 return nil
             }
         }.value
-        if let refreshed { rows = refreshed }
+        // KNOWN, UNFIXED RACE (recorded, not fixed — rated theoretical/low):
+        // `directories` above is a snapshot of disk taken when THIS task's
+        // `scanDirectories` ran, at the START of this detached task. If a
+        // `noteDirectoryCreated`/`noteDirectoryRemoved`/`noteDirectoryRenamed`
+        // call (from `createFolder`, `applyTrashFolder`, or folder rename)
+        // lands on the main actor AFTER that snapshot was taken but BEFORE
+        // this assignment runs, this line clobbers it: the targeted call's
+        // precise update is silently overwritten by this task's now-stale
+        // snapshot. The window is only the tail of the walk itself (the
+        // `scanDirectories` call above, ~0.5 s here) against a
+        // `performBackgroundRebuild` that overall runs much longer (the
+        // `scanVault` parse pass, tens of seconds on a large vault) — so a
+        // user-initiated folder mutation would need to land in that narrow
+        // tail specifically. Not attempted: closing it properly needs either
+        // a generation counter (reject a stale detached task's result if a
+        // targeted call happened after it started) or re-deriving
+        // `directoryPaths` from `rows` plus the targeted deltas instead of a
+        // flat overwrite — both are more than a one-line guard.
+        if let refreshed { rows = refreshed.rows; directoryPaths = refreshed.directories }
     }
 
     /// Pure, off-actor: every engine-openable file under `root`, loaded and
     /// reduced to its index payload. No index access.
     ///
-    /// Files no engine claims are indexed too, but METADATA ONLY: type
-    /// `EngineRegistry.unclaimedType`, empty plaintext, the filename (with its
-    /// extension — there is no engine to derive anything better) as the title.
-    ///
-    /// They used to be skipped entirely, which made the sidebar lie: a vault of
-    /// `.pdf`/`.xlsx` showed as empty, and `FallbackViewer`'s "can't open this
-    /// yet" branch was unreachable because nothing could ever be clicked to
-    /// reach it. The spec's failure-modes table requires the opposite. Empty
-    /// plaintext is the point: an unclaimed row must never match a full-text
-    /// search for content nobody parsed.
+    /// Files no SPECIFIC engine claims are loaded by `AttachmentEngine`: type
+    /// `attachment`, empty plaintext, the filename (with extension) as title.
+    /// Empty plaintext is the point — an attachment row must never match a
+    /// full-text search for content nobody parsed.
     nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
         // CANONICAL ON WRITE, part 1: the enumerator builds every URL it yields
         // by appending to the URL it was given, so canonicalizing the root ONCE
@@ -176,7 +280,8 @@ public final class VaultIndexCoordinator {
             // every folder would otherwise become a row. A PACKAGE is also a
             // directory, but `.skipsPackageDescendants` above means its
             // internals are never walked — so unlike a plain directory, the
-            // package itself must be indexed as a single unclaimed row, or it
+            // package itself must be indexed as a single `attachment` row
+            // (no engine claims a package as its own file type), or it
             // (and everything a user would recognize as "the document")
             // disappears from the vault entirely.
             let values = try? url.resourceValues(
@@ -191,21 +296,36 @@ public final class VaultIndexCoordinator {
             // changes sidebar ordering for vaults where the two disagree.
             let updated = values?.contentModificationDate ?? Date()
 
-            // An engine that claims the file but fails to LOAD it is left out,
-            // as before: that is a real error, not an unclaimed type, and this
-            // scan has nowhere to report it.
-            guard let engineType = EngineRegistry.engine(for: url) else {
-                entries.append(IndexEntry(
-                    url: url, type: EngineRegistry.unclaimedType,
-                    payload: IndexPayload(title: url.lastPathComponent, plaintext: ""),
-                    updated: updated))
-                continue
-            }
+            // Resolution is total (`EngineRegistry.engine(for:)` never returns
+            // nil), so there is no unclaimed branch any more: a file no
+            // specific engine claims loads as an attachment, which indexes its
+            // filename and size and nothing else.
+            let engineType = EngineRegistry.engine(for: url)
+            // An engine that claims a file but fails to LOAD it is left out, as
+            // before: that is a real error, and this scan has nowhere to report
+            // it. `AttachmentEngine.load` cannot fail, so a load failure now
+            // means a specific engine rejected a file it claimed.
             guard let engine = try? engineType.load(url) else { continue }
+            // Captured ONCE: `indexPayload` re-runs a full markdown parse plus
+            // link scan on markdown documents, so comparing before/after by
+            // calling it twice would double that cost for every document in
+            // the vault. See `DocumentEngine.indexTitle`'s comment on the same
+            // cost, and the `is_truncated` note on `LoreIndex.schemaVersion`.
             var payload = engine.indexPayload
+            let uncappedByteCount = payload.plaintext.utf8.count
             payload.plaintext = Self.capped(payload.plaintext)
+            // OR'd with the engine's own report: PDFEngine and RichTextEngine
+            // cap their text before `indexPayload` returns it, so the
+            // before/after comparison above cannot see their truncation — see
+            // `DocumentEngine.isContentTruncated`.
+            let isTruncated = payload.plaintext.utf8.count < uncappedByteCount
+                || engine.isContentTruncated
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let byteSize = (attributes?[.size] as? Int) ?? 0
             entries.append(IndexEntry(url: url, type: engineType.identifier,
-                                      payload: payload, updated: updated))
+                                      payload: payload, updated: updated,
+                                      isEditable: engine.isEditable, byteSize: byteSize,
+                                      isTruncated: isTruncated))
         }
         // Resolution is a second pass because a link can point at any document
         // in the vault, including one the enumerator has not reached yet.
@@ -231,7 +351,9 @@ public final class VaultIndexCoordinator {
                                         targetPath: resolver.resolve($0.resolutionTarget),
                                         isEmbed: $0.isEmbed,
                                         syntax: $0.syntax)
-                       })
+                       },
+                       isEditable: entry.isEditable, byteSize: entry.byteSize,
+                       isTruncated: entry.isTruncated)
         }
     }
 
@@ -271,6 +393,7 @@ public final class VaultIndexCoordinator {
         guard let root = vaultRoot, let index else { return }
         try index.replaceAll(with: Self.scanVault(at: root))
         rows = try index.all()
+        directoryPaths = Self.scanDirectories(under: root)
     }
 
     public func search(_ query: String) -> [IndexRow] {
@@ -332,11 +455,93 @@ public final class VaultIndexCoordinator {
     func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
         (try? index?.unresolvedLinks(from: Self.canonical(url))) ?? []
     }
-    /// A resolver over the CURRENT index rows, for link clicks and completion.
+    /// A resolver over the CURRENT index rows, for link clicks, completion
+    /// and embed rendering. Cached against `rows`'s identity — see
+    /// `cachedResolver`'s doc comment for why this matters — and rebuilt
+    /// lazily the first time it is asked for after `rows` changes.
     func currentResolver() -> LinkResolver {
-        LinkResolver(documents: rows.map {
+        if let cachedResolver { return cachedResolver }
+        let resolver = LinkResolver(documents: rows.map {
             (url: $0.path, title: $0.title, aliases: $0.aliases)
         })
+        cachedResolver = resolver
+        return resolver
+    }
+
+    /// `createFolder`'s own notification that it just created `path`
+    /// (vault-relative) directly on disk, bypassing both `rows` (folders are
+    /// never index rows) and the watcher. `FolderWatcher` WOULD see this
+    /// (its `FSEventStream` is recursive, so a create inside a subfolder
+    /// fires `onChange` too — see `directoryPaths`'s own doc comment), but
+    /// only after FSEvents' coalescing latency and a full
+    /// `startBackgroundRebuild()`; this is a synchronous, exact, cheap
+    /// substitute for a change whose entire content this method's caller
+    /// already knows precisely, without waiting on the watcher at all.
+    /// Idempotent (checks `contains` first) so a redundant call costs
+    /// nothing beyond that check.
+    func noteDirectoryCreated(_ path: String) {
+        guard !directoryPaths.contains(path) else { return }
+        directoryPaths.append(path)
+    }
+
+    /// The trash counterpart to `noteDirectoryCreated`, same reasoning: tells
+    /// `directoryPaths` directly that `path` (vault-relative) is gone from
+    /// disk, rather than relying on `rows`/the watcher to notice. Removes
+    /// `path` itself AND every entry beneath it (`path + "/…"`) — trashing a
+    /// folder takes every subfolder inside it with it, and each of those was
+    /// its own `directoryPaths` entry (an empty one, most likely — exactly the
+    /// case `noteDirectoryCreated` exists to surface — so leaving it behind
+    /// after the folder is gone is the same "ghost node" bug in reverse).
+    /// Called from `LoreStore.applyTrashFolder` — see its own call site.
+    func noteDirectoryRemoved(_ path: String) {
+        let prefix = path + "/"
+        directoryPaths.removeAll { $0 == path || $0.hasPrefix(prefix) }
+    }
+
+    /// The rename counterpart: `from` (and everything beneath it) becomes
+    /// `to`, in place, preserving every subfolder entry a naive
+    /// remove-then-rediscover would lose — folder rename already knows the
+    /// exact rewrite from the move it just performed, so there is no need to
+    /// re-walk disk to find empty subfolders again. Called from
+    /// `LoreStore.apply(_: FolderRenamePlan)` — see its own call site.
+    func noteDirectoryRenamed(from: String, to: String) {
+        let prefix = from + "/"
+        directoryPaths = directoryPaths.map { entry in
+            if entry == from { return to }
+            if entry.hasPrefix(prefix) { return to + "/" + entry.dropFirst(prefix.count) }
+            return entry
+        }
+        // `from` itself might not have been a `directoryPaths` entry (e.g. it
+        // held only indexed documents, no empty subfolders of its own) — the
+        // map above would then leave `to` absent entirely. Appended
+        // unconditionally-but-deduped so the renamed folder is always
+        // representable, the same guarantee `noteDirectoryCreated` gives a
+        // brand new folder.
+        if !directoryPaths.contains(to) { directoryPaths.append(to) }
+    }
+
+    /// Pure, off-actor-safe: every directory under `root`, vault-relative,
+    /// skipping dot-prefixed components and package internals — the same
+    /// rules `scanVault` applies to files. `nonisolated` so it can run inside
+    /// `performBackgroundRebuild`'s detached task without a main-actor hop —
+    /// see that method and `directoryPaths`'s own doc comment for why it must.
+    nonisolated static func scanDirectories(under root: URL) -> [String] {
+        let root = Self.canonical(root)
+        let rootDepth = root.standardizedFileURL.pathComponents.count
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
+            options: [.skipsPackageDescendants])
+        else { return [] }
+        var result: [String] = []
+        while let url = enumerator.nextObject() as? URL {
+            let relative = url.standardizedFileURL.pathComponents.dropFirst(rootDepth)
+            if relative.contains(where: { $0.hasPrefix(".") }) { continue }
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+            guard values?.isDirectory == true, values?.isPackage != true else { continue }
+            result.append(relative.joined(separator: "/"))
+        }
+        return result
     }
 
     /// Index one document after a save, without a whole-vault rescan.
@@ -357,7 +562,16 @@ public final class VaultIndexCoordinator {
         // and the resolved link targets are all one spelling.
         let url = Self.canonical(url)
         let type = type(of: engine).identifier
-        let payload = engine.indexPayload
+        // Capped here too: `scanVault` already caps every payload it writes,
+        // but `indexDocument` — the per-save path — did not, so saving a large
+        // document wrote its uncapped text straight into the index.
+        var payload = engine.indexPayload
+        let uncappedByteCount = payload.plaintext.utf8.count
+        payload.plaintext = Self.capped(payload.plaintext)
+        let isTruncated = payload.plaintext.utf8.count < uncappedByteCount
+            || engine.isContentTruncated
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let byteSize = (attributes?[.size] as? Int) ?? 0
         // Exclude the STALE row for this same document (if it already exists in
         // `rows`): otherwise its old title/alias keys would stay resolvable
         // until the next full rescan, alongside the fresh keys appended below.
@@ -378,7 +592,9 @@ public final class VaultIndexCoordinator {
                          syntax: $0.syntax)
         }
         try index.upsert(IndexEntry(url: url, type: type, payload: payload,
-                                    updated: Date(), resolvedLinks: resolvedLinks))
+                                    updated: Date(), resolvedLinks: resolvedLinks,
+                                    isEditable: engine.isEditable, byteSize: byteSize,
+                                    isTruncated: isTruncated))
         rows = try index.all()
     }
 

@@ -72,6 +72,12 @@ public struct EditorContext {
     public let completions: @MainActor (String) -> [IndexRow]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// Resolves an `![[target]]` embed's raw target to a file, for inline
+    /// image / chip rendering (`EmbedRendering`). Defaulted to "nothing
+    /// resolves", the same "no link layer" default `completions` and
+    /// `openLink` already have, so an engine that ignores it behaves exactly
+    /// as before.
+    public let resolveEmbedTarget: @MainActor (String) -> URL?
     /// The text to write for a picked completion. Supplied by the shell because
     /// only the shell can check that the target resolves back to that document
     /// — see `LoreStore.linkTarget(for:)`. The default is the store-blind
@@ -91,19 +97,50 @@ public struct EditorContext {
     /// the task-checkbox toggle. Defaulted to writable so an engine or a test
     /// that does not care behaves exactly as before.
     public let isReadOnly: Bool
+    /// Writes pasted image bytes as an attachment BESIDE the open document
+    /// and returns the `![[name]]` embed text to insert at the caret, or
+    /// `nil` if the write failed (no vault, no permission, …) — in which
+    /// case the editor drops the paste rather than inserting a link to
+    /// nothing. Defaulted to "cannot write", the same shape every other
+    /// store-backed capability here defaults to, so an engine with no
+    /// attachment story (or a read-only session) needs no changes.
+    public let writePastedImage: @MainActor (Data, String) -> String?
+    /// Copies a dropped file into the vault BESIDE the open document and
+    /// returns the `![[name]]` embed text to insert. Same "nil means declined
+    /// or failed" contract as `writePastedImage`.
+    public let writeDroppedFile: @MainActor (URL) -> String?
+    /// Called when the title field is COMMITTED — blur or Enter, never per
+    /// keystroke — with the field's current text. Renames the file to match
+    /// and rewrites inbound links. Returns a `LoreStore.TitleCommitOutcome`:
+    /// `.success` (nothing to show), `.refused` (revert the field — nothing
+    /// was written), or `.partial` (the file WAS renamed; show the message
+    /// but do NOT revert the field, or the field would desynchronize from a
+    /// rename that already happened). Defaulted to "always refuse" — same
+    /// "declined" shape as `writePastedImage` — so an engine with no
+    /// title-field story, or a test that does not care, needs no changes.
+    public let commitTitle: @MainActor (String) -> LoreStore.TitleCommitOutcome
 
     public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 registerScrollHandler: @escaping @MainActor (@escaping @MainActor (Int) -> Void) -> Void
                     = { _ in },
-                isReadOnly: Bool = false) {
+                isReadOnly: Bool = false,
+                writePastedImage: @escaping @MainActor (Data, String) -> String? = { _, _ in nil },
+                writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil },
+                commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
+                    = { _ in .refused("Renaming is unavailable here.") }) {
         self.theme = theme; self.onChange = onChange
         self.completions = completions; self.openLink = openLink
+        self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler
         self.isReadOnly = isReadOnly
+        self.writePastedImage = writePastedImage
+        self.writeDroppedFile = writeDroppedFile
+        self.commitTitle = commitTitle
     }
 }

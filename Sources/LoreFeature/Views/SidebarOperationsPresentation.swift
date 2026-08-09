@@ -108,35 +108,58 @@ struct MessageSheet: View {
 /// destructive affordance that differs between two views is a destructive
 /// affordance that was reviewed once.
 ///
-/// Unclaimed rows (`.pdf`, `.xlsx`, anything no engine claims) get Rename and
-/// Move but NO Delete, exactly as the previous milestone left them: Lore cannot
-/// open them, so it does not arm an irreversible delete against a binary the
-/// user has no way to inspect here first.
-struct LoreRowMenu: View {
-    let row: IndexRow
-    let ops: SidebarOperations
-
-    var body: some View {
-        Button("Rename…") { ops.beginRename(row) }
-        Button("Move to…") { ops.beginMove(row) }
-        if row.type != EngineRegistry.unclaimedType {
-            Divider()
-            Button("Move to Trash", role: .destructive) { ops.requestTrash(row) }
-        }
+/// Attachment rows (`.pdf`, `.xlsx`, anything no specific engine claims) get
+/// Rename and Move but NO Delete, exactly as the previous milestone left them:
+/// they are read-only, so this menu does not arm an irreversible delete
+/// against a binary the user has no way to edit or reconstruct.
+///
+/// Built as `[AinkradMenuItem]` rather than a `View`: `.ainkradContextMenu(_:)`
+/// (the kit's chamfer/hover-scan/`AinkradKbd` menu — see
+/// `AinkradAppKit/Sources/AinkradAppKitUI/Components/AinkradContextMenu.swift`)
+/// takes an item array, not a `@ViewBuilder`, so there is no `Button`/`Divider`
+/// tree to build here. The kit has no divider primitive; the visual break
+/// `Divider()` gave the destructive row is expressed instead by
+/// `AinkradMenuItem.isDestructive`'s own tint, which is what the row-hover
+/// design already leans on to separate "safe" actions from the trash one.
+@MainActor
+func loreRowMenuItems(row: IndexRow, ops: SidebarOperations) -> [AinkradMenuItem] {
+    var items = [
+        AinkradMenuItem(title: "Rename…", systemName: "pencil") { ops.beginRename(row) },
+        AinkradMenuItem(title: "Move to…", systemName: "folder") { ops.beginMove(row) },
+    ]
+    if row.type != AttachmentEngine.identifier {
+        items.append(AinkradMenuItem(title: "Move to Trash", systemName: "trash",
+                                     isDestructive: true) { ops.requestTrash(row) })
     }
+    return items
 }
 
-/// The folder row menu. Rename only: renaming a folder is one directory move
-/// with a full preview behind it, whereas creating and trashing folders have no
-/// store API yet — and inventing one inside a UI task is how an unreviewed
-/// data-loss path gets added. See the task report.
-struct LoreFolderMenu: View {
-    let folder: URL
-    let ops: SidebarOperations
+/// The folder row menu. Create and trash reuse the same name-prompt and
+/// preview machinery rename already uses — `beginNewFolder`/`requestTrashFolder`
+/// on `SidebarOperations` — so a folder's three destructive-adjacent
+/// affordances share one review surface instead of three.
+@MainActor
+func loreFolderMenuItems(folder: URL, ops: SidebarOperations) -> [AinkradMenuItem] {
+    [
+        AinkradMenuItem(title: "Rename Folder…", systemName: "pencil") {
+            ops.beginRenameFolder(folder)
+        },
+        AinkradMenuItem(title: "New Folder…", systemName: "folder.badge.plus") {
+            ops.beginNewFolder(in: folder)
+        },
+        AinkradMenuItem(title: "Move to Trash", systemName: "trash",
+                        isDestructive: true) { ops.requestTrashFolder(folder) },
+    ]
+}
 
-    var body: some View {
-        Button("Rename Folder…") { ops.beginRenameFolder(folder) }
-    }
+/// The empty-space / root menu: reachable with no subfolder yet or with the
+/// tree fully collapsed, where no folder ROW exists to host `loreFolderMenuItems`
+/// at all. Just the one action — root has nothing to rename or trash.
+@MainActor
+func loreRootMenuItems(root: URL, ops: SidebarOperations) -> [AinkradMenuItem] {
+    [AinkradMenuItem(title: "New Folder…", systemName: "folder.badge.plus") {
+        ops.beginNewFolder(in: root)
+    }]
 }
 
 extension SidebarOperations {
@@ -155,6 +178,7 @@ extension SidebarOperations {
         switch nameTarget {
         case .document(let url): "Rename “\(url.lastPathComponent)”"
         case .folder(let url): "Rename folder “\(url.lastPathComponent)”"
+        case .newFolder: "New Folder"
         case nil: ""
         }
     }

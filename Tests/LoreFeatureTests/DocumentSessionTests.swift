@@ -18,6 +18,15 @@ final class DocumentSessionTests: XCTestCase {
         return url
     }
 
+    private func tempFile(_ name: String, _ contents: String = "") throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-sess-file-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
     func test_markChanged_setsDirty() throws {
         let (root, c) = try vault()
         let url = try note(root, "a.md", "---\nid: a\ntitle: T\n---\nbody")
@@ -237,6 +246,33 @@ final class DocumentSessionTests: XCTestCase {
     }
 
     // MARK: - Review finding 3: the debounce actually fires
+
+    // MARK: - Task 1: isEditable / replaceContents
+
+    func test_engine_defaultsToEditable() throws {
+        let url = try tempFile("n.md", "---\ntitle: N\n---\nbody\n")
+        let engine = try EngineRegistry.load(url)
+        XCTAssertTrue(engine.isEditable)
+    }
+
+    func test_replaceContents_copiesMarkdownBody() throws {
+        let url = try tempFile("n.md", "---\ntitle: N\n---\nfirst\n")
+        let mine = try MarkdownEngine.load(url)
+        try "---\ntitle: N\n---\nsecond\n".write(to: url, atomically: true, encoding: .utf8)
+        let theirs = try MarkdownEngine.load(url)
+        mine.replaceContents(with: theirs)
+        XCTAssertEqual(mine.note.body, theirs.note.body)
+    }
+
+    func test_lossilyDecodedPlainText_isNotEditable() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-ro-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("bad.txt")
+        try Data([0xFF, 0xFE, 0x41]).write(to: url)
+        let engine = try PlainTextEngine.load(url)
+        XCTAssertFalse(engine.isEditable)
+    }
 
     func test_markChanged_autosavesAfterTheDebounce() async throws {
         let (root, c) = try vault()

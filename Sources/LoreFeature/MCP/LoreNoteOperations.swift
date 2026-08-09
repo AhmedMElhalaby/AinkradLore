@@ -341,6 +341,13 @@ struct LoreNoteOperations {
             return "Lore declined to delete \(relative(url)): \(reason)"
         case .outsideVault(let url):
             return "Lore declined to write \(relative(url)) because it is outside the vault."
+        case .invalidName(let name):
+            return "“\(name)” is not a valid folder name."
+        case .alreadyExists(let url):
+            return "\(relative(url)) already exists."
+        case .notARegularFile(let url):
+            return "\(relative(url)) is not a regular file, so it was not copied as an "
+                + "attachment."
         }
     }
 

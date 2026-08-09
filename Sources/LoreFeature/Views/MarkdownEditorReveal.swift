@@ -190,7 +190,26 @@ extension MarkdownEditor.Coordinator {
         // put an O(document) cost on every arrow key.
         revealIndex = MarkdownEditorReveal.index(text: tv.string, spans: styleCache.spans)
         revealIndexBuilds += 1
+        // Mirrors the `revealIndex` build, from the same spans in the same
+        // pass, so the caret path can answer "is the selection inside an
+        // embed?" without walking the document — see `embedIndex`.
+        rebuildEmbedIndex()
+        // Cheap: an early-exit scan that stops at the FIRST strong character,
+        // so it costs O(document) only for a document with none anywhere (rare,
+        // and no worse than the `revealIndex`/`blockBackgrounds` scans this
+        // same pass already does unconditionally). See `documentWritingDirection`'s
+        // doc comment for who reads it and why a fresh scan per render is safe.
+        documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)
+            ?? .leftToRight
         collapseHiddenMarkers(in: storage, window: window)
+        // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
+        // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see
+        // `EmbedRendering.swift`'s doc comment on the chip pill), collapsed
+        // by the same machinery as any other marker; the embed span itself
+        // covers only the target text. Running `applyEmbeds` after that
+        // collapse is what lets it repaint that target range (image or chip)
+        // without a marker-collapse pass clobbering it back afterward.
+        applyEmbeds(to: storage, window: window)
         // Code panels, quote bars and collapsed list markers are DRAWN, not
         // attributed — see
         // `MarkdownBlockBackgrounds`. Refreshed from the same spans in the
@@ -256,7 +275,20 @@ extension MarkdownEditor.Coordinator {
         let now = MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
                                                             selection: selection)
         let was = revealedBlockIndices
-        guard now != was else { return }
+        guard now != was else {
+            // NOT a block flip — but an embed's reveal is a SPAN-level
+            // property, not a block-level one, so the caret can move into or
+            // out of an `![[…]]` without any block changing. Checking here,
+            // before the early return, is what makes an image embed actually
+            // reveal on caret entry instead of staying collapsed (with the
+            // caret invisibly inside it) until the next keystroke or the
+            // 150 ms debounce — fix round 2, I6. Costs a walk of `embedIndex`,
+            // which is empty for the overwhelming majority of documents and
+            // tiny for the rest, and does no styling work at all unless the
+            // answer changed.
+            if revealEmbedsForSelectionChange(in: storage) { tv.needsDisplay = true }
+            return
+        }
         revealedBlockIndices = now
 
         // Exactly the blocks whose reveal state flipped: those in one range and
@@ -266,6 +298,11 @@ extension MarkdownEditor.Coordinator {
         for block in changed.sorted() {
             restyleBlock(block, revealed: now.contains(block), in: storage)
         }
+        // The blocks just restyled above already re-ran `applyEmbeds`, so this
+        // only has to catch embeds in blocks that did NOT flip; it also keeps
+        // `revealedEmbedSpans` in step so the next caret move compares against
+        // the truth.
+        revealEmbedsForSelectionChange(in: storage)
         // The DRAWN decoration is a function of reveal state too — a list
         // marker's substitute is drawn only while the real one is collapsed —
         // and it lives in the gutter, outside the glyph rects an attribute
@@ -279,7 +316,7 @@ extension MarkdownEditor.Coordinator {
     /// should return to is a function of its enclosing spans — so the block is
     /// rebuilt from the cached spans. Still no parse, and still nothing outside
     /// this block is touched.
-    private func restyleBlock(_ block: Int, revealed: Bool, in storage: NSTextStorage) {
+    func restyleBlock(_ block: Int, revealed: Bool, in storage: NSTextStorage) {
         guard block >= 0, block < revealIndex.blocks.count else { return }
         restyledBlockCount += 1
         let range = revealIndex.blocks[block]
@@ -290,6 +327,25 @@ extension MarkdownEditor.Coordinator {
                                       in: ns, to: storage,
                                       tokens: tokens,
                                       theme: MarkdownTheme(tokens: tokens))
+        // Re-run RIGHT AFTER `restyle`, scoped to this one block, so an
+        // embed's collapse/paragraph-style/drawn-image never has a frame
+        // where it looks wrong. `restyle` above just reset this block's
+        // attributes to the plain-span defaults — including popping any
+        // collapsed embed image back to full-size, editable source text —
+        // and applying embeds here immediately restores (or, if the caret
+        // just entered the block, deliberately withholds) that decoration
+        // before this method returns. Fixed in Task 8 fix round 1, Critical
+        // 2: without this call an image embed visibly popped back to raw
+        // text and a NOW-STALE `EmbedImageRegion` kept painting at the wrong
+        // rect until the next full render. See `applyEmbeds`'s doc comment
+        // for why this costs a cache hit, not a decode, and does not reopen
+        // the O(1)-blocks caret contract.
+        // `spanIndices` is what keeps this O(spans in THIS block) rather than
+        // O(spans in the document) — fix round 2, NEW-1. It is the same
+        // bucketed list `MarkdownStyleRenderer.restyle` just consumed, so the
+        // two cannot disagree about which spans belong to this block.
+        applyEmbeds(to: storage, window: nil, restrictTo: ns,
+                    spanIndices: revealIndex.spansByBlock[block])
         guard !revealed else { return }
         let hidden = revealIndex.spansByBlock[block].compactMap { index -> Range<Int>? in
             guard index < styleCache.spans.count,

@@ -11,6 +11,11 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Resolves an `![[target]]` embed's raw target to a file, for
+    /// `EmbedRendering`. `nil` — the default — makes every embed render
+    /// `.unresolved` (plain wikilink colouring), which is the right answer
+    /// for an engine with no link layer, exactly like `completions == nil`.
+    let resolveEmbedTarget: (@MainActor (String) -> URL?)?
     /// What a picked row inserts. Defaults to the store-blind approximation.
     let linkTarget: @MainActor (IndexRow) -> String
     /// A UTF-16 offset (into `text`) to scroll the caret to and select. Set by
@@ -23,19 +28,33 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// `markChanged()` is a no-op and whose saves are refused — offers no
     /// affordance it cannot honour. See `MarkdownEditorClicks.swift`.
     let allowsTaskToggle: Bool
+    /// See `EditorContext.writePastedImage`. `nil` disables the paste
+    /// interception entirely, so a document with no attachment story falls
+    /// straight through to AppKit's default paste — exactly the
+    /// `completions == nil` / `onOpenLink == nil` pattern above.
+    let writePastedImage: (@MainActor (Data, String) -> String?)?
+    /// See `EditorContext.writeDroppedFile`. `nil` disables the drop
+    /// destination.
+    let writeDroppedFile: (@MainActor (URL) -> String?)?
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 scrollTarget: Binding<Int?> = .constant(nil),
-                allowsTaskToggle: Bool = false) {
+                allowsTaskToggle: Bool = false,
+                writePastedImage: (@MainActor (Data, String) -> String?)? = nil,
+                writeDroppedFile: (@MainActor (URL) -> String?)? = nil) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
+        self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
         self.allowsTaskToggle = allowsTaskToggle
+        self.writePastedImage = writePastedImage
+        self.writeDroppedFile = writeDroppedFile
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -94,6 +113,15 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.completionPanel.hide()
         }
+        tv.onPasteImage = { [weak coordinator = context.coordinator] data, name in
+            coordinator?.insertAttachment(fromPastedImage: data, name: name) ?? false
+        }
+        tv.onDropFileURLs = { [weak coordinator = context.coordinator] urls in
+            coordinator?.insertAttachments(fromDroppedFiles: urls) ?? false
+        }
+        // See `LinkTextView`'s doc comment on why this is registered here,
+        // post-construction, rather than in an overridden initializer.
+        tv.registerForDraggedTypes([.fileURL])
         scroll.documentView = tv
 
         // The caret moves under the list when the document scrolls, so the list
@@ -103,6 +131,9 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         context.coordinator.textView = tv
         context.coordinator.allowsTaskToggle = allowsTaskToggle
+        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
+        context.coordinator.writePastedImage = writePastedImage
+        context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
         tv.string = text
         context.coordinator.applyStyles()
@@ -132,8 +163,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         guard let tv = context.coordinator.textView else { return }
         context.coordinator.completions = completions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
         context.coordinator.allowsTaskToggle = allowsTaskToggle
+        context.coordinator.writePastedImage = writePastedImage
+        context.coordinator.writeDroppedFile = writeDroppedFile
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
@@ -176,10 +210,21 @@ public struct MarkdownEditor: NSViewRepresentable {
         var tokens: HostThemeTokens
         var completions: (@MainActor (String) -> [IndexRow])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
+        /// practice — `makeNSView`/`updateNSView` always install at least the
+        /// "no candidates" closure, matching how `completions` degrades.
+        var resolveEmbedTarget: @MainActor (String) -> URL? = { _ in nil }
         var linkTarget: @MainActor (IndexRow) -> String
             = { LinkCompletionContext.insertableTarget(for: $0) }
         /// See `MarkdownEditor.allowsTaskToggle`.
         var allowsTaskToggle = false
+        /// See `MarkdownEditor.writePastedImage`. `nil` — the default — means
+        /// paste interception is off, matching `resolveEmbedTarget`'s
+        /// "no capability supplied" shape before `makeNSView` installs the
+        /// real one.
+        var writePastedImage: (@MainActor (Data, String) -> String?)?
+        /// See `MarkdownEditor.writeDroppedFile`.
+        var writeDroppedFile: (@MainActor (URL) -> String?)?
         weak var textView: NSTextView?
         /// Shown only above the hard cap — the editor saying, in words, that it
         /// has stopped styling rather than leaving the user to wonder.
@@ -212,11 +257,41 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// reveal state in full: if a caret move leaves this unchanged there is
         /// nothing to redraw, which is what keeps arrowing free of styling work.
         var revealedBlockIndices: Range<Int> = 0..<0
+        /// Every `.embed` span's position, source range and owning block, for
+        /// the CURRENT text. Rebuilt only when the text is re-rendered, from
+        /// the same pass that builds `revealIndex` — never on a caret move.
+        ///
+        /// Exists because an embed's reveal is NOT a block-level property:
+        /// `revealForSelectionChange` only reaches `restyleBlock` when the
+        /// set of revealed BLOCKS flips, and arrowing from inside a block
+        /// into an embed's own range is not a block flip — so without this
+        /// an image stayed collapsed and drawn with the caret invisibly
+        /// inside it until the next keystroke or the 150 ms debounce. Fix
+        /// round 2, I6. Documents contain very few embeds (usually zero), so
+        /// scanning this per caret move is cheap where scanning
+        /// `styleCache.spans` would not be.
+        var embedIndex: [(fullRange: NSRange, block: Int)] = []
+        /// Which entries of `embedIndex` the selection is currently inside.
+        /// The embed-level analogue of `revealedBlockIndices`: if a caret
+        /// move leaves this unchanged there is no embed work to do.
+        var revealedEmbedSpans: Set<Int> = []
         /// How many times the index has been built. Exists so a test can pin
         /// the claim that a caret move never rebuilds it — the claim is the
         /// whole performance contract of the reveal path, and an earlier
         /// version of this file made it without the code supporting it.
         var revealIndexBuilds = 0
+        /// The DOCUMENT's dominant writing direction — the first strong
+        /// (Unicode-alphabetic) character anywhere in the text, or `.leftToRight`
+        /// when none exists. Rebuilt once per full `renderStyles()` pass, from
+        /// the same string every other O(document) step in that pass already
+        /// scans, and reused by `applyEmbeds` (both the full-render and the
+        /// block-scoped `restyleBlock` path) as the LAST-RESORT fallback for an
+        /// embed image's writing direction, when neither the paragraph before
+        /// nor after it has a strong character of its own to go on — see
+        /// `EmbedGeometry.contextualWritingDirection`. `restyleBlock` never
+        /// recomputes it: it only ever runs on a caret move, never a text
+        /// change, so the document this was computed from is still current.
+        var documentWritingDirection: NSWritingDirection = .leftToRight
         /// How many BLOCKS the incremental reveal path has re-attributed. The
         /// caret contract is O(1) blocks per boundary crossing — two, the one
         /// leaving reveal and the one entering it — and "O(1)" is only a claim

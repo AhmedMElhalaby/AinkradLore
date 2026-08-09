@@ -89,6 +89,17 @@ extension LoreStore {
         guard trimmed != ".", trimmed != ".." else {
             return "“\(newName)” is a relative path component, not a name."
         }
+        // Deliberately NOT the home of colon/leading-dot/control-char/length
+        // legality rules: those were added here in a first cut of title/
+        // filename sync and then reverted (whole-branch review, Important 8)
+        // because this function is shared by EVERY rename surface — sidebar
+        // file rename AND folder rename — and tightening it here silently
+        // tightened both, including refusing a colon that is legal in Finder
+        // and may already exist in a real vault's folder names. Title-sync's
+        // OWN stricter legality check lives in `LoreStore+TitleSync.swift`
+        // (`titleLegalityRejection`), applied ONLY on the title-field commit
+        // path, so sidebar rename and folder rename keep their pre-existing,
+        // looser behavior unchanged.
         // Containment. Only meaningful once a vault is active; without one
         // there is no root to be inside of and the syntactic rules above are
         // all we can honestly enforce.
@@ -203,6 +214,26 @@ extension LoreStore {
     static func mtimeOnDisk(_ url: URL) -> Date? {
         try? FileManager.default
             .attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+    }
+
+    /// True when `a` and `b` name the SAME on-disk file — by inode and
+    /// device number, not by comparing path text. This is the ONLY reliable
+    /// way to tell "a case-only rename target, same file" apart from "a
+    /// different file whose name happens to collide case-insensitively":
+    /// see the caller's doc comment (Minor E). `false` whenever either
+    /// attribute read fails (including "`b` does not exist yet", the common
+    /// case for an ordinary, non-colliding rename) — failing closed here
+    /// means an unreadable attribute is treated as "not proven the same
+    /// file", never as "assume it's fine, skip the collision guard".
+    static func sameFileOnDisk(_ a: URL, _ b: URL) -> Bool {
+        guard let attrsA = try? FileManager.default.attributesOfItem(atPath: a.path),
+              let attrsB = try? FileManager.default.attributesOfItem(atPath: b.path),
+              let inodeA = attrsA[.systemFileNumber] as? Int,
+              let inodeB = attrsB[.systemFileNumber] as? Int,
+              let deviceA = attrsA[.systemNumber] as? Int,
+              let deviceB = attrsB[.systemNumber] as? Int
+        else { return false }
+        return inodeA == inodeB && deviceA == deviceB
     }
 
     // MARK: - The shared link-rewriting pass
@@ -356,7 +387,24 @@ extension LoreStore {
                 failed.append((plan.source, "The file no longer exists."))
                 return RenameReport(rewritten: [], skipped: [], failed: failed, movedTo: nil)
             }
-            if FileManager.default.fileExists(atPath: plan.destination.path) {
+            // A case-ONLY rename (`chapter one` → `Chapter One`) is not a
+            // collision: APFS/HFS+ are case-insensitive but case-preserving,
+            // so `fileExists` at the destination finds the SAME file `moveItem`
+            // is about to recapitalize, and `moveItem` handles that rename
+            // natively. Without this exemption every capitalization fix was
+            // refused as "already exists" — whole-branch review, Important 6.
+            //
+            // Identity is checked by INODE, not by a case-insensitive string
+            // compare of the two paths. A string compare cannot tell "this is
+            // the same file, just re-cased" apart from "this is a genuinely
+            // DIFFERENT file whose name happens to differ only by case" — the
+            // second is a real collision on a case-SENSITIVE volume, and a
+            // string-only exemption let it slip past this guard straight into
+            // `moveItem`, which then failed with a raw, unfriendly
+            // `NSFileWriteFileExists` message instead of this function's own
+            // wording (whole-branch review, fix round 2, Minor E).
+            let isCaseOnlyRename = Self.sameFileOnDisk(plan.source, plan.destination)
+            if !isCaseOnlyRename, FileManager.default.fileExists(atPath: plan.destination.path) {
                 failed.append((plan.destination, "A file with that name already exists."))
                 return RenameReport(rewritten: [], skipped: [], failed: failed, movedTo: nil)
             }

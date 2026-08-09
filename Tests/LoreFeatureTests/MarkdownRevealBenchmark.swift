@@ -129,6 +129,40 @@ final class EditorPerformanceBenchmark: XCTestCase {
         }
     }
 
+    // MARK: - Embed reveal: the previously unmeasured path
+
+    /// Whole-branch review measurement gap: nothing in this suite ever built
+    /// a document with an `![[…]]` embed in it, so
+    /// `EmbedRendering.currentlyRevealedEmbedSpans` — walked on EVERY caret
+    /// move, O(embeds in document) by construction — had never actually been
+    /// timed. 500 embeds is enough that an O(document) or O(embeds²) mistake
+    /// would show up as a wall-clock outlier against
+    /// `test_arrowingThroughALargeDocumentReAttributesOnlyTwoBlocks` above,
+    /// which covers the same stride over a same-sized embed-free document.
+    ///
+    /// MEASURED, Debug (unoptimised), 2026-08-08, 500 embeds / 6,000-unit
+    /// caret sweep: see the report for the wall-clock number and whether it
+    /// reveals a real problem (out of scope to fix in this wave if so).
+    func test_arrowingThroughALargeDocumentWithManyEmbeds() {
+        let body = (0..<500).map {
+            "## Heading \($0)\n\nSome **bold** and ![[Attachment \($0).pdf]] embed.\n\n"
+        }.joined()
+        let (coordinator, tv) = makeEditor(body)
+        withExtendedLifetime(coordinator) {
+            MarkdownParseCounter.reset()
+            let length = (tv.string as NSString).length
+
+            measure {
+                for location in stride(from: 0, to: min(6_000, length), by: 1) {
+                    tv.setSelectedRange(NSRange(location: location, length: 0))
+                    coordinator.revealForSelectionChange()
+                }
+            }
+            XCTAssertEqual(MarkdownParseCounter.count, 0,
+                           "caret movement through embeds must never trigger a parse")
+        }
+    }
+
     // MARK: - Bound 3: a keystroke affordance edits a NARROW range
 
     /// Carried finding from Task 10. `MarkdownEditorTyping.apply` used to

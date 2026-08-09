@@ -201,4 +201,76 @@ final class SidebarOperationsTests: XCTestCase {
         XCTAssertTrue(preview.summary.contains("will still be renamed"), preview.summary)
         XCTAssertTrue(preview.summary.contains("does not index"), preview.summary)
     }
+
+    // MARK: - New Folder reachability (M3.1 defect 1)
+
+    /// `loreRootMenuItems` is the empty-space/root menu's whole content — the
+    /// route this task adds for a vault with no subfolder yet, or every
+    /// folder collapsed. Its one item must target the VAULT ROOT, not some
+    /// other folder, or "New Folder" from empty space would create in the
+    /// wrong place.
+    func test_rootMenuNewFolderTargetsTheVaultRoot() throws {
+        let (root, s) = try vault("root-menu")
+        let ops = SidebarOperations(store: s)
+
+        let items = loreRootMenuItems(root: root, ops: ops)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].title, "New Folder…")
+
+        items[0].action()
+        XCTAssertEqual(ops.nameTarget, .newFolder(root))
+    }
+
+    /// `loreFolderMenuItems`'s New Folder item must target the FOLDER the menu
+    /// was opened on, not the vault root — the same action from a folder row
+    /// and from empty space must resolve to two different parents.
+    func test_folderMenuNewFolderTargetsThatFolderNotTheRoot() throws {
+        let (root, s) = try vault("folder-menu")
+        let sub = root.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let ops = SidebarOperations(store: s)
+
+        let items = loreFolderMenuItems(folder: sub, ops: ops)
+        let newFolder = try XCTUnwrap(items.first { $0.title == "New Folder…" })
+
+        newFolder.action()
+        XCTAssertEqual(ops.nameTarget, .newFolder(sub))
+        XCTAssertNotEqual(ops.nameTarget, .newFolder(root))
+    }
+
+    /// The folder menu's destructive item stays tagged as destructive after
+    /// the move off raw `Button(role: .destructive)` and onto
+    /// `AinkradMenuItem.isDestructive` — the kit reads that flag to apply the
+    /// danger tint (`AinkradContextMenuRow.tint` in `AinkradContextMenu.swift`),
+    /// so losing the flag would silently un-style Move to Trash.
+    func test_folderMenuTrashItemIsMarkedDestructive() throws {
+        let (root, s) = try vault("folder-menu-trash")
+        let ops = SidebarOperations(store: s)
+
+        let items = loreFolderMenuItems(folder: root, ops: ops)
+        let trash = try XCTUnwrap(items.first { $0.title == "Move to Trash" })
+        XCTAssertTrue(trash.isDestructive)
+        XCTAssertFalse(items.contains { $0.title != "Move to Trash" && $0.isDestructive })
+    }
+
+    /// The document row menu drops Move to Trash for attachment rows (a
+    /// pre-existing rule from `LoreRowMenu`, preserved across the move to
+    /// `AinkradMenuItem`), and keeps it — marked destructive — for everything
+    /// else.
+    func test_rowMenuOmitsTrashForAttachmentsButKeepsItElsewhere() throws {
+        let (_, s) = try vault("row-menu")
+        let ops = SidebarOperations(store: s)
+        let doc = IndexRow(path: URL(fileURLWithPath: "/v/a.md"), id: "a", title: "A",
+                           tags: [], aliases: [], updated: Date(),
+                           type: MarkdownEngine.identifier, properties: [])
+        let attachment = IndexRow(path: URL(fileURLWithPath: "/v/a.pdf"), id: "b", title: "B",
+                                  tags: [], aliases: [], updated: Date(),
+                                  type: AttachmentEngine.identifier, properties: [])
+
+        let docItems = loreRowMenuItems(row: doc, ops: ops)
+        XCTAssertTrue(docItems.contains { $0.title == "Move to Trash" && $0.isDestructive })
+
+        let attachmentItems = loreRowMenuItems(row: attachment, ops: ops)
+        XCTAssertFalse(attachmentItems.contains { $0.title == "Move to Trash" })
+    }
 }

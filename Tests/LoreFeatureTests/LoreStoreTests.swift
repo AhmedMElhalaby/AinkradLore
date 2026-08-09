@@ -103,11 +103,11 @@ final class LoreStoreTests: XCTestCase {
             to: root.appendingPathComponent("c.xlsx"), atomically: true, encoding: .utf8)
 
         let entries = VaultIndexCoordinator.scanVault(at: root)
-        // `.xlsx` is indexed as an UNCLAIMED row rather than skipped: the list
+        // `.xlsx` is indexed as an ATTACHMENT row rather than skipped: the list
         // must not lie about what is in the vault (see `scanVault`). It carries
         // no plaintext, so it is metadata only.
-        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext", "unclaimed"])
-        XCTAssertEqual(entries.first { $0.type == "unclaimed" }?.payload.plaintext, "")
+        XCTAssertEqual(Set(entries.map(\.type)), ["markdown", "plaintext", AttachmentEngine.identifier])
+        XCTAssertEqual(entries.first { $0.type == AttachmentEngine.identifier }?.payload.plaintext, "")
     }
 
     func test_search_findsPlainTextDocuments() async throws {
@@ -171,12 +171,12 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertTrue(capped.dropFirst().allSatisfy { $0 == "é" })
     }
 
-    // MARK: - unclaimed file types
+    // MARK: - attachment file types
     //
     // A vault full of `.xlsx` must not make the file list lie about what is
-    // there. Files no engine claims are indexed as metadata-only rows so they
-    // list, and clicking one reaches the fallback viewer's "can't open this
-    // yet" branch.
+    // there. Files no specific engine claims are indexed and opened as
+    // metadata-only `AttachmentEngine` rows so they list, and clicking one
+    // opens a read-only QuickLook preview.
 
     private func makeMixedVault() throws -> URL {
         let root = tempDir()
@@ -193,18 +193,18 @@ final class LoreStoreTests: XCTestCase {
         return root
     }
 
-    func test_mixedVault_listsEveryFileIncludingUnclaimedTypes() throws {
+    func test_mixedVault_listsEveryFileIncludingAttachmentTypes() throws {
         let root = try makeMixedVault(); let s = try makeStore(root)
         try s.rebuild()
         XCTAssertEqual(Set(s.rows.map(\.path.lastPathComponent)),
                        ["note.md", "log.txt", "code.swift", "paper.pdf", "book.xlsx"])
     }
 
-    func test_unclaimedRow_isMetadataOnlyAndTitledByFilename() throws {
+    func test_attachmentRow_isMetadataOnlyAndTitledByFilename() throws {
         let root = try makeMixedVault(); let s = try makeStore(root)
         try s.rebuild()
         let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
-        XCTAssertEqual(row.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(row.type, AttachmentEngine.identifier)
         XCTAssertEqual(row.title, "book.xlsx")
         XCTAssertTrue(row.tags.isEmpty)
         XCTAssertTrue(row.properties.isEmpty)
@@ -213,25 +213,30 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertEqual(entry.payload.plaintext, "")
     }
 
-    func test_unclaimedRows_doNotMatchSearchesForBodyTextTheyDoNotHave() throws {
+    func test_attachmentRows_doNotMatchSearchesForBodyTextTheyDoNotHave() throws {
         let root = try makeMixedVault(); let s = try makeStore(root)
         try s.rebuild()
         XCTAssertTrue(s.search("zorkmid").isEmpty,
-                      "an unclaimed row matched body text that was never indexed")
+                      "an attachment row matched body text that was never indexed")
         // The filename IS indexed as the title, so the row is still findable.
         XCTAssertEqual(s.search("book").map(\.path.lastPathComponent), ["book.xlsx"])
     }
 
-    func test_openingUnclaimedRow_setsUnsupportedOpenError() throws {
+    /// Engine resolution is now TOTAL (Task 2): a file no specific engine
+    /// claims no longer sets `openError` — it opens as a read-only
+    /// `AttachmentEngine` tab, previewed via QuickLook. This replaces the old
+    /// `test_openingUnclaimedRow_setsUnsupportedOpenError`, whose expectation
+    /// (open always fails for `.xlsx`) is exactly the behavior this task
+    /// removes.
+    func test_openingAttachmentRow_opensAReadOnlyTab() throws {
         let root = try makeMixedVault(); let s = try makeStore(root)
         try s.rebuild()
         let row = try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "book.xlsx" })
         s.open(row)
-        XCTAssertTrue(s.tabs.isEmpty)
-        XCTAssertEqual(s.openError?.url, row.path)
-        // This is what `FallbackViewer.isUnsupported` keys off — the branch the
-        // review found unreachable.
-        XCTAssertEqual(s.openError?.error as? EngineError, .unsupported(row.path))
+        XCTAssertNil(s.openError)
+        let tab = try XCTUnwrap(s.selectedTab)
+        XCTAssertTrue(tab.engine is AttachmentEngine)
+        XCTAssertTrue(tab.isReadOnly)
     }
 
     func test_scanVault_stillSkipsDotPrefixedComponentsBelowTheRoot() throws {
@@ -251,7 +256,7 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertTrue(VaultIndexCoordinator.scanVault(at: root).isEmpty)
     }
 
-    func test_scanVault_indexesAPackageAsOneUnclaimedRowNotItsInternals() throws {
+    func test_scanVault_indexesAPackageAsOneAttachmentRowNotItsInternals() throws {
         let root = tempDir()
         let pkg = root.appendingPathComponent("Report.pages", isDirectory: true)
         let contents = pkg.appendingPathComponent("Contents", isDirectory: true)
@@ -270,7 +275,7 @@ final class LoreStoreTests: XCTestCase {
 
         let entries = VaultIndexCoordinator.scanVault(at: root)
         XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries.first?.type, EngineRegistry.unclaimedType)
+        XCTAssertEqual(entries.first?.type, AttachmentEngine.identifier)
         XCTAssertEqual(entries.first?.payload.title, "Report.pages")
     }
 

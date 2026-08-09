@@ -54,6 +54,28 @@ final class MarkdownStylingBenchmark: XCTestCase {
         String(repeating: "Some **bold** text with a [[Link]] and `code`.\n\n", count: 5_000)
     }
 
+    /// Whole-branch review measurement gap: no benchmark fixture anywhere
+    /// contained a single `![[…]]`, so the embed path — including
+    /// `EmbedRendering.currentlyRevealedEmbedSpans`'s per-caret-move walk,
+    /// which is O(embeds in document) by construction — had never been
+    /// measured. 2,000 embeds interleaved with ordinary prose, one per
+    /// paragraph, is enough to be meaningful without being pathological.
+    static var largeEmbedFixture: String {
+        (0..<2_000).map {
+            "Some **bold** text with a ![[Attachment \($0).pdf]] embed and `code`.\n\n"
+        }.joined()
+    }
+
+    /// The parse half of the embed path: `MarkdownDocumentModel.styleSpans`
+    /// must stay debounce-affordable on a document whose links are all
+    /// embeds rather than plain wikilinks.
+    ///
+    /// MEASURED, Debug (unoptimised), 2026-08-08, ~150 KB / 2,000 embeds.
+    func test_parsingADocumentWithManyEmbedsIsFastEnoughToDebounce() {
+        let body = Self.largeEmbedFixture
+        measure { _ = MarkdownDocumentModel(fullText: body).styleSpans }
+    }
+
     func test_aDocumentOverTheHardCapProducesNoSpans() {
         let body = String(repeating: "x", count: MarkdownDocumentModel.stylingHardCap + 1)
         XCTAssertTrue(MarkdownDocumentModel(fullText: body).styleSpans.isEmpty)

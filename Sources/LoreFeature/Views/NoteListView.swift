@@ -17,9 +17,33 @@ struct NoteListView: View {
     @Binding var activeTag: String?
 
     private var visible: [IndexRow] {
-        var base = query.isEmpty ? store.rows : store.search(query)
+        // The default-hidden filter applies to BROWSING (`store.rows`) only,
+        // never to `store.search(query)`. A search result is something the
+        // owner explicitly asked for by typing a query — surfacing it is the
+        // whole point of searching, and silently omitting `client_secret_…
+        // .json` from a search for "client_secret" because it is an
+        // attachment would be far more surprising than showing it. Browsing
+        // is where a `.zip` reads as clutter; searching is where it reads as
+        // "found it".
+        var base = query.isEmpty
+            ? DocumentVisibility.visibleRows(store.rows, showAllFiles: store.showAllFiles)
+            : store.search(query)
         if let tag = activeTag { base = base.filter { $0.tags.contains(tag) } }
         return base
+    }
+
+    /// True when the reason the list looks empty is specifically that every
+    /// row got hidden by the default filter — not "no notes exist" and not
+    /// "the search/tag found nothing". Fix round 1, Minor 5: without this,
+    /// a folder holding only a `.zip` and a `.json` read as "No matches"
+    /// with the magnifying-glass icon, which implies a bad search rather
+    /// than a setting the owner can flip. Scoped to the plain-browse case
+    /// (`query` empty, no tag filter) because that is the only case where
+    /// `DocumentVisibility` is even consulted — see `visible` above.
+    private var allVisibleRowsAreHiddenByDefault: Bool {
+        query.isEmpty && activeTag == nil && !store.showAllFiles
+            && !store.rows.isEmpty
+            && DocumentVisibility.visibleRows(store.rows, showAllFiles: false).isEmpty
     }
 
     var body: some View {
@@ -48,13 +72,19 @@ struct NoteListView: View {
 
             if visible.isEmpty {
                 AinkradEmptyState(
-                    icon: store.rows.isEmpty ? "tray" : "magnifyingglass",
-                    title: store.rows.isEmpty ? "No notes yet" : "No matches",
+                    icon: store.rows.isEmpty ? "tray"
+                        : allVisibleRowsAreHiddenByDefault ? "eye.slash" : "magnifyingglass",
+                    title: store.rows.isEmpty ? "No notes yet"
+                        : allVisibleRowsAreHiddenByDefault ? "Files are hidden" : "No matches",
                     message: store.rows.isEmpty
                         ? "Press ⌘N to capture your first note."
-                        : "Try a different search or tag filter.",
-                    actionTitle: store.rows.isEmpty ? "New note" : nil,
-                    action: store.rows.isEmpty ? onNew : nil)
+                        : allVisibleRowsAreHiddenByDefault
+                            ? "Every file here is hidden by \"Show all files\" in Settings."
+                            : "Try a different search or tag filter.",
+                    actionTitle: store.rows.isEmpty ? "New note"
+                        : allVisibleRowsAreHiddenByDefault ? "Show all files" : nil,
+                    action: store.rows.isEmpty ? onNew
+                        : allVisibleRowsAreHiddenByDefault ? { store.setShowAllFiles(true) } : nil)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
@@ -67,7 +97,7 @@ struct NoteListView: View {
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
                                 trailing: { EmptyView() })
-                            .contextMenu { LoreRowMenu(row: row, ops: ops) }
+                            .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
                         }
                     }
                 }

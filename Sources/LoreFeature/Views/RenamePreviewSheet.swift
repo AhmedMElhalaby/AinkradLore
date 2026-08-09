@@ -72,6 +72,52 @@ struct RenamePreview {
         }
     }
 
+    /// Recursive folder trash. `editCount`/`files` repurpose the rename
+    /// fields to list the DOCUMENTS about to be trashed, since a trash has no
+    /// link edits of its own — the confirm button reuses the same sheet, so
+    /// it needs the same fields populated with the closest true meaning.
+    init(trashFolder plan: FolderTrashPlan) {
+        title = "Move folder “\(plan.folder.lastPathComponent)” to the Trash"
+        confirmTitle = "Move to Trash"
+        refusal = plan.refusal
+        editCount = plan.documents.count
+        files = plan.documents.map(\.path)
+        if plan.refusal != nil {
+            summary = ""
+        } else if plan.documents.isEmpty {
+            summary = "This folder holds no indexed documents. It will still be moved "
+                + "to the Trash, along with everything inside it."
+                + Self.dirtyWarning(plan)
+        } else if plan.inboundLinkCount > 0 {
+            summary = "\(Self.count(plan.documents.count, "document").capitalizedFirst) "
+                + "will move to the Trash with the folder. "
+                + "\(Self.count(plan.inboundLinkCount, "link")) from outside the folder "
+                + "point into it; those links are NOT rewritten and will stop resolving."
+                + Self.dirtyWarning(plan)
+        } else {
+            summary = "\(Self.count(plan.documents.count, "document").capitalizedFirst) "
+                + "will move to the Trash with the folder."
+                + Self.dirtyWarning(plan)
+        }
+    }
+
+    /// Surfaced BEFORE the confirm click, describing what `applyTrashFolder`
+    /// ACTUALLY does with a dirty tab, not the exceptional case: the common
+    /// outcome is that it gets saved automatically and the trash proceeds.
+    /// Only a tab whose flush genuinely fails (conflicted, or a save that
+    /// errors) refuses the whole operation — a claim that the Trash "will be
+    /// refused" would be false for the ordinary case and would misdescribe a
+    /// silent, successful auto-save as a blocker. This is advance notice, not
+    /// enforcement, so it does not change `canConfirm`.
+    private static func dirtyWarning(_ plan: FolderTrashPlan) -> String {
+        guard plan.dirtySessionCount > 0 else { return "" }
+        let n = plan.dirtySessionCount
+        return " \(count(n, "open tab")) under this folder \(n == 1 ? "has" : "have") "
+            + "unsaved edits; \(n == 1 ? "it" : "they") will be saved automatically. If "
+            + "\(n == 1 ? "it" : "one of them") cannot be saved (for example, the file also "
+            + "changed outside Lore), the Trash will be refused instead."
+    }
+
     private static func count(_ n: Int, _ noun: String) -> String {
         "\(n) \(noun)\(n == 1 ? "" : "s")"
     }

@@ -14,6 +14,20 @@ public struct StyleSpan: Equatable, Sendable {
         case listItem
         case blockQuote
         case checkbox(Bool)
+        /// An `![[target]]` embed's TARGET text — same convention as
+        /// `.wikilink`'s content span: the brackets (and the leading `!`)
+        /// sit OUTSIDE this range, as `.marker(of: .wikilink)` spans, so the
+        /// SAME reveal machinery that shows/hides an ordinary wikilink's
+        /// `[[`/`]]` on caret entry also shows/hides an embed's `![[`/`]]` —
+        /// see Task 8 fix round 1, Important 6. `target` is the raw target
+        /// (fragment included, alias excluded — see `DocumentLink.rawTarget`),
+        /// for resolving what to render. `fullRange` is the WHOLE source
+        /// form — `!`, both brackets and the target — because an IMAGE
+        /// embed, unlike a chip, must collapse the target text too (there is
+        /// no rasterized filename to show instead), and that collapse needs
+        /// the outer bound the marker spans alone do not carry. See
+        /// `EmbedRendering.applyEmbeds`.
+        case embed(target: String, fullRange: Range<Int>)
         /// The syntax characters of `owner`, and NOTHING else. Emitted
         /// separately from the content span so Live Preview can collapse the
         /// markers without touching the text they delimit.
@@ -201,6 +215,47 @@ enum WikilinkSpanBuilder {
             // than derived from this range's ends.
             let target = NSRange(location: lower, length: upper - lower)
             let brackets = MarkdownMarkers.wikilinkBrackets(around: target, text: ns)
+
+            if span.link.isEmbed {
+                // SAME shape as the ordinary wikilink case just below: a
+                // content span (here `.embed`, over the target only) plus
+                // marker spans for the delimiters — so `MarkdownReveal.
+                // hiddenMarkers` collapses and reveals an embed's `![[`/`]]`
+                // exactly the way it already does an ordinary wikilink's
+                // `[[`/`]]`. Fixed in Task 8 fix round 1 (Important 6): the
+                // first version made the WHOLE `![[target]]` one span with no
+                // separate markers, which meant an embed's raw source could
+                // never be revealed for editing — no way to fix a typo'd
+                // target in place.
+                //
+                // The leading `!` joins the OPEN bracket's marker span rather
+                // than getting one of its own: it has no meaning on its own
+                // and a caret landing exactly between `!` and `[[` should not
+                // find one revealed and the other hidden.
+                guard brackets.count == 2 else {
+                    // Malformed (no `[[`/`]]` found around the target) — fall
+                    // back to the target alone with no markers, rather than
+                    // dropping the span, so a broken document still gets SOME
+                    // representation.
+                    return [StyleSpan(range: lower..<upper,
+                                      kind: .embed(target: span.link.rawTarget, fullRange: lower..<upper))]
+                }
+                let open = brackets[0]
+                var bangStart = open.location
+                if bangStart > 0, ns.character(at: bangStart - 1) == 0x21 /* "!" */ { bangStart -= 1 }
+                let close = brackets[1]
+                let fullEnd = close.location + close.length
+                let openWithBang = NSRange(location: bangStart,
+                                           length: (open.location + open.length) - bangStart)
+                return [StyleSpan(range: lower..<upper,
+                                  kind: .embed(target: span.link.rawTarget,
+                                              fullRange: bangStart..<fullEnd)),
+                        StyleSpan(range: openWithBang.location..<(openWithBang.location + openWithBang.length),
+                                  kind: .marker(of: .wikilink)),
+                        StyleSpan(range: close.location..<(close.location + close.length),
+                                  kind: .marker(of: .wikilink))]
+            }
+
             return [StyleSpan(range: lower..<upper, kind: .wikilink)]
                 + brackets.map {
                     StyleSpan(range: $0.location..<($0.location + $0.length),

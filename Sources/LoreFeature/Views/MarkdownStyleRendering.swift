@@ -252,6 +252,21 @@ enum MarkdownStyleRenderer {
             // noise on top of a marker the reader can already see.
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
 
+        case .embed:
+            // The FALLBACK look — plain wikilink colouring, over the TARGET
+            // text only (the `![[`/`]]` markers are separate `.marker(of:
+            // .wikilink)` spans and style themselves) — for an embed that
+            // `EmbedRendering` has not decorated: an unresolved target, a
+            // resolver-less caller (a test, a plain-text engine), or a block
+            // the caret is currently INSIDE, which `EmbedRendering.
+            // applyEmbeds` deliberately leaves as plain revealed source so a
+            // typo'd target can be edited — see that function's doc comment.
+            // `applyEmbeds` runs immediately after this in both `renderStyles`
+            // (a full render) and `restyleBlock` (the per-block caret path,
+            // fix round 1 Critical 2), and overwrites this wherever it can
+            // resolve the target AND the block is not the one being edited.
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
+
         case .blockQuote:
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.foreground).withAlphaComponent(0.65),
