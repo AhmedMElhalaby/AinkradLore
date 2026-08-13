@@ -25,6 +25,24 @@ enum MarkdownEditorLayout {
         let horizontal = min(theme.contentInset, max(0, viewWidth / 2 - 1))
         return NSSize(width: horizontal, height: theme.contentInset)
     }
+
+    /// The text container's own width for a view `viewWidth` points wide.
+    ///
+    /// `maxMeasure` is a MAXIMUM, not a fixed width: pinning the container to
+    /// it regardless of the view's actual width left the container wider than
+    /// the visible pane on any window narrower than the measure, and with
+    /// `isHorizontallyResizable = false` and no horizontal scroller that
+    /// overflow was clipped and unreachable — worse than the centring this
+    /// task removed. The container must fit inside whatever space the inset
+    /// leaves, so it is capped at both the theme's measure AND the space
+    /// actually available after both horizontal insets.
+    static func containerWidth(forViewWidth viewWidth: CGFloat,
+                               theme: MarkdownTheme) -> CGFloat {
+        let inset = containerInset(forViewWidth: viewWidth, theme: theme)
+        let available = max(0, viewWidth - inset.width * 2)
+        guard let measure = theme.maxMeasure else { return available }
+        return min(measure, available)
+    }
 }
 
 /// The selection-driven half of Live Preview.
@@ -349,17 +367,28 @@ extension MarkdownEditor.Coordinator {
 
     // MARK: - Container geometry
 
-    /// Re-centres the text column for a view `width` points wide.
+    /// Re-applies both the inset and the container's own width for a view
+    /// `width` points wide.
     ///
-    /// Called on every width change, because the inset is a function of the
-    /// width: without this the column would keep the margins it was born with
-    /// and drift off-centre as the window resizes.
-    func applyContainerInset(forWidth width: CGFloat) {
+    /// Called on every width change, because BOTH are a function of the
+    /// view's width: the inset would keep the margins it was born with and
+    /// drift off-centre as the window resizes, and — the bug this method used
+    /// to have — the container's width would stay pinned at the theme's
+    /// measure regardless of how narrow the pane got, leaving text wider than
+    /// the visible view with no horizontal scroller to reach it. The two are
+    /// applied together, from the one function that owns both
+    /// (`containerInset`/`containerWidth`), so they cannot drift apart again.
+    func applyContainerGeometry(forWidth width: CGFloat) {
         guard let tv = textView else { return }
-        let inset = MarkdownEditorLayout.containerInset(
-            forViewWidth: width, theme: MarkdownTheme(tokens: tokens))
-        guard tv.textContainerInset != inset else { return }
+        let theme = MarkdownTheme(tokens: tokens)
+        let inset = MarkdownEditorLayout.containerInset(forViewWidth: width, theme: theme)
+        let containerWidth = MarkdownEditorLayout.containerWidth(forViewWidth: width, theme: theme)
+        let insetChanged = tv.textContainerInset != inset
+        let widthChanged = tv.textContainer?.size.width != containerWidth
+        guard insetChanged || widthChanged else { return }
         tv.textContainerInset = inset
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.size = NSSize(width: containerWidth, height: .greatestFiniteMagnitude)
         // The drawn decoration is positioned from the container, so it has to
         // be repainted when the container moves.
         tv.needsDisplay = true

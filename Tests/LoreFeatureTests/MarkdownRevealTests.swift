@@ -312,7 +312,7 @@ extension MarkdownRevealTests {
         var callbacks = 0
         tv.onWidthChange = { [weak coordinator] width in
             callbacks += 1
-            coordinator?.applyContainerInset(forWidth: width)
+            coordinator?.applyContainerGeometry(forWidth: width)
         }
 
         tv.setFrameSize(NSSize(width: 2000, height: 600))

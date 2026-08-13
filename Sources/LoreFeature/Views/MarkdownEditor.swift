@@ -90,20 +90,21 @@ public struct MarkdownEditor: NSViewRepresentable {
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
-        // Margins and measure come from the theme, and are a function of the
-        // view's width — see `MarkdownEditorLayout`. Set once here for the
-        // initial size, then maintained by `onWidthChange`.
+        // Margins and measure come from the theme, and are both a function of
+        // the view's width — see `MarkdownEditorLayout`. Set once here for the
+        // initial size, then kept in sync by `onWidthChange` via
+        // `applyContainerGeometry`, which owns both together so they cannot
+        // drift apart on resize.
+        let initialTheme = MarkdownTheme(tokens: tokens)
         tv.textContainerInset = MarkdownEditorLayout.containerInset(
-            forViewWidth: tv.bounds.width, theme: MarkdownTheme(tokens: tokens))
-        // The measure cap now belongs to the text container's width rather
-        // than to the inset — the inset only ever left-aligns the column.
-        if let measure = MarkdownTheme(tokens: tokens).maxMeasure {
-            tv.textContainer?.widthTracksTextView = false
-            tv.textContainer?.size = NSSize(width: measure,
-                                            height: .greatestFiniteMagnitude)
-        }
+            forViewWidth: tv.bounds.width, theme: initialTheme)
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.size = NSSize(
+            width: MarkdownEditorLayout.containerWidth(forViewWidth: tv.bounds.width,
+                                                        theme: initialTheme),
+            height: .greatestFiniteMagnitude)
         tv.onWidthChange = { [weak coordinator = context.coordinator] width in
-            coordinator?.applyContainerInset(forWidth: width)
+            coordinator?.applyContainerGeometry(forWidth: width)
         }
         tv.onCommandClick = { [weak coordinator = context.coordinator] index in
             coordinator?.openLink(atUTF16: index) ?? false

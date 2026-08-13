@@ -38,4 +38,43 @@ final class EditorLayoutTests: XCTestCase {
         let theme = MarkdownTheme(tokens: TestTokens.make())
         XCTAssertEqual(inset(width: 900).height, theme.contentInset)
     }
+
+    // MARK: - containerWidth
+
+    private func width(forViewWidth viewWidth: CGFloat) -> CGFloat {
+        MarkdownEditorLayout.containerWidth(
+            forViewWidth: viewWidth, theme: MarkdownTheme(tokens: TestTokens.make()))
+    }
+
+    /// A wide pane still caps the container at the theme's measure — the
+    /// fix for the clipping bug must not reopen the "lines run edge to edge"
+    /// complaint Task 5 exists to close.
+    func test_aWidePaneCapsTheContainerAtTheMeasure() throws {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let measure = try XCTUnwrap(theme.maxMeasure)
+        XCTAssertEqual(width(forViewWidth: 2000), measure, accuracy: 0.5)
+    }
+
+    /// A pane narrower than the measure must fit ENTIRELY inside the visible
+    /// width after both insets are subtracted — never wider. Pinning the
+    /// container to `maxMeasure` regardless of the view's actual width was
+    /// exactly the bug: with `isHorizontallyResizable = false` and no
+    /// horizontal scroller, an oversized container clips text with no way to
+    /// reach it.
+    func test_aNarrowPaneFitsInsideTheVisibleWidth() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let viewWidth: CGFloat = 400
+        let inset = MarkdownEditorLayout.containerInset(forViewWidth: viewWidth, theme: theme)
+        let container = width(forViewWidth: viewWidth)
+        XCTAssertLessThanOrEqual(container, viewWidth - inset.width * 2,
+                                 "the container must never be wider than the space the insets leave")
+    }
+
+    /// The degenerate narrow case: a pane so narrow the inset itself is
+    /// clamped near zero must still leave a positive, not negative, container
+    /// width.
+    func test_aDegenerateNarrowPaneStaysPositive() {
+        XCTAssertGreaterThanOrEqual(width(forViewWidth: 30), 0)
+        XCTAssertLessThan(width(forViewWidth: 30), 30)
+    }
 }
