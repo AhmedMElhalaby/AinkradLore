@@ -39,6 +39,15 @@ final class MarkdownEditorRedrawTests: XCTestCase {
     /// The coordinator is reached through `tv.delegate` rather than through
     /// SwiftUI, which does not expose it: the delegate IS the coordinator, set
     /// in `makeNSView`.
+    ///
+    /// The text view is made FIRST RESPONDER, and that is asserted rather than
+    /// assumed. Without it `isTextViewFocused` answers `false` for the whole
+    /// test and every render takes the unfocused reveal path — which is not
+    /// what a user typing into the editor does, and this file's entire purpose
+    /// is to reproduce what the app does. Caught in review; the 2.1 → 1.1
+    /// conclusion survived it, but a measurement of the wrong path is not
+    /// evidence for the right one. `MarkdownEditFastPathTests` asserts the same
+    /// thing for the same reason.
     private func hostEditor(_ text: String) throws
         -> (MarkdownEditor.Coordinator, NSTextView, NSWindow, NSHostingView<Host>) {
         let hosting = NSHostingView(rootView: Host(text: text))
@@ -52,6 +61,12 @@ final class MarkdownEditorRedrawTests: XCTestCase {
                               "the hosted editor must have produced an NSTextView")
         let coordinator = try XCTUnwrap(tv.delegate as? MarkdownEditor.Coordinator,
                                        "the text view's delegate must be the coordinator")
+        window.makeFirstResponder(tv)
+        XCTAssertTrue(window.firstResponder === tv,
+                      "the hosted editor must be focused, or this measures the "
+                      + "unfocused reveal path instead of the one a typist uses")
+        XCTAssertTrue(coordinator.isTextViewFocused,
+                      "and the coordinator must agree that it is")
         return (coordinator, tv, window, hosting)
     }
 
@@ -83,6 +98,7 @@ final class MarkdownEditorRedrawTests: XCTestCase {
             tv.setSelectedRange(NSRange(location: (tv.string as NSString).length / 2,
                                         length: 0))
             let callsBefore = coordinator.applyStylesCalls
+            let appliedBefore = coordinator.applyStylesRenders
             let rendersBefore = coordinator.revealIndexBuilds
 
             for _ in 0..<10 {
@@ -92,12 +108,33 @@ final class MarkdownEditorRedrawTests: XCTestCase {
             pump(0.3)
 
             let calls = Double(coordinator.applyStylesCalls - callsBefore) / 10
+            let applied = Double(coordinator.applyStylesRenders - appliedBefore) / 10
             let renders = Double(coordinator.revealIndexBuilds - rendersBefore) / 10
+            // `revealIndexBuilds` counts INDEX BUILDS, which both a full render
+            // and the single-block fast path perform — it is not "full renders"
+            // and was mislabelled as such in the first version of this file.
+            // The number the guard moves is `applyStyles-per-keystroke` × the
+            // fraction of those that render; the index-build count going 2.1 →
+            // 1.1 is the observable consequence, since the removed call was a
+            // full render either way.
             print("REDRAW applyStyles-per-keystroke=\(calls) "
-                  + "full-renders-per-keystroke=\(renders)")
+                  + "applyStyles-renders-per-keystroke=\(applied) "
+                  + "index-builds-per-keystroke=\(renders)")
             XCTAssertGreaterThan((tv.string as NSString).length,
                                  (body as NSString).length,
                                  "the keystrokes must have actually landed")
+            // The sharp form of the claim, and the one that does not depend on
+            // reading a ratio: SwiftUI still calls `applyStyles()` once per
+            // keystroke — that is the framework's scheduling and the guard does
+            // not change it — but not one of those calls now renders. Before
+            // the guard every one of them did, which is where the second
+            // whole-document render per typed character came from.
+            XCTAssertEqual(calls, 1.0,
+                           "SwiftUI must still be redrawing once per keystroke, "
+                           + "or this test has stopped measuring the app's path")
+            XCTAssertEqual(applied, 0.0,
+                           "and none of those redraws may render: each one used to be "
+                           + "a full whole-document render")
         }
     }
 

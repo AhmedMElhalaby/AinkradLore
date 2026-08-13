@@ -46,11 +46,31 @@ extension MarkdownEditor.Coordinator {
                 PendingEdit(range: affected, replacementLength: ($0 as NSString).length,
                             touchesBlockStructure:
                                 Self.disturbsStructure($0)
-                                || Self.disturbsStructure(
-                                    (tv.string as NSString).substring(with: affected)))
+                                || Self.disturbsStructure(removed: affected, from: tv.string))
               }
             : nil
         return true
+    }
+
+    /// The text `affected` is about to REMOVE, tested for structure characters.
+    ///
+    /// `affected` arrives from AppKit — a system boundary — and
+    /// `NSString.substring(with:)` traps on an out-of-bounds range. Every
+    /// in-repo caller passes a range computed against this very string, so this
+    /// is not reachable today; it is nonetheless the keystroke path, where a
+    /// trap is a crash in the user's editor mid-sentence, and validating input
+    /// at a boundary is cheaper than being sure about every future caller.
+    ///
+    /// An out-of-bounds range answers `true` — "this edit disturbs structure" —
+    /// which bars the fast path and takes the full render. The conservative
+    /// direction: a redundant whole-document render is the behaviour that
+    /// shipped for years, and it cannot be wrong about anything.
+    private static func disturbsStructure(removed affected: NSRange,
+                                          from text: String) -> Bool {
+        let ns = text as NSString
+        guard affected.location >= 0, affected.length >= 0,
+              NSMaxRange(affected) <= ns.length else { return true }
+        return disturbsStructure(ns.substring(with: affected))
     }
 
     /// What `shouldChangeTextIn` recorded, for `textDidChange` to consume.
@@ -130,9 +150,14 @@ extension MarkdownEditor.Coordinator {
     /// unchanged since the last one: the SPANS (identified by the string they
     /// describe), the TOKENS (every colour and font comes from them), and — in
     /// viewport mode only — the styled WINDOW, which follows the scroll.
-    /// Selection is deliberately not in that list: reveal is maintained
-    /// incrementally by `revealForSelectionChange` and does not come through
-    /// here. Conservative in the only direction that matters: every answer
+    /// Selection and focus are deliberately NOT in that list, and that is a
+    /// contract rather than an oversight: reveal is maintained incrementally by
+    /// `revealForSelectionChange` (and by `renderStylesForEdit` for an edit),
+    /// both of which re-attribute the affected blocks themselves and neither of
+    /// which routes through here. If a future caller ever changes reveal state
+    /// WITHOUT re-attributing — a new focus path, say — it must call
+    /// `renderStyles()` directly rather than expect `applyStyles()` to notice,
+    /// because by this guard's rule nothing about the document changed. Conservative in the only direction that matters: every answer
     /// it is not certain about is `true`, which costs a redundant render — the
     /// status quo — rather than showing stale attributes.
     func isRenderStale(for tv: NSTextView) -> Bool {

@@ -210,6 +210,61 @@ final class MarkdownEditFastPathTests: XCTestCase {
         XCTAssertEqual(fast.dump, full.dump)
     }
 
+    /// The `toRestyle` symmetric-difference branch, which every other
+    /// equivalence test above leaves unexecuted.
+    ///
+    /// Typing mid-block leaves the revealed range unchanged, so `toRestyle`
+    /// collapses to `{block}` and the set arithmetic never does anything. It is
+    /// reachable, though: a caret resting exactly on a block's `lowerBound`
+    /// belongs to BOTH adjacent blocks — `revealedBlockIndices` widens one step
+    /// at a boundary — and inserting a character there moves the caret off the
+    /// boundary, so the revealed range narrows from two blocks to one and the
+    /// block that just LOST reveal has to be re-collapsed.
+    ///
+    /// This is the exact area the one real defect in this task came from
+    /// (reveal read against the pre-edit block list), so it is asserted rather
+    /// than argued — and asserted the way that matters, by comparing the whole
+    /// document's attributes against a full render, not by timing it.
+    func test_anEditOnABlockBoundaryRestylesTheBlockThatLostReveal() throws {
+        // A block that starts with prose (safe to type in) and is not the
+        // first, since the widening rule needs a predecessor.
+        let text = Self.fixture()
+        let (probe, _) = makeEditor(text)
+        let boundary = try XCTUnwrap(
+            probe.revealIndex.blocks.dropFirst().first(where: { block in
+                (text as NSString).substring(with: NSRange(location: block.lowerBound,
+                                                           length: min(5, block.count)))
+                    .hasPrefix("Some ")
+            })?.lowerBound,
+            "the fixture must contain a prose block that is not the first")
+
+        // FAST: place the caret exactly on the boundary, confirm reveal really
+        // does span two blocks, then type.
+        let (fast, fastView) = makeEditor(text)
+        let fastStorage = try XCTUnwrap(fastView.textStorage)
+        fastView.setSelectedRange(NSRange(location: boundary, length: 0))
+        XCTAssertEqual(fast.revealedBlockIndices.count, 2,
+                       "a caret on a block boundary must reveal both adjacent blocks, "
+                       + "or this test is not exercising the branch it exists for")
+        let was = fast.revealedBlockIndices
+        fastView.insertText("x", replacementRange: NSRange(location: boundary, length: 0))
+        XCTAssertTrue(fast.lastEditTookFastPath)
+        XCTAssertEqual(fast.revealedBlockIndices.count, 1,
+                       "moving off the boundary must narrow the revealed range")
+        XCTAssertNotEqual(fast.revealedBlockIndices, was,
+                          "and the symmetric difference must therefore be non-empty")
+
+        // FULL: the same edit, then a whole-document render on top.
+        let (full, fullView) = makeEditor(text)
+        let fullStorage = try XCTUnwrap(fullView.textStorage)
+        fullView.setSelectedRange(NSRange(location: boundary, length: 0))
+        fullView.insertText("x", replacementRange: NSRange(location: boundary, length: 0))
+        full.renderStyles()
+
+        assertSameAttributes(attributeDump(fastStorage), attributeDump(fullStorage),
+                             site: "a block boundary")
+    }
+
     // MARK: - The bail-outs
 
     /// Each listed case must fall back to the full render rather than take the
