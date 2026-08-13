@@ -1,0 +1,340 @@
+import XCTest
+import AppKit
+import SwiftUI
+@testable import LoreFeature
+
+/// Task 10, Part 1: the single-block edit path must be INVISIBLE.
+///
+/// Speed is the point of `renderStylesForEdit`, but speed is not what can go
+/// wrong with it. What can go wrong is showing the user attributes that differ
+/// from what a full render would have produced — so the test that matters here
+/// is not a timing but an equivalence: for a realistic edit, the storage after
+/// the fast path must be byte-identical to the storage after `renderStyles()`.
+///
+/// Both are driven on two editors holding the same text, edited identically,
+/// so the comparison is between two real renders of the same document rather
+/// than between a render and a hand-written expectation.
+@MainActor
+final class MarkdownEditFastPathTests: XCTestCase {
+
+    /// Windows are retained for the length of each test — a released window
+    /// takes its first responder with it, and the whole point here is that the
+    /// text view stays focused.
+    private var windows: [NSWindow] = []
+
+    override func tearDown() {
+        windows.removeAll()
+        super.tearDown()
+    }
+
+    /// A REAL window, and the text view made first responder.
+    ///
+    /// The benchmarks use a detached `NSTextView`, and it cannot be used here:
+    /// a text view with no window posts `textDidBeginEditing`/
+    /// `textDidEndEditing` around EVERY `insertText`, and `textDidEndEditing`
+    /// re-renders the whole document with `forcedFocus: false`, collapsing
+    /// every marker. That lands AFTER the edit path has run, so it silently
+    /// overwrites whatever is being compared — the first version of this test
+    /// "failed" on exactly that and the fast path was not at fault. With a
+    /// window and real first-responder state, editing begins and ends once,
+    /// which is also what happens in the app.
+    private func makeEditor(_ text: String) -> (MarkdownEditor.Coordinator, NSTextView) {
+        var stored = text
+        let binding = Binding<String>(get: { stored }, set: { stored = $0 })
+        let coordinator = MarkdownEditor.Coordinator(text: binding, tokens: TestTokens.make())
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 900))
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.delegate = coordinator
+        let window = NSWindow(contentRect: tv.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = tv
+        window.makeFirstResponder(tv)
+        windows.append(window)
+        XCTAssertTrue(window.firstResponder === tv, "the editor must actually be focused")
+        tv.string = text
+        coordinator.textView = tv
+        coordinator.applyStyles()
+        settle()
+        return (coordinator, tv)
+    }
+
+    private func settle(_ seconds: TimeInterval = 0.6) {
+        let landed = expectation(description: "off-actor parse landed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { landed.fulfill() }
+        wait(for: [landed], timeout: seconds + 2)
+    }
+
+    /// Every attribute run in the storage, rendered to comparable VALUES.
+    ///
+    /// Deliberately not `String(describing:)` of the attribute dictionary:
+    /// `NSFont`'s description embeds the font object's ADDRESS, so two editors
+    /// rendering identical text would never compare equal and the test would
+    /// fail for a reason that has nothing to do with what the user sees. Each
+    /// attribute the renderer actually writes is therefore projected onto the
+    /// properties that determine appearance, and any attribute NOT projected
+    /// here fails the `unknown` case loudly rather than being silently ignored
+    /// — a new attribute must be added to this dump, not slip past it.
+    private func attributeDump(_ storage: NSTextStorage) -> [String] {
+        var out: [String] = []
+        storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) {
+            attributes, range, _ in
+            let rendered = attributes.map { key, value -> String in
+                switch key {
+                case .font:
+                    guard let font = value as? NSFont else { return "font=?" }
+                    return "font=\(font.fontName)@\(font.pointSize)"
+                        + "/\(font.fontDescriptor.symbolicTraits.rawValue)"
+                case .foregroundColor, .backgroundColor:
+                    guard let color = (value as? NSColor)?
+                        .usingColorSpace(.sRGB) else { return "\(key.rawValue)=?" }
+                    return "\(key.rawValue)=\(color.redComponent),\(color.greenComponent),"
+                        + "\(color.blueComponent),\(color.alphaComponent)"
+                case .paragraphStyle:
+                    guard let style = value as? NSParagraphStyle else { return "para=?" }
+                    return "para=\(style.firstLineHeadIndent)/\(style.headIndent)"
+                        + "/\(style.lineHeightMultiple)/\(style.paragraphSpacing)"
+                        + "/\(style.paragraphSpacingBefore)/\(style.alignment.rawValue)"
+                case .kern, .underlineStyle, .baselineOffset:
+                    return "\(key.rawValue)=\(value)"
+                default:
+                    return "UNPROJECTED-\(key.rawValue)=\(value)"
+                }
+            }.sorted().joined(separator: ",")
+            out.append("\(range.location)..<\(NSMaxRange(range)) \(rendered)")
+        }
+        return out
+    }
+
+    /// A document with everything the renderer treats specially, and enough
+    /// blocks that a whole-document render and a one-block one could not
+    /// possibly coincide by accident.
+    private static func fixture() -> String {
+        (0..<40).map { index in
+            """
+            ## Section \(index)
+
+            Some **bold** and _italic_ prose with a [[Link \(index)]] and \
+            `inline code` in it.
+
+            - a list item with [[Another \(index)]]
+            - a second item
+
+            > a quoted line
+
+            ```swift
+            let x\(index) = \(index)
+            ```
+
+            """
+        }.joined()
+    }
+
+    /// Applies `edit` to a fresh editor via the real delegate path, then
+    /// returns its attribute dump — once with the fast path allowed to run,
+    /// once forced through the full render, so the two can be compared.
+    private func dumpAfterEdit(insert: String, at location: Int,
+                               deleting length: Int,
+                               forceFullRender: Bool) throws -> (dump: [String], usedFast: Bool) {
+        let (coordinator, tv) = makeEditor(Self.fixture())
+        return try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            tv.setSelectedRange(NSRange(location: location, length: length))
+            let before = coordinator.revealIndexBuilds
+            tv.insertText(insert, replacementRange: NSRange(location: location, length: length))
+            // One `renderStyles` either way; what differs is whether it was
+            // the whole document or one block.
+            let usedFast = coordinator.lastEditTookFastPath
+            if forceFullRender { coordinator.renderStyles() }
+            XCTAssertGreaterThan(coordinator.revealIndexBuilds, before,
+                                 "the edit must have re-rendered something")
+            return (attributeDump(storage), usedFast)
+        }
+    }
+
+    /// Compares two dumps and reports the FIRST difference rather than both
+    /// dumps in full — a 40-section fixture produces hundreds of runs, and an
+    /// `XCTAssertEqual` on the arrays prints all of them truncated, which says
+    /// nothing about what actually differs.
+    private func assertSameAttributes(_ fast: [String], _ full: [String],
+                                      site: String, file: StaticString = #filePath,
+                                      line: UInt = #line) {
+        for index in 0..<min(fast.count, full.count) where fast[index] != full[index] {
+            XCTFail("""
+                typing inside "\(site)" produced different attributes at run \(index):
+                  fast: \(fast[index])
+                  full: \(full[index])
+                """, file: file, line: line)
+            return
+        }
+        XCTAssertEqual(fast.count, full.count,
+                       "typing inside \"\(site)\" produced a different number of "
+                       + "attribute runs", file: file, line: line)
+    }
+
+    /// THE test. A realistic single-character edit inside a block must leave
+    /// the storage byte-identical to what a full render produces.
+    func test_theFastPathProducesIdenticalAttributesToAFullRender() throws {
+        let text = Self.fixture() as NSString
+        // Deliberately varied landing sites, found in the fixture rather than
+        // guessed at: inside prose, inside a bold run, inside a wikilink,
+        // inside a list item, inside a heading, inside a quote.
+        let sites = ["prose with", "**bold**", "[[Link 5]]", "- a second item",
+                     "## Section 7", "> a quoted line", "let x3 = 3"]
+        for site in sites {
+            let found = text.range(of: site)
+            XCTAssertNotEqual(found.location, NSNotFound, "fixture must contain \(site)")
+            let caret = found.location + found.length / 2
+
+            let fast = try dumpAfterEdit(insert: "x", at: caret, deleting: 0,
+                                         forceFullRender: false)
+            let full = try dumpAfterEdit(insert: "x", at: caret, deleting: 0,
+                                         forceFullRender: true)
+            XCTAssertTrue(fast.usedFast,
+                          "typing inside \"\(site)\" must take the fast path")
+            assertSameAttributes(fast.dump, full.dump, site: site)
+        }
+    }
+
+    /// The same, for a DELETION — the direction that can collapse a span, and
+    /// so the one `shift`'s `compactMap` can drop entries in.
+    func test_aDeletionAlsoProducesIdenticalAttributes() throws {
+        let text = Self.fixture() as NSString
+        let found = text.range(of: "prose with")
+        XCTAssertNotEqual(found.location, NSNotFound)
+
+        let fast = try dumpAfterEdit(insert: "", at: found.location, deleting: 5,
+                                     forceFullRender: false)
+        let full = try dumpAfterEdit(insert: "", at: found.location, deleting: 5,
+                                     forceFullRender: true)
+        XCTAssertEqual(fast.dump, full.dump)
+    }
+
+    // MARK: - The bail-outs
+
+    /// Each listed case must fall back to the full render rather than take the
+    /// fast path. Asserted on the flag, not inferred from timing.
+    private func assertBails(insert: String, at site: String, deleting: Int = 0,
+                             _ why: String) throws {
+        let (coordinator, tv) = makeEditor(Self.fixture())
+        try withExtendedLifetime(coordinator) {
+            let text = tv.string as NSString
+            let found = text.range(of: site)
+            XCTAssertNotEqual(found.location, NSNotFound, "fixture must contain \(site)")
+            let caret = found.location + found.length / 2
+            tv.insertText(insert, replacementRange: NSRange(location: caret, length: deleting))
+            XCTAssertFalse(coordinator.lastEditTookFastPath, why)
+        }
+    }
+
+    func test_bails_whenTheEditContainsANewline() throws {
+        try assertBails(insert: "\n", at: "prose with",
+                        "a newline moves block boundaries")
+    }
+
+    func test_bails_whenTheEditContainsAFenceCharacter() throws {
+        try assertBails(insert: "`", at: "prose with",
+                        "a backtick can open or close a fence")
+    }
+
+    func test_bails_whenTheEditContainsATilde() throws {
+        try assertBails(insert: "~", at: "prose with",
+                        "a tilde can open or close a fence")
+    }
+
+    /// A fence containing a BLANK LINE is the case `restyleBlock`'s
+    /// precondition genuinely fails on: `MarkdownReveal.blocks` splits on blank
+    /// lines regardless of fences, so the code span starts in one block and
+    /// covers several, and is bucketed only into the first. Re-attributing a
+    /// later one would clear its code styling with no span left to restore it.
+    ///
+    /// (An edit inside a fence with no blank line in it is NOT unsafe — the
+    /// span lies wholly inside one block — and is covered as an equivalence
+    /// site in `test_theFastPathProducesIdenticalAttributesToAFullRender`
+    /// instead. Bailing there too would be free correctness-wise but would
+    /// leave code blocks needlessly slow, and the checks already prove the
+    /// difference.)
+    func test_bails_whenAFenceSpansMultipleBlocks() {
+        let body = "intro\n\n```swift\nlet a = 1\n\nlet b = 2\n```\n\ntail\n"
+        let (coordinator, tv) = makeEditor(body)
+        withExtendedLifetime(coordinator) {
+            let found = (tv.string as NSString).range(of: "let b = 2")
+            XCTAssertNotEqual(found.location, NSNotFound)
+            tv.insertText("y", replacementRange: NSRange(location: found.location + 4, length: 0))
+            XCTAssertFalse(coordinator.lastEditTookFastPath,
+                           "a code span reaching past this block's ends bars the fast path")
+        }
+    }
+
+    /// A deletion that removes a newline, i.e. joins two blocks.
+    func test_bails_whenADeletionRemovesANewline() throws {
+        let (coordinator, tv) = makeEditor(Self.fixture())
+        withExtendedLifetime(coordinator) {
+            let found = (tv.string as NSString).range(of: "\n\n- a list item")
+            XCTAssertNotEqual(found.location, NSNotFound)
+            tv.insertText("", replacementRange: NSRange(location: found.location, length: 2))
+            XCTAssertFalse(coordinator.lastEditTookFastPath,
+                           "removing a blank line merges two blocks")
+        }
+    }
+
+    /// The structural check earns its keep here: typing a non-space character
+    /// onto an otherwise-blank line SPLITS one block into two without any
+    /// newline being involved, so the character test alone would not catch it.
+    /// The recomputed-segmentation comparison must.
+    func test_bails_whenTypingOnAWhitespaceOnlyLineResegmentsTheDocument() {
+        let (coordinator, tv) = makeEditor("alpha\n \nbeta\n\ngamma\n")
+        withExtendedLifetime(coordinator) {
+            // Onto the whitespace-only line, which currently ENDS a block.
+            tv.insertText("z", replacementRange: NSRange(location: 7, length: 0))
+            XCTAssertFalse(coordinator.lastEditTookFastPath,
+                           "the blank line stopped being blank, so the blocks moved")
+        }
+    }
+
+    /// And the mirror: an edit on a document the cache does not describe
+    /// (nothing to shift) must fall back.
+    func test_bails_whenTheCacheIsNotCurrent() {
+        let (coordinator, tv) = makeEditor("# Title\n\nprose here\n")
+        withExtendedLifetime(coordinator) {
+            // Text swapped underneath without re-styling: the cache now
+            // describes a string that is not on screen.
+            tv.string = "# Title\n\ndifferent prose entirely\n"
+            tv.setSelectedRange(NSRange(location: 12, length: 0))
+            tv.insertText("x", replacementRange: tv.selectedRange())
+            XCTAssertFalse(coordinator.lastEditTookFastPath,
+                           "spans that did not describe the pre-edit text cannot be shifted")
+        }
+    }
+
+    // MARK: - Contracts that must not have been weakened
+
+    /// The fast path must not have bought its speed with a parse.
+    func test_theFastPathStillCostsZeroParses() {
+        let (coordinator, tv) = makeEditor(Self.fixture())
+        withExtendedLifetime(coordinator) {
+            tv.setSelectedRange(NSRange(location: 200, length: 0))
+            MarkdownParseCounter.reset()
+            for character in "the quick brown fox" {
+                tv.insertText(String(character), replacementRange: tv.selectedRange())
+            }
+            XCTAssertEqual(MarkdownParseCounter.count, 0)
+            XCTAssertTrue(coordinator.lastEditTookFastPath)
+        }
+    }
+
+    /// And the debounced parse must still land a full, correct render on top —
+    /// the safety net that makes a mis-shift a frame rather than a document.
+    func test_theDebouncedParseStillLandsAfterAFastPathEdit() throws {
+        let (coordinator, tv) = makeEditor("# Title\n\nplain prose\n")
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            tv.setSelectedRange(NSRange(location: 15, length: 0))
+            tv.insertText("x", replacementRange: tv.selectedRange())
+            settle()
+            XCTAssertTrue(coordinator.styleCache.describes(tv.string),
+                          "the debounced parse must have refreshed the cache")
+            XCTAssertEqual(attributeDump(storage).isEmpty, false)
+        }
+    }
+}

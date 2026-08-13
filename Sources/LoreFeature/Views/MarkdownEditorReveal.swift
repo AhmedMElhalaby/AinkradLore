@@ -167,6 +167,12 @@ extension MarkdownEditor.Coordinator {
     /// milliseconds, is the thing being avoided there.
     func applyStyles() {
         guard let tv = textView else { return }
+        applyStylesCalls += 1
+        // The redundant-redraw guard — see `isRenderStale` in
+        // `MarkdownEditorEditPath.swift` for what it checks and why a keystroke
+        // reaches here at all.
+        if !isRenderStale(for: tv) { return }
+        applyStylesRenders += 1
         if !styleCache.describes(tv.string) {
             if tv.string.utf16.count <= MarkdownStyleCache.synchronousParseCap {
                 styleCache.reparse(tv.string)
@@ -242,6 +248,11 @@ extension MarkdownEditor.Coordinator {
         }
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
+        // LAST, and only here: what is on screen now, and what produced it.
+        // Recorded after every early-return-free path through this method, so
+        // the guard in `applyStyles` can never be told a render happened that
+        // did not.
+        renderedSnapshot = (tv.string, tokens)
     }
 
     /// `NSTextView`'s first-responder state, read live rather than cached —

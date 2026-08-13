@@ -44,6 +44,23 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
         return out.prefix(lines).joined(separator: "\n") + "\n"
     }
 
+    /// Retained for the length of the test — a released window takes its first
+    /// responder with it.
+    private var windows: [NSWindow] = []
+
+    override func tearDown() {
+        windows.removeAll()
+        super.tearDown()
+    }
+
+    /// WINDOWED, since the fix. The original version of this harness used a
+    /// detached `NSTextView` and measured 3.0 full renders per keystroke: one
+    /// real one from `textDidChange`, and two artifacts, because a text view
+    /// with no window posts `textDidBeginEditing`/`textDidEndEditing` around
+    /// every `insertText` and both route to a full render. Those two swamped
+    /// the very cost this file exists to measure. With a window and real
+    /// first-responder state, editing begins and ends once — which is also what
+    /// the app does — and a keystroke costs exactly what the editor charges it.
     private func makeEditor(_ text: String) -> (MarkdownEditor.Coordinator, NSTextView) {
         var stored = text
         let binding = Binding<String>(get: { stored }, set: { stored = $0 })
@@ -52,6 +69,11 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
         tv.isRichText = false
         tv.allowsUndo = true
         tv.delegate = coordinator
+        let window = NSWindow(contentRect: tv.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = tv
+        window.makeFirstResponder(tv)
+        windows.append(window)
         tv.string = text
         coordinator.textView = tv
         coordinator.applyStyles()
@@ -96,26 +118,20 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
                     }
                 }
                 let perKeystroke = elapsed / 20
-                // `revealIndexBuilds` is bumped once per `renderStyles()`, so
-                // this is literally "full-document renders per character".
-                //
-                // It reads 3 here and 2 in the shipping app, and the difference
-                // is a HARNESS artifact worth stating rather than hiding: a
-                // detached `NSTextView` with no window posts
-                // `textDidBeginEditing`/`textDidEndEditing` around EVERY
-                // `insertText`, and both route to a full render via
-                // `revealForSelectionChange`'s focus-changed branch. In the app
-                // editing begins and ends once per session; what happens there
-                // instead is `textDidChange` → `renderStyles`, followed by
-                // SwiftUI seeing the changed `text` binding and running
-                // `updateNSView`, which calls `applyStyles()` unconditionally —
-                // a second full render per character.
-                //
-                // Either way the unit of cost is one `renderStyles()`, so the
-                // per-render figure below is the portable number.
+                // `revealIndexBuilds` is bumped once per index build, which
+                // both the full render and the single-block fast path do. It is
+                // therefore no longer "full renders per keystroke" — that is
+                // what `MarkdownEditFastPathTests` asserts, on the flag — but a
+                // check that the edit path ran exactly once per character.
                 let renders = Double(coordinator.revealIndexBuilds - buildsBefore) / 20
-                print("TYPING-RENDERS lines=\(lines) full-renders-per-keystroke=\(renders) "
-                      + "per-render=\(String(format: "%.2f", perKeystroke / renders * 1000))ms")
+                // BEFORE, measured in the same run rather than quoted from a
+                // report: `textDidChange` used to call `renderStyles()`
+                // unconditionally, so the old per-keystroke cost was this
+                // keystroke plus exactly one whole-document render.
+                let fullRender = time { for _ in 0..<10 { coordinator.renderStyles() } } / 10
+                print("TYPING-RENDERS lines=\(lines) index-builds-per-keystroke=\(renders) "
+                      + "one-full-render=\(String(format: "%.2f", fullRender * 1000))ms "
+                      + "before≈\(String(format: "%.2f", (perKeystroke + fullRender) * 1000))ms")
                 print("TYPING-LAG lines=\(lines) "
                       + "utf16=\((tv.string as NSString).length) "
                       + "spans=\(coordinator.cachedSpansForTesting.count) "
@@ -123,6 +139,21 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
                       + "parses=\(MarkdownParseCounter.count)")
                 XCTAssertEqual(MarkdownParseCounter.count, 0,
                                "the burst must still cost zero parses")
+                XCTAssertTrue(coordinator.lastEditTookFastPath,
+                              "ordinary prose typing must take the single-block path")
+                // The improvement, asserted where the lag was unmistakable.
+                // A ratio, not a wall-clock ceiling, so it means the same thing
+                // on faster silicon than this was measured on.
+                // MEASURED ratios of full-render to keystroke, Debug: 3.5× at
+                // 1,000 lines, 3.6× at 2,000, 4.0× at 5,000. Asserted at 3×,
+                // which is comfortably below every one of them and still far
+                // above 1 — the number a regression to whole-document
+                // re-attribution would produce.
+                if lines >= 1_000 {
+                    XCTAssertLessThan(perKeystroke, fullRender / 3,
+                                      "at \(lines) lines a keystroke must cost far less than "
+                                      + "the whole-document render it used to do")
+                }
                 XCTAssertLessThan(perKeystroke, 1.0,
                                   "a single character must not cost a whole second")
             }

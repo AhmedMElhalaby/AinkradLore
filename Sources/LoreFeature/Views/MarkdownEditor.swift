@@ -327,6 +327,36 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// The embed-level analogue of `revealedBlockIndices`: if a caret
         /// move leaves this unchanged there is no embed work to do.
         var revealedEmbedSpans: Set<Int> = []
+        /// Whether the LAST text change was handled by the single-block fast
+        /// path rather than a full render. Exists so the bail-out cases can be
+        /// asserted directly instead of inferred from a timing — "it fell back"
+        /// is the claim, and a timing cannot make it.
+        /// Written only by `textDidChange` in `MarkdownEditorEditPath.swift`;
+        /// internal rather than `private(set)` because Swift has no cross-file
+        /// `private`, exactly as `styleCache` above.
+        var lastEditTookFastPath = false
+        /// What the last full `renderStyles()` pass actually painted, and from
+        /// what. The redundant-redraw guard in `applyStyles` compares against
+        /// it; `renderStyles` is the only writer, so it cannot claim a render
+        /// that did not happen.
+        ///
+        /// `nil` until the first render, which is why a fresh editor always
+        /// renders once.
+        var renderedSnapshot: (text: String, tokens: HostThemeTokens)?
+        /// How many times `applyStyles()` has been entered. Counts the CALLS,
+        /// not the renders — the two differ exactly when the entry point
+        /// decides it has nothing to do, which is the thing under measurement.
+        ///
+        /// Exists for the same reason `revealIndexBuilds` does: Task 10 could
+        /// establish by reading that `updateNSView` calls `applyStyles()`
+        /// unconditionally on every ancestor redraw, but "SwiftUI redraws this
+        /// per keystroke" is a claim about SwiftUI's scheduling, and reading
+        /// cannot settle it. See `MarkdownTypingLagBenchmark`.
+        var applyStylesCalls = 0
+        /// How many of those calls reached a full `renderStyles()`. The gap
+        /// between this and `applyStylesCalls` is what the redundant-render
+        /// guard buys.
+        var applyStylesRenders = 0
         /// How many times the index has been built. Exists so a test can pin
         /// the claim that a caret move never rebuilds it — the claim is the
         /// whole performance contract of the reveal path, and an earlier
@@ -353,7 +383,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// `textDidChange`. AppKit always pairs them, and anything that edits
         /// the storage WITHOUT the pair leaves the cache describing a stale
         /// string, which `applyStyles()` then repairs with a real parse.
-        private var pendingEdit: (range: NSRange, replacementLength: Int)?
+        /// Internal, not private: `shouldChangeTextIn` and `textDidChange` now
+        /// live in `MarkdownEditorEditPath.swift`, and Swift has no cross-file
+        /// `private`. Nothing outside that file touches it.
+        var pendingEdit: PendingEdit?
 
         var cachedSpansForTesting: [StyleSpan] { styleCache.spans }
         /// `nonisolated(unsafe)` only so `deinit` can unregister it. It is
@@ -391,42 +424,6 @@ public struct MarkdownEditor: NSViewRepresentable {
             parseGeneration += 1
             if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
             scrollObserver = nil
-        }
-
-        // MARK: - Text
-
-        /// Records WHERE the edit is about to happen, so `textDidChange` can
-        /// shift the cached spans instead of re-parsing. Never vetoes an edit.
-        ///
-        /// A nil `replacementString` is an attributes-only change: there is no
-        /// delta to shift by, so the cache is left to notice the mismatch.
-        public func textView(_ tv: NSTextView, shouldChangeTextIn affected: NSRange,
-                             replacementString: String?) -> Bool {
-            // `tv.string` is still the PRE-edit text here, which is the only
-            // moment the cache's currency can be checked against it. Spans that
-            // did not describe the text before the edit cannot be shifted into
-            // describing it after.
-            pendingEdit = styleCache.describes(tv.string)
-                ? replacementString.map { (affected, ($0 as NSString).length) }
-                : nil
-            return true
-        }
-
-        public func textDidChange(_ notification: Notification) {
-            guard let tv = textView else { return }
-            text.wrappedValue = tv.string
-            if let edit = pendingEdit {
-                styleCache.shift(editedRange: edit.range,
-                                 delta: edit.replacementLength - edit.range.length,
-                                 newText: tv.string)
-            }
-            pendingEdit = nil
-            // Renders the SHIFTED spans — no parse on the keystroke path. The
-            // real parse lands one debounce later.
-            renderStyles()
-            scheduleParse()
-            // The ONE place `completions` is called: a keystroke happened.
-            refreshCompletions()
         }
 
         /// Caret moved without the text changing (click, arrow key). Cheap and
@@ -510,7 +507,9 @@ public struct MarkdownEditor: NSViewRepresentable {
             return LinkCompletionContext.activePrefix(in: text, caret: caret)
         }
 
-        private func refreshCompletions() {
+        /// Internal for the same cross-file reason as `pendingEdit`: its one
+        /// caller, `textDidChange`, lives in `MarkdownEditorEditPath.swift`.
+        func refreshCompletions() {
             guard let tv = textView, let completions,
                   let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
