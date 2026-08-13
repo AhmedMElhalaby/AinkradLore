@@ -122,36 +122,29 @@ struct FolderTreeView: View {
     @ViewBuilder
     private func outlineBody(_ node: FolderNode, depth: Int) -> some View {
         if depth > 0 {
-            Button {
-                if expanded.contains(node.id) { expanded.remove(node.id) }
-                else { expanded.insert(node.id) }
-                store.setExpandedFolders(expanded)
-            } label: {
-                HStack(spacing: AinkradSpacing.xs) {
-                    AinkradIconGlyph(systemName: expanded.contains(node.id)
-                                     ? "chevron.down" : "chevron.right")
-                    Text(node.name)
-                }
-                .padding(.leading, CGFloat(depth) * 12)
-            }
-            .buttonStyle(.plain)
-            // Only a real folder gets a folder menu. `node.id` is a
-            // vault-RELATIVE path, so it is resolved against the live vault root
-            // rather than assumed absolute; with no vault there is no folder to
-            // rename and the menu is simply absent.
-            .ainkradContextMenu(folderURL(node).map { loreFolderMenuItems(folder: $0, ops: ops) } ?? [])
+            LoreSidebarRow.folder(
+                name: node.name, depth: depth - 1,
+                isExpanded: expanded.contains(node.id),
+                onToggle: {
+                    if expanded.contains(node.id) { expanded.remove(node.id) }
+                    else { expanded.insert(node.id) }
+                    store.setExpandedFolders(expanded)
+                })
+                // Only a real folder gets a folder menu. `node.id` is a
+                // vault-RELATIVE path, so it is resolved against the live vault
+                // root rather than assumed absolute; with no vault there is no
+                // folder to rename and the menu is simply absent.
+                .ainkradContextMenu(folderURL(node).map {
+                    loreFolderMenuItems(folder: $0, ops: ops)
+                } ?? [])
         }
         if depth == 0 || expanded.contains(node.id) {
             ForEach(node.documents, id: \.path) { row in
-                AinkradListRow(
+                LoreSidebarRow.document(
+                    row: row, depth: depth,
                     isSelected: selected?.path == row.path,
-                    onTap: { selected = row; onSelect(row) },
-                    leading: { AinkradIconGlyph(systemName: icon(for: row)) },
-                    title: row.title.isEmpty ? row.path.lastPathComponent : row.title,
-                    subtitle: nil,
-                    trailing: { EmptyView() })
-                .padding(.leading, CGFloat(depth + 1) * 12)
-                .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                    onTap: { selected = row; onSelect(row) })
+                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
             }
             ForEach(node.children) { child in outline(child, depth: depth + 1) }
         }
@@ -170,9 +163,5 @@ struct FolderTreeView: View {
     private func folderURL(_ node: FolderNode) -> URL? {
         guard let root = store.vaultRoot, node.id != "/" else { return nil }
         return root.appendingPathComponent(node.id)
-    }
-
-    private func icon(for row: IndexRow) -> String {
-        row.type == AttachmentEngine.identifier ? "doc" : "doc.text"
     }
 }
