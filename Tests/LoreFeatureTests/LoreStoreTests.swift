@@ -79,6 +79,22 @@ final class LoreStoreTests: XCTestCase {
         XCTAssertEqual(s2.defaultNoteFolder, "inbox")
     }
 
+    /// The collapse survives relaunch, like `sidebarMode` and
+    /// `expandedFolders` — a panel that reopens itself every launch is a
+    /// preference the app keeps forgetting.
+    func test_sidebarCollapsePersists() throws {
+        let root = tempDir()
+        let docs = FakeDocs()
+        let idx = root.appendingPathComponent(".index.sqlite")
+        let s = LoreStore(documents: docs, indexPath: idx)
+        try s.setVaultRootForTesting(root)
+        XCTAssertFalse(s.sidebarCollapsed, "a first launch shows the sidebar")
+        s.setSidebarCollapsed(true)
+
+        let reopened = LoreStore(documents: docs, indexPath: idx)
+        XCTAssertTrue(reopened.sidebarCollapsed)
+    }
+
     func test_rebuild_isRecursiveAndPrunesDeleted() throws {
         let root = tempDir(); let s = try makeStore(root)
         let sub = root.appendingPathComponent("nested")

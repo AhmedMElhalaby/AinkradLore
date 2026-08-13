@@ -11,6 +11,11 @@ struct TabBarView: View {
     /// The session whose close was REFUSED — `closeTab` returned false, meaning
     /// it still holds unsaved work and is still open. We keep the tab and ask.
     @State private var refused: DocumentSession?
+    @State private var hovering: DocumentSession.ID?
+
+    /// Tall enough that a `.sm`-padded tab plus its chamfer sits fully INSIDE
+    /// the bar. At the old 32 the chamfer was clipped by the bar's own edge.
+    private static let barHeight: CGFloat = 40
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -23,8 +28,9 @@ struct TabBarView: View {
                 }
             }
             .padding(.horizontal, AinkradSpacing.sm)
+            .padding(.vertical, AinkradSpacing.xs)
         }
-        .frame(height: 32)
+        .frame(height: Self.barHeight)
         .overlay(closeShortcut)
         .ainkradConfirmDialog(
             isPresented: refusalBinding,
@@ -39,7 +45,7 @@ struct TabBarView: View {
 
     @ViewBuilder
     private func tab(_ session: DocumentSession) -> some View {
-        HStack(spacing: AinkradSpacing.xs) {
+        HStack(spacing: AinkradSpacing.sm) {
             Text(session.title.isEmpty ? session.url.lastPathComponent : session.title)
                 .lineLimit(1)
             if session.isReadOnly {
@@ -49,14 +55,28 @@ struct TabBarView: View {
                 Circle().frame(width: 6, height: 6)
                     .foregroundStyle(theme.tokens.accentSecondary)
             }
-            AinkradIconButton(systemName: "xmark") { attemptClose(session) }
+            closeButton(session)
         }
         .padding(.horizontal, AinkradSpacing.sm)
-        .padding(.vertical, AinkradSpacing.xs)
-        .background(store.selectedTab === session
-                    ? theme.tokens.accentSecondary.opacity(0.2) : .clear)
+        .padding(.vertical, AinkradSpacing.sm)
+        .background(ChamferShape(cut: 6).fill(store.selectedTab === session
+                    ? theme.tokens.accentSecondary.opacity(0.2) : .clear))
+        .clipShape(ChamferShape(cut: 6))
         .contentShape(Rectangle())
         .onTapGesture { store.selectTab(session); onSelect(session) }
+    }
+
+    /// A secondary affordance, not a peer of the tab's own name. Reaches full
+    /// contrast only on hover; its HIT TARGET stays 20×20 either way, because
+    /// smaller on screen must not mean harder to hit.
+    @ViewBuilder
+    private func closeButton(_ session: DocumentSession) -> some View {
+        AinkradIconGlyph(systemName: "xmark", size: 9)
+            .foregroundStyle(theme.tokens.foreground.opacity(hovering == session.id ? 0.9 : 0.45))
+            .frame(width: 20, height: 20)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 ? session.id : nil }
+            .onTapGesture { attemptClose(session) }
     }
 
     /// ⌘W closes the selected tab, through the same refusal path as the button.

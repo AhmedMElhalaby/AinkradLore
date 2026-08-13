@@ -35,6 +35,10 @@ public final class LoreStore {
     /// resolution decision.
     public private(set) var showAllFiles: Bool = false
 
+    /// Whether the sidebar is hidden. Persisted the same way as `sidebarMode`:
+    /// a per-vault-host UI choice, not per-document.
+    public private(set) var sidebarCollapsed: Bool = false
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -59,6 +63,7 @@ public final class LoreStore {
     private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
     private static let outlinePanelExpandedKey = "outlinePanelExpanded"
     private static let showAllFilesKey = "showAllFiles"
+    private static let sidebarCollapsedKey = "sidebarCollapsed"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -87,6 +92,10 @@ public final class LoreStore {
         if let data = documents.data(forKey: Self.showAllFilesKey),
            let raw = String(data: data, encoding: .utf8) {
             showAllFiles = raw == "true"
+        }
+        if let data = documents.data(forKey: Self.sidebarCollapsedKey),
+           let text = String(data: data, encoding: .utf8) {
+            sidebarCollapsed = (text == "1")
         }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
@@ -129,6 +138,12 @@ public final class LoreStore {
         showAllFiles = show
         documents.setData((show ? "true" : "false").data(using: .utf8),
                           forKey: Self.showAllFilesKey)
+    }
+
+    public func setSidebarCollapsed(_ collapsed: Bool) {
+        sidebarCollapsed = collapsed
+        documents.setData((collapsed ? "1" : "0").data(using: .utf8),
+                          forKey: Self.sidebarCollapsedKey)
     }
 
     // MARK: - Index facade
