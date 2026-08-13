@@ -161,19 +161,15 @@ extension MarkdownThemeTests {
         XCTAssertNotEqual(inset.width, 16, accuracy: 0.01)
     }
 
-    /// Requirement 2. On a wide window the column is capped at `maxMeasure`
-    /// and CENTRED — equal margins, not a left-hugging column.
-    func test_aWideViewCapsAndCentresTheTextColumnAtMaxMeasure() throws {
+    /// Task 5: the column is LEFT-ALIGNED, not centred. `containerInset` keeps
+    /// the theme's flat inset even on a wide window — the measure cap now
+    /// lives on the text container's width, not on this inset.
+    func test_aWideViewKeepsTheFlatInsetRatherThanCentring() {
         let theme = MarkdownTheme(tokens: TestTokens.make())
-        let measure = try XCTUnwrap(theme.maxMeasure)
         let width: CGFloat = 2000
         let inset = MarkdownEditorLayout.containerInset(forViewWidth: width, theme: theme)
-        XCTAssertEqual(width - inset.width * 2, measure, accuracy: 0.5,
-                       "the column must be capped at the theme's measure")
-        XCTAssertGreaterThan(inset.width, theme.contentInset,
-                             "a wide view must grow its margins, not its column")
-        // Centred: one symmetric inset means left margin == right margin.
-        XCTAssertEqual(inset.width, width - (inset.width + measure), accuracy: 0.5)
+        XCTAssertEqual(inset.width, theme.contentInset, accuracy: 0.01,
+                       "a wide view must not grow its inset to centre the column")
     }
 
     /// The cap must never make the margin smaller than the theme's floor on a
@@ -184,26 +180,29 @@ extension MarkdownThemeTests {
         XCTAssertEqual(inset.width, theme.contentInset, accuracy: 0.01)
     }
 
-    /// Requirement 3. Once the column is centred, the drawn decoration has to
-    /// move with it. Two coordinate sources (`textContainerOrigin` for the
-    /// text rect, `textContainerInset` for the panel x) agree only while the
-    /// column is NOT centred, so this is the test that pins them together.
-    func test_backgroundGeometryTracksTheTextColumnWhenCentred() {
+    /// Task 5: the drawn decoration still has to track the column now that it
+    /// is left-aligned. `columnX` reads `textContainerOrigin` (unchanged);
+    /// `columnWidth` now reads the container's own capped size, set the same
+    /// way `MarkdownEditor` sets it, rather than deriving a symmetric margin
+    /// from the view's bounds.
+    func test_backgroundGeometryTracksTheTextColumnWhenLeftAligned() throws {
         let theme = MarkdownTheme(tokens: TestTokens.make())
+        let measure = try XCTUnwrap(theme.maxMeasure)
         let width: CGFloat = 2000
         let tv = LinkTextView(frame: NSRect(x: 0, y: 0, width: width, height: 400))
         tv.isHorizontallyResizable = false
-        tv.textContainer?.widthTracksTextView = true
         tv.textContainerInset = MarkdownEditorLayout.containerInset(forViewWidth: width,
                                                                     theme: theme)
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.size = NSSize(width: measure, height: .greatestFiniteMagnitude)
         let x = MarkdownBlockBackgrounds.columnX(in: tv)
         let columnWidth = MarkdownBlockBackgrounds.columnWidth(in: tv)
         XCTAssertEqual(x, tv.textContainerOrigin.x, accuracy: 0.5,
                        "decoration must use the same origin the text rects use")
-        XCTAssertGreaterThan(x, theme.contentInset,
-                             "a centred column starts well right of the bare inset")
-        XCTAssertEqual(width - (x + columnWidth), x, accuracy: 2,
-                       "the panel must be as far from the right edge as from the left")
+        XCTAssertEqual(x, theme.contentInset, accuracy: 0.5,
+                       "a left-aligned column starts at the bare inset, not centred")
+        XCTAssertEqual(columnWidth, measure, accuracy: 0.5,
+                       "the panel's width must come from the capped container, not the view")
     }
 
     /// Requirement 6. `MarkdownParagraphStyles` has taken a depth since Task 5;

@@ -11,26 +11,18 @@ import AinkradAppKit
 /// declared and unused.
 enum MarkdownEditorLayout {
 
-    /// The `textContainerInset` for a text view `viewWidth` points wide.
+    /// Left-aligns the measured text column for a view `width` points wide.
     ///
-    /// One symmetric inset does both jobs. `widthTracksTextView` makes the
-    /// container `viewWidth - 2 * inset`, so growing the inset both narrows the
-    /// column and CENTRES it — there is no separate centring step to get wrong,
-    /// and no second coordinate source for `MarkdownBlockBackgrounds` to
-    /// disagree with.
-    ///
-    /// The theme's inset is a FLOOR, never a target: on a narrow pane the cap
-    /// is not binding and the margin must not shrink below what makes the text
-    /// comfortable.
+    /// This used to CENTRE the column — `(viewWidth - maxMeasure) / 2` — which
+    /// on a wide pane pushed the text into the middle of the window and left a
+    /// large empty margin before every line. The measure cap is what keeps
+    /// lines readable; centering was never doing that work, and the column now
+    /// simply starts where the pane starts.
     static func containerInset(forViewWidth viewWidth: CGFloat,
                                theme: MarkdownTheme) -> NSSize {
-        var horizontal = theme.contentInset
-        if let measure = theme.maxMeasure {
-            horizontal = max(horizontal, (viewWidth - measure) / 2)
-        }
         // Clamped so a view narrower than twice the inset still leaves a
         // positive column rather than an inverted one.
-        horizontal = min(horizontal, max(0, viewWidth / 2 - 1))
+        let horizontal = min(theme.contentInset, max(0, viewWidth / 2 - 1))
         return NSSize(width: horizontal, height: theme.contentInset)
     }
 }

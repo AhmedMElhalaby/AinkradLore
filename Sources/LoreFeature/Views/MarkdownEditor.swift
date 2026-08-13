@@ -95,6 +95,13 @@ public struct MarkdownEditor: NSViewRepresentable {
         // initial size, then maintained by `onWidthChange`.
         tv.textContainerInset = MarkdownEditorLayout.containerInset(
             forViewWidth: tv.bounds.width, theme: MarkdownTheme(tokens: tokens))
+        // The measure cap now belongs to the text container's width rather
+        // than to the inset — the inset only ever left-aligns the column.
+        if let measure = MarkdownTheme(tokens: tokens).maxMeasure {
+            tv.textContainer?.widthTracksTextView = false
+            tv.textContainer?.size = NSSize(width: measure,
+                                            height: .greatestFiniteMagnitude)
+        }
         tv.onWidthChange = { [weak coordinator = context.coordinator] width in
             coordinator?.applyContainerInset(forWidth: width)
         }
