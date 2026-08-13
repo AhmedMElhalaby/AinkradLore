@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import LoreFeature
 
@@ -26,32 +27,50 @@ final class MarkdownRevealTests: XCTestCase {
                        "unfocused: nothing reveals")
     }
 
-    /// The end-to-end regression for the resign-first-responder timing bug:
-    /// `NSWindow` does not reassign `_firstResponder` away from `tv` until
-    /// AFTER `tv.resignFirstResponder()` RETURNS, so a hook invoked from
-    /// inside that call which reads focus LIVE (`window.firstResponder === tv`)
-    /// always still sees `true` and the markers never hide. Every other test
-    /// in this file calls `MarkdownReveal.hiddenMarkers`/`revealForSelectionChange`
-    /// directly and therefore CANNOT fail this way — none of them go through
-    /// `resignFirstResponder` at all, which is the only genuinely assertable
-    /// seam for this bug. This test wires the real
-    /// `LinkTextView.onResignFirstResponder`/`onBecomeFirstResponder` closures
-    /// exactly as `MarkdownEditor.makeNSView` does, puts the view in a REAL
-    /// window, and drives a real `makeFirstResponder` call.
+    /// The end-to-end regression for the resign-first-responder timing bug,
+    /// driven through the REAL production wiring rather than a re-declared
+    /// copy of it.
+    ///
+    /// A first version of this test built its own `LinkTextView` and assigned
+    /// `onResignFirstResponder`/`onBecomeFirstResponder` closures by hand,
+    /// hardcoding the `forcedFocus` argument inline. That proved the
+    /// MECHANISM (`revealForSelectionChange(forcedFocus:)` does what it
+    /// says) but not the actual bug, which was never in the mechanism — it
+    /// was in what `MarkdownEditor.makeNSView` passes to it. That version
+    /// would keep passing even if the production closure at
+    /// `MarkdownEditor.swift`'s `tv.onResignFirstResponder` were reverted
+    /// back to a bare `revealForSelectionChange()`, because the test's own
+    /// hardcoded `false` would still be there doing the work. It only failed
+    /// if `forcedFocus` were deleted outright — a compile error, not a
+    /// regression.
+    ///
+    /// This version instead hosts the real `MarkdownEditor` SwiftUI view in
+    /// an `NSHostingView` inside a REAL `NSWindow` — the same technique
+    /// `RichTextEngineTests.hostedWindow` already uses in this target — which
+    /// forces SwiftUI to actually run `MarkdownEditor.makeNSView` and
+    /// produce the real `LinkTextView` with the real `onResignFirstResponder`/
+    /// `onBecomeFirstResponder` closures attached, exactly as the app wires
+    /// them. Reverting `MarkdownEditor.swift`'s resign/become closures back
+    /// to unforced calls turns THIS test red — confirmed locally (see the
+    /// fix report).
     @MainActor
     func test_resigningFirstResponderActuallyHidesTheMarkers() throws {
         let body = "**bold**\n\nplain paragraph"
-        let (tv, coordinator) = editor(body, caret: 3)
-        tv.onResignFirstResponder = { [weak coordinator] in
-            coordinator?.revealForSelectionChange(forcedFocus: false)
-        }
-        tv.onBecomeFirstResponder = { [weak coordinator] in
-            coordinator?.revealForSelectionChange(forcedFocus: true)
-        }
+        let hosting = NSHostingView(rootView: AnyView(
+            MarkdownEditor(text: .constant(body), tokens: TestTokens.make())))
+        hosting.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
-                              styleMask: [.borderless], backing: .buffered, defer: false)
-        window.contentView = tv
+        let tv = try XCTUnwrap(Self.findLinkTextView(in: hosting),
+                               "MarkdownEditor.makeNSView must have produced a LinkTextView by now")
+        // A caret click, not a test-only shortcut: `setSelectedRange` is the
+        // same call AppKit itself makes on a mouse click, and — because
+        // `tv.delegate` is the real coordinator, wired by the real
+        // `makeNSView` — it drives the real `textViewDidChangeSelection`.
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
 
         let storage = try XCTUnwrap(tv.textStorage)
         func markerSize() -> CGFloat {
@@ -69,6 +88,17 @@ final class MarkdownRevealTests: XCTestCase {
 
         XCTAssertTrue(window.makeFirstResponder(tv))
         XCTAssertGreaterThan(markerSize(), 1, "regaining first responder must reveal them again")
+    }
+
+    /// Depth-first search of a REAL, SwiftUI-produced view hierarchy for the
+    /// `LinkTextView` `MarkdownEditor.makeNSView` builds — it sits inside an
+    /// `NSScrollView`'s `documentView`, several levels below the hosting view.
+    private static func findLinkTextView(in view: NSView) -> LinkTextView? {
+        if let tv = view as? LinkTextView { return tv }
+        for subview in view.subviews {
+            if let found = findLinkTextView(in: subview) { return found }
+        }
+        return nil
     }
 
     /// Unfocused hides EVERY marker, not merely the caret's block.

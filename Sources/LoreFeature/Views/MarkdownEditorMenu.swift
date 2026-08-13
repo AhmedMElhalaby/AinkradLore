@@ -29,21 +29,29 @@ extension LinkTextView {
 /// Suggestions for the word at a UTF-16 offset, via the shared checker.
 enum EditorSpellCheck {
 
-    /// `checkSpelling(of:startingAt:)` and `guesses(forWordRange:in:...)` both
-    /// take the WORD as its own string, not the document, so the range each
-    /// one wants is relative to that isolated word — `0..<word.length` — not
-    /// to the document offset `WordAtPoint` found it at.
+    /// `checkSpelling`/`guesses` both take the WORD as its own string, not
+    /// the document, so the range each one wants is relative to that
+    /// isolated word — `0..<word.length` — not to the document offset
+    /// `WordAtPoint` found it at.
     ///
-    /// - Parameter tag: `NSTextView.spellCheckerDocumentTag` — see
-    ///   `MarkdownEditorMenuActions.ignoreSpelling`'s doc comment for why a
-    ///   real, consistently-used tag matters here (`guesses` doesn't strictly
-    ///   need one, but using the SAME tag everywhere is what keeps "ignore"
-    ///   and "get suggestions" talking about the same spell document).
+    /// - Parameter tag: `NSTextView.spellCheckerDocumentTag`, fed to ALL
+    ///   THREE calls that take one — this gating check, `guesses` below, and
+    ///   `MarkdownEditorMenuActions.ignoreSpelling`. The tagLESS
+    ///   `checkSpelling(of:startingAt:)` overload consults no spell
+    ///   document at all, so a word the user had just told the checker to
+    ///   ignore (via that SAME tag) was still reported misspelled here and
+    ///   the menu went right on offering replacements for it — the ignore
+    ///   action worked, but nothing downstream of it ever asked the document
+    ///   that held the answer. Using the tag-aware overload is what makes
+    ///   this call agree with the other two rather than merely sit next to
+    ///   them.
     static func suggestions(at offset: Int, in text: String, tag: Int) -> (NSRange, [String])? {
         guard let range = WordAtPoint.range(in: text, atUTF16: offset) else { return nil }
         let word = (text as NSString).substring(with: range)
         let checker = NSSpellChecker.shared
-        let misspelled = checker.checkSpelling(of: word, startingAt: 0)
+        let misspelled = checker.checkSpelling(of: word, startingAt: 0, language: nil,
+                                               wrap: false, inSpellDocumentWithTag: tag,
+                                               wordCount: nil)
         guard misspelled.location != NSNotFound else { return (range, []) }
         let guesses = checker.guesses(forWordRange: NSRange(location: 0, length: (word as NSString).length),
                                       in: word, language: nil,
