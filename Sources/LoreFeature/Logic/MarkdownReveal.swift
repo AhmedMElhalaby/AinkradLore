@@ -49,14 +49,20 @@ enum MarkdownReveal {
     }
 
     /// The marker ranges that must be COLLAPSED for this selection.
+    ///
+    /// `isFocused` is first-responder state, not selection state. An unfocused
+    /// text view KEEPS its selection, so without this the block the caret was
+    /// last in stayed revealed and kept showing its syntax to a reader who was
+    /// no longer editing. Reveal exists to let you edit the markers you are
+    /// standing in; standing in them requires focus.
     static func hiddenMarkers(spans: [StyleSpan], selection: NSRange,
-                              blocks: [Range<Int>]) -> [Range<Int>] {
+                              blocks: [Range<Int>], isFocused: Bool) -> [Range<Int>] {
         let selected = selection.location..<(selection.location + max(selection.length, 0))
         // A block is revealed when the selection touches it. `<=` on both ends
         // so a caret resting exactly at a boundary reveals rather than flickers.
-        let revealed = blocks.filter {
+        let revealed = isFocused ? blocks.filter {
             selected.lowerBound <= $0.upperBound && $0.lowerBound <= selected.upperBound
-        }
+        } : []
         return spans.compactMap { span in
             guard case .marker = span.kind else { return nil }
             let inRevealed = revealed.contains {

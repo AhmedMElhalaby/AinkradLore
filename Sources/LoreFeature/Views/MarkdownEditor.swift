@@ -36,6 +36,15 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// See `EditorContext.writeDroppedFile`. `nil` disables the drop
     /// destination.
     let writeDroppedFile: (@MainActor (URL) -> String?)?
+    /// Fired on every selection change with the live document text and
+    /// selection — the host's context-menu wiring (`MarkdownEditorMenu.swift`)
+    /// uses this to keep its menu items current without reaching back into
+    /// AppKit itself. See that file for why the items cannot be computed at
+    /// the exact moment of a right-click.
+    let onSelectionChange: (@MainActor (String, NSRange) -> Void)?
+    /// Called once the text view exists, with the actions its own context
+    /// menu should run. See `MarkdownEditorMenu.swift`.
+    let registerMenuActions: (@MainActor (EditorMenuActions) -> Void)?
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
@@ -46,7 +55,9 @@ public struct MarkdownEditor: NSViewRepresentable {
                 scrollTarget: Binding<Int?> = .constant(nil),
                 allowsTaskToggle: Bool = false,
                 writePastedImage: (@MainActor (Data, String) -> String?)? = nil,
-                writeDroppedFile: (@MainActor (URL) -> String?)? = nil) {
+                writeDroppedFile: (@MainActor (URL) -> String?)? = nil,
+                onSelectionChange: (@MainActor (String, NSRange) -> Void)? = nil,
+                registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
@@ -55,6 +66,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.allowsTaskToggle = allowsTaskToggle
         self.writePastedImage = writePastedImage
         self.writeDroppedFile = writeDroppedFile
+        self.onSelectionChange = onSelectionChange
+        self.registerMenuActions = registerMenuActions
     }
 
     public func makeNSView(context: Context) -> NSScrollView {
@@ -120,6 +133,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         // or to a control that does not end editing).
         tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.completionPanel.hide()
+            coordinator?.revealForSelectionChange()
         }
         tv.onPasteImage = { [weak coordinator = context.coordinator] data, name in
             coordinator?.insertAttachment(fromPastedImage: data, name: name) ?? false
@@ -143,8 +157,13 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
+        context.coordinator.onSelectionChange = onSelectionChange
         tv.string = text
         context.coordinator.applyStyles()
+        // The text view exists now, so the closures that need it (cut, copy,
+        // the formatting actions) can be built once, here, rather than
+        // re-derived on every menu presentation.
+        registerMenuActions?(MarkdownEditorMenuActions.build(for: tv))
         return scroll
     }
 
@@ -176,6 +195,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
+        context.coordinator.onSelectionChange = onSelectionChange
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
@@ -238,6 +258,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// has stopped styling rather than leaving the user to wonder.
         weak var stylingNotice: NSTextField?
         let completionPanel = LinkCompletionPanel()
+        /// See `MarkdownEditor.onSelectionChange`.
+        var onSelectionChange: (@MainActor (String, NSRange) -> Void)?
 
         /// Long enough that a burst of typing is one parse, short enough that
         /// the picture settles within a pause the user does not notice.
@@ -265,6 +287,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// reveal state in full: if a caret move leaves this unchanged there is
         /// nothing to redraw, which is what keeps arrowing free of styling work.
         var revealedBlockIndices: Range<Int> = 0..<0
+        /// First-responder state as of the last reveal pass. Compared against
+        /// the LIVE state on every selection-change notification so a focus
+        /// change — which does not move the caret and therefore would not flip
+        /// `revealedBlockIndices` — still forces a full re-apply rather than
+        /// being short-circuited away as "same selection, nothing to do".
+        var lastRevealFocus = true
         /// Every `.embed` span's position, source range and owning block, for
         /// the CURRENT text. Rebuilt only when the text is re-rendered, from
         /// the same pass that builds `revealIndex` — never on a caret move.
@@ -394,14 +422,26 @@ public struct MarkdownEditor: NSViewRepresentable {
             // construction — see `revealForSelectionChange`, which parses
             // nothing and usually does no work at all.
             revealForSelectionChange()
+            if let tv = textView { onSelectionChange?(tv.string, tv.selectedRange()) }
             guard completionPanel.isVisible, let tv = textView else { return }
             if activePrefix(in: tv) == nil { completionPanel.hide() }
         }
 
         /// Focus left the editor. Nothing the list offers can be accepted from
         /// here, so it must not keep floating.
+        ///
+        /// Also re-applies reveal: `NSTextView` posts this as it loses first
+        /// responder, and reveal is a function of focus, so a focus change
+        /// must re-apply it exactly as a selection change does.
         public func textDidEndEditing(_ notification: Notification) {
             completionPanel.hide()
+            revealForSelectionChange()
+        }
+
+        /// `NSTextView` posts this as it gains first responder — the other
+        /// half of `textDidEndEditing`'s reveal re-apply.
+        public func textDidBeginEditing(_ notification: Notification) {
+            revealForSelectionChange()
         }
 
         // MARK: - Keys the popup owns, and only while it is open

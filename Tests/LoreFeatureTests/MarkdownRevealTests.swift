@@ -4,11 +4,36 @@ import XCTest
 
 final class MarkdownRevealTests: XCTestCase {
 
-    private func hidden(_ body: String, selection: NSRange) -> [Range<Int>] {
+    private func hidden(_ body: String, selection: NSRange,
+                        isFocused: Bool = true) -> [Range<Int>] {
         let model = MarkdownDocumentModel(body: body)
         return MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                             selection: selection,
-                                            blocks: MarkdownReveal.blocks(in: body))
+                                            blocks: MarkdownReveal.blocks(in: body),
+                                            isFocused: isFocused)
+    }
+
+    /// An unfocused editor KEEPS its selection, so the block the caret was
+    /// last in stayed revealed and its syntax stayed on screen. Reveal is a
+    /// function of the selection AND of first-responder state: unfocused means
+    /// no revealed block at all.
+    func test_losingFocusHidesEveryMarker() {
+        let body = "**bold**\n\nplain paragraph"
+        let caretInsideTheSpan = NSRange(location: 3, length: 0)
+        XCTAssertTrue(hidden(body, selection: caretInsideTheSpan).isEmpty,
+                      "focused: the caret's own block reveals")
+        XCTAssertFalse(hidden(body, selection: caretInsideTheSpan, isFocused: false).isEmpty,
+                       "unfocused: nothing reveals")
+    }
+
+    /// Unfocused hides EVERY marker, not merely the caret's block.
+    func test_unfocusedHidesMarkersInEveryBlock() {
+        let body = "**a**\n\n*b*\n\n`c`"
+        let model = MarkdownDocumentModel(body: body)
+        let markers = model.styleSpans.filter { if case .marker = $0.kind { return true } else { return false } }
+        XCTAssertEqual(hidden(body, selection: NSRange(location: 2, length: 0),
+                              isFocused: false).count,
+                       markers.count)
     }
 
     /// With the caret elsewhere, every marker is hidden — this is the clean
@@ -182,7 +207,7 @@ extension MarkdownRevealTests {
             MarkdownStyleRenderer.collapse(
                 MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                              selection: NSRange(location: caret, length: 0),
-                                             blocks: blocks),
+                                             blocks: blocks, isFocused: true),
                 in: storage)
             return (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?
                 .pointSize ?? -1

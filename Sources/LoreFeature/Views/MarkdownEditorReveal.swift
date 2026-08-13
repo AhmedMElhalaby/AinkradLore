@@ -238,6 +238,19 @@ extension MarkdownEditor.Coordinator {
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
     }
 
+    /// `NSTextView`'s first-responder state, read live rather than cached —
+    /// a cached copy can go stale the moment focus moves elsewhere.
+    ///
+    /// A text view with NO window (as in unit tests that build one directly,
+    /// never inserting it into a window) has no first-responder concept at
+    /// all; treated as focused rather than unfocused, since "no window" is
+    /// not the same claim as "lost focus to something else".
+    var isTextViewFocused: Bool {
+        guard let tv = textView else { return false }
+        guard let window = tv.window else { return true }
+        return window.firstResponder === tv
+    }
+
     /// Hides the markers of every block the selection is NOT in, and records
     /// the reveal state that `revealForSelectionChange` compares against.
     ///
@@ -245,11 +258,14 @@ extension MarkdownEditor.Coordinator {
     private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?) {
         guard let tv = textView else { return }
         let selection = tv.selectedRange()
-        revealedBlockIndices = MarkdownEditorReveal.revealedBlockIndices(
-            revealIndex.blocks, selection: selection)
+        let focused = isTextViewFocused
+        lastRevealFocus = focused
+        revealedBlockIndices = focused ? MarkdownEditorReveal.revealedBlockIndices(
+            revealIndex.blocks, selection: selection) : 0..<0
         var hidden = MarkdownReveal.hiddenMarkers(spans: styleCache.spans,
                                                   selection: selection,
-                                                  blocks: revealIndex.blocks)
+                                                  blocks: revealIndex.blocks,
+                                                  isFocused: focused)
         if let window {
             hidden = hidden.filter {
                 $0.lowerBound < NSMaxRange(window) && $0.upperBound > window.location
@@ -282,8 +298,18 @@ extension MarkdownEditor.Coordinator {
         guard let tv = textView, let storage = tv.textStorage else { return }
         guard !revealIndex.blocks.isEmpty else { return }
         let selection = tv.selectedRange()
-        let now = MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
-                                                            selection: selection)
+        let focused = isTextViewFocused
+        // A focus change does not move the caret, so `now == was` below would
+        // otherwise short-circuit an unfocus away as "same selection, nothing
+        // to do" and leave the caret's block visibly revealed to a reader who
+        // is no longer editing. Route it through the full render instead,
+        // which is the only path that knows how to re-hide markers wholesale.
+        guard focused == lastRevealFocus else {
+            renderStyles()
+            return
+        }
+        let now = focused ? MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
+                                                            selection: selection) : 0..<0
         let was = revealedBlockIndices
         guard now != was else {
             // NOT a block flip — but an embed's reveal is a SPAN-level

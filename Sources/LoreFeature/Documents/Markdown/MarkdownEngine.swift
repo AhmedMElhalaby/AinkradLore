@@ -127,6 +127,12 @@ private struct MarkdownDocumentEditor: View {
     /// see `MarkdownEngine.outline`'s doc comment for why that is what
     /// `outline` offsets already are.
     @State private var scrollTarget: Int?
+    /// The editor's own context-menu wiring — see `MarkdownEditorMenu.swift`.
+    /// Kept current by `onSelectionChange`, not by the click itself; see that
+    /// file's doc comment for why.
+    @State private var menuSelection = NSRange(location: 0, length: 0)
+    @State private var menuSuggestions: [String] = []
+    @State private var menuActions = EditorMenuActions.noop
 
     var body: some View {
         VStack(spacing: 0) {
@@ -175,8 +181,17 @@ private struct MarkdownDocumentEditor: View {
                            // one — see `EditorContext.isReadOnly`.
                            allowsTaskToggle: !ctx.isReadOnly,
                            writePastedImage: ctx.writePastedImage,
-                           writeDroppedFile: ctx.writeDroppedFile)
+                           writeDroppedFile: ctx.writeDroppedFile,
+                           onSelectionChange: { text, selection in
+                               menuSelection = selection
+                               menuSuggestions = EditorSpellCheck.suggestions(
+                                   at: selection.location, in: text)?.1 ?? []
+                           },
+                           registerMenuActions: { menuActions = $0 })
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
+                .ainkradContextMenu(EditorMenuItems.build(selection: menuSelection,
+                                                          suggestions: menuSuggestions,
+                                                          actions: menuActions))
         }
         .background(ctx.theme.tokens.background)
         .onAppear {
