@@ -33,7 +33,13 @@ enum EditorSpellCheck {
     /// take the WORD as its own string, not the document, so the range each
     /// one wants is relative to that isolated word — `0..<word.length` — not
     /// to the document offset `WordAtPoint` found it at.
-    static func suggestions(at offset: Int, in text: String) -> (NSRange, [String])? {
+    ///
+    /// - Parameter tag: `NSTextView.spellCheckerDocumentTag` — see
+    ///   `MarkdownEditorMenuActions.ignoreSpelling`'s doc comment for why a
+    ///   real, consistently-used tag matters here (`guesses` doesn't strictly
+    ///   need one, but using the SAME tag everywhere is what keeps "ignore"
+    ///   and "get suggestions" talking about the same spell document).
+    static func suggestions(at offset: Int, in text: String, tag: Int) -> (NSRange, [String])? {
         guard let range = WordAtPoint.range(in: text, atUTF16: offset) else { return nil }
         let word = (text as NSString).substring(with: range)
         let checker = NSSpellChecker.shared
@@ -41,8 +47,41 @@ enum EditorSpellCheck {
         guard misspelled.location != NSNotFound else { return (range, []) }
         let guesses = checker.guesses(forWordRange: NSRange(location: 0, length: (word as NSString).length),
                                       in: word, language: nil,
-                                      inSpellDocumentWithTag: 0) ?? []
+                                      inSpellDocumentWithTag: tag) ?? []
         return (range, guesses)
+    }
+}
+
+/// Debounces the spelling lookup off the caret-move hot path.
+///
+/// `NSSpellChecker` is backed by a system service — every `checkSpelling`/
+/// `guesses` call is an XPC round trip — and `onSelectionChange` fires on
+/// EVERY arrow key. Running it there directly is exactly the caret-path cost
+/// this module has explicit benchmark discipline against elsewhere (see
+/// `MarkdownRevealBenchmark.test_movingTheCaretCostsZeroParses`). There is no
+/// public hook to compute this only when the menu is about to be shown (see
+/// this file's top-level doc comment on `.ainkradContextMenu`'s presentation
+/// constraints), so this mirrors the cheapest correct alternative already
+/// used in this codebase for the same class of problem —
+/// `MarkdownEditor.Coordinator.scheduleParse`'s debounce — rather than
+/// inventing a second scheme: a burst of caret movement costs one lookup,
+/// after it settles, not one per keypress.
+@MainActor
+final class MenuSuggestionDebouncer {
+    static let interval: TimeInterval = 0.15
+
+    private var timer: Timer?
+
+    func schedule(text: String, offset: Int, tag: Int,
+                 apply: @escaping @MainActor ([String]) -> Void) {
+        timer?.invalidate()
+        let t = Timer(timeInterval: Self.interval, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                apply(EditorSpellCheck.suggestions(at: offset, in: text, tag: tag)?.1 ?? [])
+            }
+        }
+        timer = t
+        RunLoop.main.add(t, forMode: .common)
     }
 }
 
@@ -62,9 +101,16 @@ enum MarkdownEditorMenuActions {
             code: { MarkdownEditorTyping.toggleWrap(in: tv, with: "`") },
             heading: { toggleHeading(in: tv) },
             replace: { replacement in replaceWordAtCaret(in: tv, with: replacement) },
+            // Tag 0 means "no spell document" — `ignoreWord` would silently
+            // retain nothing, and the menu item would do nothing while
+            // claiming to work. `tv.spellCheckerDocumentTag` is the view's
+            // own real, stable tag (AppKit allocates and owns its lifetime),
+            // and it is the SAME tag `EditorSpellCheck.suggestions` is fed
+            // via `onSelectionChange` — so an ignored word actually stops
+            // this document's future lookups from re-suggesting it.
             ignoreSpelling: {
                 if let word = wordAtCaret(in: tv) {
-                    NSSpellChecker.shared.ignoreWord(word, inSpellDocumentWithTag: 0)
+                    NSSpellChecker.shared.ignoreWord(word, inSpellDocumentWithTag: tv.spellCheckerDocumentTag)
                 }
             },
             learnSpelling: {

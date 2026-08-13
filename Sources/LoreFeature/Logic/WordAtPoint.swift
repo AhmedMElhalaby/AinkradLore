@@ -22,20 +22,18 @@ enum WordAtPoint {
         guard offset >= 0, offset <= ns.length, ns.length > 0 else { return nil }
 
         // An offset at a word's START belongs to that word (the character AT
-        // it is a word character — no fallback needed). The ONE fallback is
-        // the very END of the document: an offset there has no character of
-        // its own to test, so it falls back to the one before it, letting a
-        // click right after the last word on the page still hit that word.
-        // Anywhere else, an offset sitting in whitespace or punctuation is
-        // simply not in a word — it does NOT fall back to the word that ends
-        // there, or "the quikc" at offset 3 (the space right after "the")
-        // would wrongly resolve to "the".
+        // it is a word character — no fallback needed). Otherwise — end of
+        // document, or whitespace/punctuation — fall back to the character
+        // BEFORE the offset: a caret sitting right after a word (the exact
+        // position typing leaves it in, and the end of the document is a
+        // special case of this) belongs to that word too. The fallback
+        // stops at a genuine gap: if the character before is ALSO not a word
+        // character (two spaces, the start of a line), there is truly no
+        // word here and this returns nil rather than reaching further back.
         var probe = offset
-        if probe == ns.length {
+        if probe == ns.length || !isWordCharacter(ns.character(at: probe)) {
             guard probe > 0, isWordCharacter(ns.character(at: probe - 1)) else { return nil }
             probe -= 1
-        } else if !isWordCharacter(ns.character(at: probe)) {
-            return nil
         }
 
         var start = probe

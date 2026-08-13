@@ -34,6 +34,11 @@ final class LinkTextView: NSTextView {
     /// Fires whenever focus leaves this view, including the routes that do not
     /// produce a `textDidEndEditing`.
     var onResignFirstResponder: (@MainActor () -> Void)?
+    /// Fires whenever this view GAINS focus. `textDidBeginEditing` is not a
+    /// substitute — `NSText` posts that only on the first EDIT after becoming
+    /// first responder, not on becoming it, so clicking back into the editor
+    /// without typing anything fired nothing at all until this was added.
+    var onBecomeFirstResponder: (@MainActor () -> Void)?
     /// Fires when the view's WIDTH changes, which is the only input to where
     /// the text column sits — see `MarkdownEditorLayout`. Height changes are
     /// ignored, and a height change is what most `setFrameSize` calls are: the
@@ -182,6 +187,12 @@ final class LinkTextView: NSTextView {
         let resigned = super.resignFirstResponder()
         if resigned { onResignFirstResponder?() }
         return resigned
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onBecomeFirstResponder?() }
+        return became
     }
 
     override func mouseDown(with event: NSEvent) {

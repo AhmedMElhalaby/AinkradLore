@@ -133,6 +133,11 @@ private struct MarkdownDocumentEditor: View {
     @State private var menuSelection = NSRange(location: 0, length: 0)
     @State private var menuSuggestions: [String] = []
     @State private var menuActions = EditorMenuActions.noop
+    /// Off the caret-move hot path — see `MenuSuggestionDebouncer`'s doc
+    /// comment. `@State`, not a plain `let`: this struct is reconstructed on
+    /// every render, and only `@State` storage survives that across renders,
+    /// the same reason `scrollTarget` above is `@State` and not a local var.
+    @State private var menuSuggestionDebouncer = MenuSuggestionDebouncer()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -182,10 +187,15 @@ private struct MarkdownDocumentEditor: View {
                            allowsTaskToggle: !ctx.isReadOnly,
                            writePastedImage: ctx.writePastedImage,
                            writeDroppedFile: ctx.writeDroppedFile,
-                           onSelectionChange: { text, selection in
+                           onSelectionChange: { text, selection, tag in
+                               // Cheap — a struct copy, no XPC — so this part
+                               // stays synchronous with the caret.
                                menuSelection = selection
-                               menuSuggestions = EditorSpellCheck.suggestions(
-                                   at: selection.location, in: text)?.1 ?? []
+                               // The XPC-backed part is debounced: see
+                               // `MenuSuggestionDebouncer`'s doc comment.
+                               menuSuggestionDebouncer.schedule(
+                                   text: text, offset: selection.location, tag: tag
+                               ) { menuSuggestions = $0 }
                            },
                            registerMenuActions: { menuActions = $0 })
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }

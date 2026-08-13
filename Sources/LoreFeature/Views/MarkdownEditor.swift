@@ -41,7 +41,7 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// uses this to keep its menu items current without reaching back into
     /// AppKit itself. See that file for why the items cannot be computed at
     /// the exact moment of a right-click.
-    let onSelectionChange: (@MainActor (String, NSRange) -> Void)?
+    let onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)?
     /// Called once the text view exists, with the actions its own context
     /// menu should run. See `MarkdownEditorMenu.swift`.
     let registerMenuActions: (@MainActor (EditorMenuActions) -> Void)?
@@ -56,7 +56,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 allowsTaskToggle: Bool = false,
                 writePastedImage: (@MainActor (Data, String) -> String?)? = nil,
                 writeDroppedFile: (@MainActor (URL) -> String?)? = nil,
-                onSelectionChange: (@MainActor (String, NSRange) -> Void)? = nil,
+                onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
@@ -133,7 +133,14 @@ public struct MarkdownEditor: NSViewRepresentable {
         // or to a control that does not end editing).
         tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.completionPanel.hide()
-            coordinator?.revealForSelectionChange()
+            // `false`, not a live read: at this point `NSWindow` has not yet
+            // reassigned first responder away from `tv` (see
+            // `revealForSelectionChange`'s doc comment), so a live read would
+            // still answer "focused" and never hide the markers.
+            coordinator?.revealForSelectionChange(forcedFocus: false)
+        }
+        tv.onBecomeFirstResponder = { [weak coordinator = context.coordinator] in
+            coordinator?.revealForSelectionChange(forcedFocus: true)
         }
         tv.onPasteImage = { [weak coordinator = context.coordinator] data, name in
             coordinator?.insertAttachment(fromPastedImage: data, name: name) ?? false
@@ -162,8 +169,17 @@ public struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.applyStyles()
         // The text view exists now, so the closures that need it (cut, copy,
         // the formatting actions) can be built once, here, rather than
-        // re-derived on every menu presentation.
-        registerMenuActions?(MarkdownEditorMenuActions.build(for: tv))
+        // re-derived on every menu presentation. Deferred to the next
+        // run-loop turn, same as `scrollTarget` above and for the same
+        // reason: `makeNSView` runs INSIDE a SwiftUI view-update pass, and
+        // writing a `@State` from there — which is what this callback does —
+        // is the "modifying state during view update" trap: it produces the
+        // purple runtime warning and leaves the first render's menu actions
+        // at `.noop`.
+        if let registerMenuActions {
+            let actions = MarkdownEditorMenuActions.build(for: tv)
+            DispatchQueue.main.async { registerMenuActions(actions) }
+        }
         return scroll
     }
 
@@ -259,7 +275,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         weak var stylingNotice: NSTextField?
         let completionPanel = LinkCompletionPanel()
         /// See `MarkdownEditor.onSelectionChange`.
-        var onSelectionChange: (@MainActor (String, NSRange) -> Void)?
+        var onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)?
 
         /// Long enough that a burst of typing is one parse, short enough that
         /// the picture settles within a pause the user does not notice.
@@ -422,7 +438,9 @@ public struct MarkdownEditor: NSViewRepresentable {
             // construction — see `revealForSelectionChange`, which parses
             // nothing and usually does no work at all.
             revealForSelectionChange()
-            if let tv = textView { onSelectionChange?(tv.string, tv.selectedRange()) }
+            if let tv = textView {
+                onSelectionChange?(tv.string, tv.selectedRange(), tv.spellCheckerDocumentTag)
+            }
             guard completionPanel.isVisible, let tv = textView else { return }
             if activePrefix(in: tv) == nil { completionPanel.hide() }
         }
@@ -432,14 +450,22 @@ public struct MarkdownEditor: NSViewRepresentable {
         ///
         /// Also re-applies reveal: `NSTextView` posts this as it loses first
         /// responder, and reveal is a function of focus, so a focus change
-        /// must re-apply it exactly as a selection change does.
+        /// must re-apply it exactly as a selection change does. `false` is
+        /// passed explicitly rather than read live — see
+        /// `tv.onResignFirstResponder`'s doc comment above; this delegate
+        /// method is posted from the same `resignFirstResponder` call, before
+        /// `NSWindow` has reassigned first responder away from `tv`.
         public func textDidEndEditing(_ notification: Notification) {
             completionPanel.hide()
-            revealForSelectionChange()
+            revealForSelectionChange(forcedFocus: false)
         }
 
-        /// `NSTextView` posts this as it gains first responder — the other
-        /// half of `textDidEndEditing`'s reveal re-apply.
+        /// `NSText` posts this only on the first EDIT after becoming first
+        /// responder, not on becoming it — `tv.onBecomeFirstResponder` above
+        /// is what actually covers "focus arrived here". Kept for the case
+        /// this DOES fire (a click that both focuses and edits in one step):
+        /// the live read is correct here, since `becomeFirstResponder` has
+        /// already returned by the time any edit can happen.
         public func textDidBeginEditing(_ notification: Notification) {
             revealForSelectionChange()
         }

@@ -21,8 +21,40 @@ final class EditorMenuTests: XCTestCase {
         XCTAssertEqual((text as NSString).substring(with: range ?? NSRange()), "quikc")
     }
 
+    /// A GENUINE gap — two spaces, so the offset sits squarely between two
+    /// non-word characters and does not fall back to either neighbouring
+    /// word. (A SINGLE space right after a word is the caret-after-typing
+    /// case, and DOES resolve — see
+    /// `test_caretDirectlyAfterAWordMidDocumentBelongsToThatWord` below.)
     func test_whitespaceHasNoWord() {
-        XCTAssertNil(WordAtPoint.range(in: "the quikc", atUTF16: 3))
+        XCTAssertNil(WordAtPoint.range(in: "the  quikc", atUTF16: 4))
+    }
+
+    /// The start of a line is the other genuine gap: nothing precedes it to
+    /// fall back to.
+    func test_startOfLineHasNoWord() {
+        XCTAssertNil(WordAtPoint.range(in: "\nquikc", atUTF16: 0))
+    }
+
+    /// The actual shape of "type a word, then right-click it": the caret
+    /// sits on the space right AFTER the word, not inside it, because typing
+    /// advances the caret past the last character typed. Without falling
+    /// back to the preceding character here, the editor's context menu would
+    /// offer no spelling suggestions for the ordinary case of a
+    /// mid-document typo, and only ever work at the very end of a document —
+    /// which was this project's actual defect until this test was added.
+    func test_caretDirectlyAfterAWordMidDocumentBelongsToThatWord() {
+        let text = "the quikc mistake"
+        let range = try? XCTUnwrap(WordAtPoint.range(in: text, atUTF16: 9))
+        XCTAssertEqual((text as NSString).substring(with: range ?? NSRange()), "quikc")
+    }
+
+    /// The same caret-after-typing case, but for the last word on the page —
+    /// there is no character AT the offset at all here, only one before it.
+    func test_caretAtEndOfDocumentBelongsToTheLastWord() {
+        let text = "the quikc"
+        let range = try? XCTUnwrap(WordAtPoint.range(in: text, atUTF16: (text as NSString).length))
+        XCTAssertEqual((text as NSString).substring(with: range ?? NSRange()), "quikc")
     }
 
     func test_anEmptyDocumentHasNoWord() {

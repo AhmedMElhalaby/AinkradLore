@@ -26,6 +26,51 @@ final class MarkdownRevealTests: XCTestCase {
                        "unfocused: nothing reveals")
     }
 
+    /// The end-to-end regression for the resign-first-responder timing bug:
+    /// `NSWindow` does not reassign `_firstResponder` away from `tv` until
+    /// AFTER `tv.resignFirstResponder()` RETURNS, so a hook invoked from
+    /// inside that call which reads focus LIVE (`window.firstResponder === tv`)
+    /// always still sees `true` and the markers never hide. Every other test
+    /// in this file calls `MarkdownReveal.hiddenMarkers`/`revealForSelectionChange`
+    /// directly and therefore CANNOT fail this way — none of them go through
+    /// `resignFirstResponder` at all, which is the only genuinely assertable
+    /// seam for this bug. This test wires the real
+    /// `LinkTextView.onResignFirstResponder`/`onBecomeFirstResponder` closures
+    /// exactly as `MarkdownEditor.makeNSView` does, puts the view in a REAL
+    /// window, and drives a real `makeFirstResponder` call.
+    @MainActor
+    func test_resigningFirstResponderActuallyHidesTheMarkers() throws {
+        let body = "**bold**\n\nplain paragraph"
+        let (tv, coordinator) = editor(body, caret: 3)
+        tv.onResignFirstResponder = { [weak coordinator] in
+            coordinator?.revealForSelectionChange(forcedFocus: false)
+        }
+        tv.onBecomeFirstResponder = { [weak coordinator] in
+            coordinator?.revealForSelectionChange(forcedFocus: true)
+        }
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = tv
+
+        let storage = try XCTUnwrap(tv.textStorage)
+        func markerSize() -> CGFloat {
+            (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize ?? -1
+        }
+
+        XCTAssertTrue(window.makeFirstResponder(tv))
+        XCTAssertGreaterThan(markerSize(), 1, "focused: the caret's own block is revealed")
+
+        // Resigns to the WINDOW itself — always a valid first responder, so
+        // this exercises the real `resignFirstResponder` call without
+        // needing a second view to hand focus to.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertLessThan(markerSize(), 0.1, "resigning first responder must hide the markers")
+
+        XCTAssertTrue(window.makeFirstResponder(tv))
+        XCTAssertGreaterThan(markerSize(), 1, "regaining first responder must reveal them again")
+    }
+
     /// Unfocused hides EVERY marker, not merely the caret's block.
     func test_unfocusedHidesMarkersInEveryBlock() {
         let body = "**a**\n\n*b*\n\n`c`"

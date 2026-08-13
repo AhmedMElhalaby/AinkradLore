@@ -181,7 +181,13 @@ extension MarkdownEditor.Coordinator {
     }
 
     /// Applies the cached spans. No parse, ever.
-    func renderStyles() {
+    ///
+    /// `forcedFocus` overrides the live first-responder read for callers that
+    /// already KNOW the answer and cannot trust a live read at this exact
+    /// moment — see `revealForSelectionChange`'s doc comment on why
+    /// `resignFirstResponder`'s own callback is exactly such a moment. `nil`
+    /// (every other caller) reads live, as before.
+    func renderStyles(forcedFocus: Bool? = nil) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let window = styleCache.isOverViewportCap
             ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
@@ -211,7 +217,7 @@ extension MarkdownEditor.Coordinator {
         // doc comment for who reads it and why a fresh scan per render is safe.
         documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)
             ?? .leftToRight
-        collapseHiddenMarkers(in: storage, window: window)
+        collapseHiddenMarkers(in: storage, window: window, forcedFocus: forcedFocus)
         // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
         // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see
         // `EmbedRendering.swift`'s doc comment on the chip pill), collapsed
@@ -254,11 +260,13 @@ extension MarkdownEditor.Coordinator {
     /// Hides the markers of every block the selection is NOT in, and records
     /// the reveal state that `revealForSelectionChange` compares against.
     ///
-    /// The whole-document version, run only as part of a full render.
-    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?) {
+    /// The whole-document version, run only as part of a full render. See
+    /// `renderStyles`'s doc comment for `forcedFocus`.
+    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?,
+                                       forcedFocus: Bool? = nil) {
         guard let tv = textView else { return }
         let selection = tv.selectedRange()
-        let focused = isTextViewFocused
+        let focused = forcedFocus ?? isTextViewFocused
         lastRevealFocus = focused
         revealedBlockIndices = focused ? MarkdownEditorReveal.revealedBlockIndices(
             revealIndex.blocks, selection: selection) : 0..<0
@@ -294,18 +302,28 @@ extension MarkdownEditor.Coordinator {
     /// ordinary prose crosses one every few keypresses; the full path would
     /// have restyled the note each time. Block ranges depend only on the TEXT
     /// and are rebuilt only when the text is rendered.
-    func revealForSelectionChange() {
+    /// `forcedFocus`: pass the KNOWN state rather than let this read live
+    /// when the caller is invoked from inside `resignFirstResponder` — at
+    /// that point `NSWindow` has not yet reassigned `_firstResponder` away
+    /// from `tv` (it does so only after `resignFirstResponder` RETURNS), so
+    /// a live read of `window.firstResponder === tv` still answers `true`
+    /// and this whole focus-changed branch never triggers. A deferred
+    /// `DispatchQueue.main.async` read would also see the post-reassignment
+    /// value, but passing the already-known answer is simpler and doesn't
+    /// leave a frame where the markers are wrong. `nil` (the ordinary
+    /// selection-change path) reads live, as before.
+    func revealForSelectionChange(forcedFocus: Bool? = nil) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         guard !revealIndex.blocks.isEmpty else { return }
         let selection = tv.selectedRange()
-        let focused = isTextViewFocused
+        let focused = forcedFocus ?? isTextViewFocused
         // A focus change does not move the caret, so `now == was` below would
         // otherwise short-circuit an unfocus away as "same selection, nothing
         // to do" and leave the caret's block visibly revealed to a reader who
         // is no longer editing. Route it through the full render instead,
         // which is the only path that knows how to re-hide markers wholesale.
         guard focused == lastRevealFocus else {
-            renderStyles()
+            renderStyles(forcedFocus: focused)
             return
         }
         let now = focused ? MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
