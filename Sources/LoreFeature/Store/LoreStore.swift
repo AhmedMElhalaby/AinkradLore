@@ -5,27 +5,32 @@ import AinkradAppKit
 @MainActor
 @Observable
 public final class LoreStore {
+    // Persisted preferences are `internal(set)`, not `private(set)`: their
+    // setters live in `LoreStore+Preferences.swift` and `private(set)` is
+    // file-scoped. All are plain stored values with no `didSet` and no
+    // invariant to guard, and the setters remain their only writers.
+
     /// Relative subfolder (under the vault root) where ⌘N quick-capture writes
     /// new notes. Empty string == the vault root itself.
-    public private(set) var defaultNoteFolder: String = ""
+    public internal(set) var defaultNoteFolder: String = ""
 
     /// Sidebar layout choice: folder tree or the flat, searchable list.
     public enum SidebarMode: String, Sendable { case tree, all }
 
-    public private(set) var sidebarMode: SidebarMode = .tree
+    public internal(set) var sidebarMode: SidebarMode = .tree
     /// Folder ids (relative paths under the vault root) currently expanded in
     /// `FolderTreeView`. Persisted so returning to a vault restores the tree
     /// the user left open, rather than collapsing everything.
-    public private(set) var expandedFolders: Set<String> = []
+    public internal(set) var expandedFolders: Set<String> = []
 
     /// Whether `BacklinksPanel` is expanded or collapsed, persisted the same
     /// way as `sidebarMode`: a per-vault-host UI choice, not per-document, so
     /// one toggle sticks across every note the user opens.
-    public private(set) var backlinksPanelExpanded: Bool = true
+    public internal(set) var backlinksPanelExpanded: Bool = true
 
     /// Whether `OutlineSection` is expanded or collapsed. Same shape and same
     /// reasoning as `backlinksPanelExpanded`.
-    public private(set) var outlinePanelExpanded: Bool = true
+    public internal(set) var outlinePanelExpanded: Bool = true
 
     /// "Show all files" — OFF by default, so a non-document attachment (a
     /// `.zip`, a stray binary, an OAuth credentials file) is hidden from the
@@ -33,16 +38,16 @@ public final class LoreStore {
     /// owner opts in. See `DocumentVisibility` for what "hidden" does and
     /// does not mean — it is a browse-list filter only, never an indexing or
     /// resolution decision.
-    public private(set) var showAllFiles: Bool = false
+    public internal(set) var showAllFiles: Bool = false
 
     /// Whether the sidebar is hidden. Persisted the same way as `sidebarMode`:
     /// a per-vault-host UI choice, not per-document.
-    public private(set) var sidebarCollapsed: Bool = false
+    public internal(set) var sidebarCollapsed: Bool = false
 
     /// The reader's preferences for the writing surface — see `EditorSettings`
     /// for why the editor owns these rather than inheriting them from the host
     /// theme.
-    public private(set) var editorSettings: EditorSettings = .default
+    public internal(set) var editorSettings: EditorSettings = .default
 
     /// The one file `trash(_:)` most recently moved to the Trash, and where
     /// macOS put it — the whole of what `undoTrash()` needs to put it back.
@@ -76,7 +81,10 @@ public final class LoreStore {
         public let name: String
     }
 
-    private let documents: PluginDocumentStore
+    /// Internal, not private: the persisted-preference setters live in
+    /// `LoreStore+Preferences.swift`, and Swift's `private` is file-scoped.
+    /// Still closed outside the module.
+    let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
     /// 500-line ceiling.
@@ -97,14 +105,6 @@ public final class LoreStore {
     /// and Swift has no cross-file `private`.
     var openMTimes: [String: Date] = [:]
 
-    private static let defaultFolderKey = "defaultNoteFolder"
-    private static let sidebarModeKey = "sidebarMode"
-    private static let expandedFoldersKey = "expandedFolders"
-    private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
-    private static let outlinePanelExpandedKey = "outlinePanelExpanded"
-    private static let showAllFilesKey = "showAllFiles"
-    private static let sidebarCollapsedKey = "sidebarCollapsed"
-    private static let editorSettingsKey = "editorSettings"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -150,66 +150,6 @@ public final class LoreStore {
         }
     }
 
-    /// Persist the editor's own display preferences.
-    public func setEditorSettings(_ settings: EditorSettings) {
-        editorSettings = settings
-        if let data = try? JSONEncoder().encode(settings) {
-            documents.setData(data, forKey: Self.editorSettingsKey)
-        }
-    }
-
-    /// ⌘+ / ⌘− / ⌘0.
-    public func zoomEditor(by step: Int) {
-        setEditorSettings(editorSettings.zoomed(by: step))
-    }
-
-    public func resetEditorZoom() {
-        setEditorSettings(editorSettings.zoomReset())
-    }
-
-    /// Persist the sidebar's folder-tree-vs-flat-list choice.
-    public func setSidebarMode(_ mode: SidebarMode) {
-        sidebarMode = mode
-        documents.setData(mode.rawValue.data(using: .utf8), forKey: Self.sidebarModeKey)
-    }
-
-    /// Persist which folders are expanded in `FolderTreeView`.
-    public func setExpandedFolders(_ folders: Set<String>) {
-        expandedFolders = folders
-        documents.setData(folders.sorted().joined(separator: "\n").data(using: .utf8),
-                          forKey: Self.expandedFoldersKey)
-    }
-
-    /// Persist the backlinks panel's collapsed/expanded state.
-    public func setBacklinksPanelExpanded(_ expanded: Bool) {
-        backlinksPanelExpanded = expanded
-        documents.setData((expanded ? "true" : "false").data(using: .utf8),
-                          forKey: Self.backlinksPanelExpandedKey)
-    }
-
-    /// Persist the outline panel's collapsed/expanded state.
-    public func setOutlinePanelExpanded(_ expanded: Bool) {
-        outlinePanelExpanded = expanded
-        documents.setData((expanded ? "true" : "false").data(using: .utf8),
-                          forKey: Self.outlinePanelExpandedKey)
-    }
-
-    /// Persist the "Show all files" setting. Takes effect immediately: both
-    /// `FolderTreeView` and `NoteListView` read `showAllFiles` live through
-    /// `DocumentVisibility.visibleRows` on every redraw, so flipping this
-    /// needs no reindex and no relaunch — the index never changes shape, only
-    /// what of it gets drawn.
-    public func setShowAllFiles(_ show: Bool) {
-        showAllFiles = show
-        documents.setData((show ? "true" : "false").data(using: .utf8),
-                          forKey: Self.showAllFilesKey)
-    }
-
-    public func setSidebarCollapsed(_ collapsed: Bool) {
-        sidebarCollapsed = collapsed
-        documents.setData((collapsed ? "1" : "0").data(using: .utf8),
-                          forKey: Self.sidebarCollapsedKey)
-    }
 
     // MARK: - Index facade
 
@@ -371,8 +311,8 @@ public final class LoreStore {
 
     // MARK: - Tabs
 
-    public private(set) var tabs: [DocumentSession] = []
-    public private(set) var selectedTab: DocumentSession?
+    public internal(set) var tabs: [DocumentSession] = []
+    public internal(set) var selectedTab: DocumentSession?
     /// Set when the last open attempt failed. The UI renders the fallback
     /// viewer from this rather than silently doing nothing — a file the list
     /// shows must always produce a visible response when clicked.
@@ -419,56 +359,6 @@ public final class LoreStore {
         recordVisit(session.url)
     }
 
-    // MARK: - Warm sessions
-
-    /// How many documents stay loaded in memory at once.
-    ///
-    /// With the tab strip gone, `tabs` is no longer a list the user reads — it
-    /// is a CACHE of documents that are still open behind the one on screen.
-    /// Keeping them warm is the decision that makes single-document navigation
-    /// safe: following a `[[link]]` never has to flush or close the document
-    /// you came from, so it can never hit `closeTab`'s unsaved-work refusal
-    /// mid-navigation, and per-document dirty state survives a round trip.
-    ///
-    /// Eight is a judgement, not a measurement: enough that Back through a
-    /// chain of links finds every document still loaded (with its scroll
-    /// position and undo stack intact), few enough that a long session does
-    /// not accumulate unbounded `DocumentSession`s, each holding a parsed
-    /// document and a file watcher's worth of state.
-    static let warmSessionLimit = 8
-
-    /// Marks `session` as most-recently-used.
-    ///
-    /// `tabs` is kept in LRU order — least recent first — which is only
-    /// possible now that nothing renders it as a strip. Reordering a visible
-    /// tab bar under the user would have been unacceptable; reordering a
-    /// cache is invisible.
-    private func touch(_ session: DocumentSession) {
-        guard let index = tabs.firstIndex(where: { $0 === session }) else { return }
-        tabs.append(tabs.remove(at: index))
-    }
-
-    /// Drops the coldest sessions once over the limit.
-    ///
-    /// REFUSES to evict anything that would lose work: the selected document,
-    /// anything dirty, anything in conflict, and anything whose last save
-    /// failed. The limit is therefore a target rather than a guarantee — with
-    /// nine dirty documents open, nine stay open. That is the correct trade:
-    /// a cache that silently discards unsaved edits to honour a size bound is
-    /// the exact class of bug this codebase spends most of its comments
-    /// preventing.
-    private func evictColdSessions() {
-        guard tabs.count > Self.warmSessionLimit else { return }
-        var overflow = tabs.count - Self.warmSessionLimit
-        for session in tabs where overflow > 0 {
-            guard session !== selectedTab,
-                  !session.isDirty, !session.conflict, session.lastSaveError == nil
-            else { continue }
-            session.cancelPendingSave()
-            tabs.removeAll { $0 === session }
-            overflow -= 1
-        }
-    }
 
     // MARK: - History
 
@@ -478,56 +368,10 @@ public final class LoreStore {
     /// looking at". In a vault, that is almost always a LINEAR trail (follow a
     /// link, read, come back), which a stack models exactly and a strip models
     /// only by accident of ordering.
-    public private(set) var history: [URL] = []
+    public internal(set) var history: [URL] = []
     /// Where in `history` the open document sits. Nil before anything opens.
-    public private(set) var historyIndex: Int?
+    public internal(set) var historyIndex: Int?
 
-    public var canGoBack: Bool { (historyIndex ?? 0) > 0 }
-    public var canGoForward: Bool {
-        guard let index = historyIndex else { return false }
-        return index + 1 < history.count
-    }
-
-    /// Records a visit, truncating any forward entries.
-    ///
-    /// Truncation is what makes Forward mean something: after going Back and
-    /// then opening something new, the trail you abandoned is not somewhere
-    /// you can return to — the same rule every browser follows, and the
-    /// absence of it is how a forward stack turns into a list of places the
-    /// user has no memory of choosing.
-    ///
-    /// Re-visiting the CURRENT document records nothing: clicking the open
-    /// note in the sidebar is not navigation, and treating it as such fills
-    /// the stack with duplicates that make Back appear broken.
-    private func recordVisit(_ url: URL) {
-        let key = Self.pathKey(url)
-        if let index = historyIndex, history.indices.contains(index),
-           Self.pathKey(history[index]) == key {
-            return
-        }
-        if let index = historyIndex, index + 1 < history.count {
-            history.removeSubrange((index + 1)...)
-        }
-        history.append(url)
-        historyIndex = history.count - 1
-    }
-
-    /// Opens the previously visited document.
-    @discardableResult
-    public func goBack() -> Bool {
-        guard canGoBack, let index = historyIndex else { return false }
-        historyIndex = index - 1
-        open(url: history[index - 1], recordingHistory: false)
-        return true
-    }
-
-    @discardableResult
-    public func goForward() -> Bool {
-        guard canGoForward, let index = historyIndex else { return false }
-        historyIndex = index + 1
-        open(url: history[index + 1], recordingHistory: false)
-        return true
-    }
 
     /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
     /// 500ms debounce, so a tab closed immediately after a keystroke could
@@ -588,11 +432,6 @@ public final class LoreStore {
             .sorted()
     }
 
-    /// Persist the default new-note subfolder (relative to the vault root).
-    public func setDefaultNoteFolder(_ relative: String) {
-        defaultNoteFolder = relative
-        documents.setData(relative.data(using: .utf8), forKey: Self.defaultFolderKey)
-    }
 
     /// Switching vaults is a teardown of the old one, not just a new root:
     /// tabs, selection and `openError` all point INTO the previous vault, and
