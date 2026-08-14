@@ -38,7 +38,14 @@ struct LoreRootView: View {
         HStack(spacing: 0) {
             if !store.sidebarCollapsed {
                 sidebar
-                    .frame(width: 280)
+                    .frame(width: LoreMetrics.sidebarWidth)
+                    // Surface hierarchy: the sidebar is CHROME and sits on
+                    // `surface`, the editor is CONTENT and stays on
+                    // `background`. Every one of these was `background`
+                    // before, which is why the window read as one
+                    // undifferentiated field with a list floating in it —
+                    // `surface` went entirely unused in the app.
+                    .background(theme.tokens.surface)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             VStack(spacing: 0) {
@@ -72,6 +79,29 @@ struct LoreRootView: View {
         }
         .background(theme.tokens.background)
         .environment(\.ainkradTheme, theme.tokens)
+        // Mounted ONCE, at the surface root, so every toast in Lore stacks in
+        // the same corner regardless of which view raised it. Must sit ABOVE
+        // `loreSidebarOperations` below, whose `LoreNoticeBridge` reads the
+        // center this injects.
+        .ainkradToastHost()
+        // ⌘Z undoes the last confirmed delete. Zero-sized and hidden, the same
+        // pattern `TabBarView.closeShortcut` uses for ⌘W.
+        //
+        // Mounted only while there IS something to undo, for the reason
+        // `DocumentPane`'s Esc button documents: `.keyboardShortcut` is
+        // dispatched at `performKeyEquivalent` time, before `keyDown` reaches
+        // the first responder, so an unconditional claim on ⌘Z would steal
+        // undo from the text editor — where ⌘Z means "undo my typing" and is
+        // far more likely to be what the user meant.
+        .overlay {
+            if ops.canUndoTrash {
+                Button("Undo delete") { ops.undoLastTrash() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+        }
         // Attached at the surface ROOT: `ainkradConfirmDialog` dims and centers
         // within the view it modifies, so attaching it to the 280pt sidebar
         // would scope a destructive confirmation to a narrow column.
@@ -153,7 +183,7 @@ struct LoreRootView: View {
         } else if let session = store.selectedTab {
             // Identity is the session's stable id — NOT its url, which changes
             // when the session adopts a "save a copy" resolution.
-            DocumentPane(store: store, session: session, theme: theme)
+            DocumentPane(store: store, session: session, theme: theme, ops: ops)
                 .id(session.id)
         } else {
             switch Self.emptyState(for: store) {

@@ -23,6 +23,7 @@ struct BacklinksPanel: View {
     @State private var unresolved: [UnresolvedLink] = []
     /// Why creating a note for an unresolved link failed, when it did.
     @State private var createFailure: String?
+    @Environment(\.ainkradToastCenter) private var toasts
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.xs) {
@@ -77,12 +78,14 @@ struct BacklinksPanel: View {
         }
         .padding(AinkradSpacing.sm)
         .background(theme.tokens.background)
-        // The same "Not done" sheet `DocumentPane` shows for a refused create.
-        // This button used to swallow every failure in a `try?` and do nothing
-        // visible at all.
-        .sheet(isPresented: Binding(get: { createFailure != nil },
-                                    set: { if !$0 { createFailure = nil } })) {
-            MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
+        // A toast, matching `DocumentPane`'s create-failure treatment — see the
+        // reasoning there. This button used to swallow every failure in a
+        // `try?` and do nothing visible at all; it is still visible, just no
+        // longer modal.
+        .onChange(of: createFailure) { _, failure in
+            guard let failure else { return }
+            createFailure = nil
+            toasts.show(failure, status: .danger)
         }
         .onAppear { refresh() }
         .onChange(of: url) { refresh() }

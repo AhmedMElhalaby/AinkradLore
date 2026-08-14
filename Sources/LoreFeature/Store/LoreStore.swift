@@ -39,6 +39,38 @@ public final class LoreStore {
     /// a per-vault-host UI choice, not per-document.
     public private(set) var sidebarCollapsed: Bool = false
 
+    /// The one file `trash(_:)` most recently moved to the Trash, and where
+    /// macOS put it — the whole of what `undoTrash()` needs to put it back.
+    ///
+    /// ONE deep, deliberately. This is the undo behind a toast that lives for
+    /// three seconds, not a general undo stack: the honest scope of "you just
+    /// did that, take it back" is the last action, and a deeper stack would
+    /// imply a history the UI does not show and cannot be trusted to still be
+    /// valid (every entry is a path on disk that anything else may have moved
+    /// in the meantime).
+    ///
+    /// Nil whenever there is nothing to undo — including after a successful
+    /// undo, so the same record can never be replayed twice.
+    /// `internal(set)`, not `private(set)`: `trash(_:)` and `undoTrash()` live
+    /// in `LoreStore+Trash.swift`, and Swift's `private(set)` is file-scoped.
+    /// Still closed to callers outside the module, which is the access this
+    /// property actually needs.
+    public internal(set) var lastTrash: TrashUndo?
+
+    /// Everything needed to reverse one `trash(_:)`.
+    public struct TrashUndo: Equatable, Sendable {
+        /// Where the file lived in the vault, CANONICAL — the same spelling
+        /// `trash` removed from the index, so the restore re-indexes under a
+        /// path that matches.
+        public let original: URL
+        /// Where macOS actually put it, from `trashItem`'s
+        /// `resultingItemURL`. Lore used to pass `nil` here and throw this
+        /// away, which is the only reason undo looked expensive.
+        public let trashed: URL
+        /// What to call the file in the toast.
+        public let name: String
+    }
+
     private let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
@@ -158,7 +190,29 @@ public final class LoreStore {
     /// reads this (not a filesystem walk of its own) to show empty folders.
     var directoryPaths: [String] { coordinator.directoryPaths }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
+    /// Whether `undoTrash()` currently has a delete to reverse.
+    public var canUndoTrash: Bool { lastTrash != nil }
+
     public func rebuild() throws { try coordinator.rebuild() }
+
+    /// True while a vault rescan is running. Drives the sidebar's "Indexing…"
+    /// state and the Settings button's spinner.
+    public var isIndexing: Bool { coordinator.isRebuilding }
+
+    /// Why the last rescan failed, or nil. See `VaultIndexCoordinator
+    /// .lastRebuildError` — this used to be discarded entirely.
+    public var indexError: String? { coordinator.lastRebuildError }
+
+    /// Rescan the vault WITHOUT blocking the main actor.
+    ///
+    /// The Settings button used to call `try? rebuild()` — the synchronous
+    /// path — which walks, reads and parses every file in the vault on the
+    /// main actor. On a large vault that is a multi-second freeze with no
+    /// spinner, no progress and (thanks to the `try?`) no report of a failure.
+    /// This is the same background path a vault change already takes; the
+    /// synchronous `rebuild()` stays for tests and for callers that must
+    /// observe the result immediately.
+    public func rebuildInBackground() { coordinator.startBackgroundRebuild() }
 
     // MARK: - Links
 
@@ -430,4 +484,13 @@ public enum LoreError: Error, Equatable {
     /// recurse the whole subtree synchronously on the main actor, so this
     /// is refused before any bytes move rather than left to beachball.
     case notARegularFile(URL)
+    /// `undoTrash()` was asked to restore a file to a path that is occupied
+    /// again — the user trashed `Q1.md` and then made a new `Q1.md`. REFUSED
+    /// rather than overwritten: the undo exists to recover a file, and a
+    /// version of it that destroys a newer one on the way is not a recovery.
+    case restoreBlocked(URL)
+    /// `undoTrash()` could not move the file back out of the Trash (the user
+    /// emptied it, or moved the item by hand). The `String` carries the
+    /// underlying reason.
+    case restoreFailed(URL, String)
 }

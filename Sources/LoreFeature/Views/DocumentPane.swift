@@ -44,6 +44,10 @@ struct DocumentPane: View {
     @Bindable var store: LoreStore
     let session: DocumentSession
     let theme: HostTheme
+    /// Rename / move / trash, owned by `LoreRootView` and shared with both
+    /// sidebars — so the header's document menu drives the SAME confirmations
+    /// and refusals the sidebar's context menu does.
+    let ops: SidebarOperations
     /// The raw target of a Cmd-clicked link that resolved to nothing. Non-nil
     /// only while the "create it?" prompt is up — clicking a dead link must
     /// never create a file silently.
@@ -87,9 +91,12 @@ struct DocumentPane: View {
     /// showing, if either.
     @State private var panels = DocumentPanelState()
     @Environment(\.ainkradReduceMotion) private var reduceMotion
+    @Environment(\.ainkradToastCenter) private var toasts
 
     var body: some View {
         VStack(spacing: 0) {
+            DocumentHeaderBar(session: session, vaultRoot: store.vaultRoot, theme: theme,
+                              row: headerRow, ops: ops)
             if session.isReadOnly { readOnlyBanner }
             if session.conflict { conflictBanner }
             // A save error and a conflict are different situations with
@@ -192,6 +199,13 @@ struct DocumentPane: View {
             }
         }
         .background(theme.tokens.background)
+        // A banner appearing used to SNAP the editor down by its full height
+        // mid-typing — the most jarring motion in the app, and it fired on the
+        // save-failure path, i.e. exactly when the user was least in the mood
+        // for a surprise. Animating the insertion keeps the text's movement
+        // legible as "something arrived above you" rather than a jump cut.
+        .animation(reduceMotion ? nil : AinkradMotion.materialize,
+                   value: bannerSignature)
         .onAppear { refreshOutline(); refreshBacklinksCount() }
         // Same two triggers `BacklinksPanel` uses for the reasons it already
         // documents (a rename changes `url` without changing `session.id`),
@@ -243,13 +257,47 @@ struct DocumentPane: View {
         } message: {
             Text("\"\(unresolved ?? "")\" doesn't exist in this vault yet.")
         }
-        // The same "Not done" sheet the sidebar uses for a refused trash. A
-        // Create button that silently does nothing on a failed write is worse
-        // than no button.
-        .sheet(isPresented: Binding(get: { createFailure != nil },
-                                    set: { if !$0 { createFailure = nil } })) {
-            MessageSheet(text: createFailure ?? "", theme: theme) { createFailure = nil }
+        // A TOAST, not the "Not done" sheet this used to raise.
+        //
+        // The sentences are unchanged and still shown — the point of the
+        // original fix (a failed write that silently did nothing is worse than
+        // no affordance) is intact. What changed is the weight: a refused
+        // paste or drop leaves the document exactly as it was and asks nothing
+        // of the user, so a modal that must be dismissed before typing can
+        // continue is out of proportion to it. The sidebar's refused TRASH
+        // keeps the sheet, because that one names a condition the user has to
+        // resolve before the delete can happen at all.
+        .onChange(of: createFailure) { _, failure in
+            guard let failure else { return }
+            createFailure = nil
+            toasts.show(failure, status: .danger)
         }
+    }
+
+    /// This document's index row, matched CANONICALLY.
+    ///
+    /// Canonical on both sides for the reason `LoreStore.trash` documents at
+    /// length: a session opened via `open(url:)` keeps the caller's spelling,
+    /// so a raw `==` silently finds nothing for a tab opened with a
+    /// non-canonical URL — and the header would then drop its actions menu on
+    /// exactly the documents that look most ordinary.
+    ///
+    /// Nil for a document with no index row (one outside the vault), where
+    /// rename / move / trash have nothing to act on.
+    private var headerRow: IndexRow? {
+        let path = VaultIndexCoordinator.canonical(session.url)
+        return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
+    }
+
+    /// Which banners are currently up, as a value `.animation(_:value:)` can
+    /// compare.
+    ///
+    /// Deliberately NOT the whole session: animating on every session change
+    /// would re-run the transition on each keystroke (`markChanged` mutates
+    /// the session), which is both wasted work and visibly wrong. These three
+    /// booleans are the only inputs the banner stack has.
+    private var bannerSignature: [Bool] {
+        [session.isReadOnly, session.conflict, session.lastSaveError != nil]
     }
 
     /// Re-derives `outline` from the engine's own `outline` accessor — a
@@ -300,12 +348,14 @@ struct DocumentPane: View {
     /// Persistent and non-alarming: this file is open, readable and searchable,
     /// it simply cannot be written back. A user typing into a document that
     /// will never save, with no indication, is the failure this prevents.
+    ///
+    /// `.neutral`, not a warning: nothing is wrong and there is nothing to
+    /// fix. The status also picks the icon and colour, which is why these
+    /// three banners no longer name either — see `LoreBanner`.
     private var readOnlyBanner: some View {
-        banner(icon: "lock", tint: theme.tokens.accentTertiary) {
-            Text("Read-only: this file isn't valid UTF-8, so Lore can't write it back "
-                 + "without destroying data. Edits here won't be saved.")
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        LoreBanner(message: "Read-only: this file isn't valid UTF-8, so Lore can't write it "
+                       + "back without destroying data. Edits here won't be saved.",
+                   status: .neutral)
     }
 
     /// Three resolutions, all reachable, none destructive by default. The old
@@ -313,9 +363,8 @@ struct DocumentPane: View {
     /// "overwrite", which meant the safe choice was the one you got by
     /// accident.
     private var conflictBanner: some View {
-        banner(icon: "exclamationmark.triangle", tint: theme.tokens.accentSecondary) {
-            Text("This document changed on disk outside Lore.")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        LoreBanner(message: "This document changed on disk outside Lore.",
+                   status: .warning) {
             AinkradButton(title: "Reload from disk", style: .secondary) {
                 try? session.resolveByReloading()
             }
@@ -332,20 +381,8 @@ struct DocumentPane: View {
     /// Disk full, permissions, a read-only volume. There is no resolution to
     /// offer — the only requirement is that it stops being invisible.
     private func saveErrorBanner(_ error: Error) -> some View {
-        banner(icon: "exclamationmark.circle", tint: theme.tokens.accentPrimary) {
-            Text("Couldn't save this document: \(error.localizedDescription)")
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func banner<Content: View>(icon: String, tint: Color,
-                                       @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: AinkradSpacing.sm) {
-            AinkradIconGlyph(systemName: icon)
-            content()
-        }
-        .padding(AinkradSpacing.sm)
-        .background(tint.opacity(0.15))
+        LoreBanner(message: "Couldn't save this document: \(error.localizedDescription)",
+                   status: .danger)
     }
 }
 

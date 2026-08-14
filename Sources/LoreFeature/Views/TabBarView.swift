@@ -15,7 +15,7 @@ struct TabBarView: View {
 
     /// Tall enough that a `.sm`-padded tab plus its chamfer sits fully INSIDE
     /// the bar. At the old 32 the chamfer was clipped by the bar's own edge.
-    private static let barHeight: CGFloat = 40
+    private static let barHeight: CGFloat = LoreMetrics.tabBarHeight
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -59,9 +59,9 @@ struct TabBarView: View {
         }
         .padding(.horizontal, AinkradSpacing.sm)
         .padding(.vertical, AinkradSpacing.sm)
-        .background(ChamferShape(cut: 6).fill(store.selectedTab === session
+        .background(ChamferShape(cut: LoreMetrics.chamfer).fill(store.selectedTab === session
                     ? theme.tokens.accentSecondary.opacity(0.2) : .clear))
-        .clipShape(ChamferShape(cut: 6))
+        .clipShape(ChamferShape(cut: LoreMetrics.chamfer))
         .contentShape(Rectangle())
         .onTapGesture { store.selectTab(session); onSelect(session) }
     }

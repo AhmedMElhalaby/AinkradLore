@@ -13,6 +13,7 @@ import AinkradAppKit
 extension View {
     func loreSidebarOperations(_ ops: SidebarOperations, theme: HostTheme) -> some View {
         self
+            .overlay { LoreNoticeBridge(ops: ops) }
             .sheet(isPresented: Binding(
                 get: { ops.activeSheet != nil },
                 set: { if !$0 { ops.dismissAll() } })) {
@@ -25,6 +26,35 @@ extension View {
                 message: ops.pendingTrash.map { ops.trashMessage(for: $0) } ?? "",
                 confirmTitle: "Move to Trash",
                 isDestructive: true) { ops.confirmTrash() }
+    }
+}
+
+/// Carries `SidebarOperations.notice` into the toast host.
+///
+/// A zero-sized view rather than a modifier on `LoreRootView` because
+/// `.ainkradToastHost()` injects its center into the subtree BELOW itself:
+/// `LoreRootView`'s own `@Environment` is read above that injection and would
+/// see a different, unrendered center — the exact trap the kit's own
+/// `AinkradToastHostModifier` documents. Living inside the hosted subtree is
+/// what makes `show` reach the center that is actually on screen.
+///
+/// Drains on change and CLEARS the notice, so the same message cannot be
+/// re-shown by an unrelated redraw.
+private struct LoreNoticeBridge: View {
+    @Bindable var ops: SidebarOperations
+    @Environment(\.ainkradToastCenter) private var toasts
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: ops.notice) { _, notice in
+                guard let notice else { return }
+                ops.notice = nil
+                toasts.show(notice.text,
+                            status: notice.kind == .success ? .success : .danger)
+            }
     }
 }
 

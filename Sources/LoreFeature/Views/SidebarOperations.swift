@@ -51,7 +51,29 @@ final class SidebarOperations {
     var report: RenameReport?
     /// A refusal or failure with no sheet of its own — most importantly a
     /// REFUSED TRASH, which used to be a silent no-op (`try? store.trash(row)`).
+    ///
+    /// FAILURES ONLY. Successes go to `notice` below: this one is rendered by
+    /// `MessageSheet`, whose heading is the literal word "Not done", so a
+    /// success routed here told the user "Not done: Created “Projects”." —
+    /// which is not merely ugly, it is the opposite of what happened. Both
+    /// `commitName`'s create and `confirm`'s folder-trash did exactly that.
     var message: String?
+    /// A transient outcome to surface as a toast rather than a modal.
+    ///
+    /// The split between this and `message` is by WEIGHT, not by success and
+    /// failure: anything the user must acknowledge and act on stays a sheet;
+    /// anything that is merely worth knowing — including a soft failure the
+    /// user cannot do anything about — is a toast that expires on its own.
+    /// A modal for "created a folder" interrupts the work it just completed.
+    var notice: Notice?
+
+    /// One transient outcome, and how loudly to say it.
+    struct Notice: Equatable {
+        enum Kind: Equatable { case success, failure }
+        let text: String
+        let kind: Kind
+    }
+
     /// The row a trash was requested for, awaiting confirmation.
     var pendingTrash: IndexRow?
 
@@ -100,7 +122,8 @@ final class SidebarOperations {
         case .newFolder(let parent):
             do {
                 let created = try store.createFolder(named: nameText, in: parent)
-                message = "Created “\(created.lastPathComponent)”."
+                notice = Notice(text: "Created “\(created.lastPathComponent)”.",
+                                kind: .success)
             } catch let error as LoreError {
                 message = Self.describeCreateFolder(error)
             } catch {
@@ -109,33 +132,6 @@ final class SidebarOperations {
         }
     }
 
-    /// `describeCreate` phrases everything as a failed document create, so
-    /// folder creation gets its own sentences — the errors that can actually
-    /// reach it (`invalidName`, `alreadyExists`, `outsideVault`) barely
-    /// overlap with the document-create ones anyway.
-    static func describeCreateFolder(_ error: LoreError) -> String {
-        switch error {
-        case .invalidName(let name):
-            return "“\(name)” is not a valid folder name. "
-                + "Folder names cannot be empty, cannot contain “/” or “:”, cannot start "
-                + "with “.”, and cannot contain control characters."
-        case .alreadyExists(let url):
-            return "A folder named “\(url.lastPathComponent)” already exists here."
-        case .outsideVault(let url):
-            return "“\(url.lastPathComponent)” is outside the vault, so nothing was created."
-        case .noVault:
-            return "No vault is open, so there is nowhere to put a new folder."
-        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
-            return "The folder could not be created: \(reason)"
-        case .externalChange(let url):
-            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
-        case .notARegularFile:
-            // Not reachable from `createFolder` — raised only by
-            // `writeAttachment(copying:besideNote:)` — kept for the same
-            // reason the other unreachable cases are kept.
-            return "The folder could not be created."
-        }
-    }
 
     func cancelName() { nameTarget = nil }
 
@@ -199,74 +195,6 @@ final class SidebarOperations {
         } catch {
             message = "The document could not be created: \(error.localizedDescription)"
             return nil
-        }
-    }
-
-    /// `describe(_:row:)` phrases everything as a failed DELETE and needs a row
-    /// that does not exist yet, so create gets its own sentences.
-    static func describeCreate(_ error: LoreError) -> String {
-        switch error {
-        case .noVault:
-            return "No vault is open, so there is nowhere to put a new document. "
-                + "Choose a vault folder first."
-        case .outsideVault(let url):
-            return "A new document would have been written outside the vault "
-                + "(“\(url.lastPathComponent)”), so nothing was created."
-        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
-            return "The document could not be created: \(reason)"
-        case .externalChange(let url):
-            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
-        case .invalidName, .alreadyExists:
-            // Not reachable from a document create — those errors are raised
-            // only by `createFolder` — but the switch is exhaustive on
-            // purpose, so this says something true rather than nothing.
-            return "The document could not be created."
-        case .notARegularFile:
-            // Not reachable from a document create — raised only by
-            // `writeAttachment(copying:besideNote:)` — kept for the same
-            // reason as `invalidName`/`alreadyExists` above.
-            return "The document could not be created."
-        }
-    }
-
-    /// The user-facing sentence for a failed paste-image or drop-file
-    /// attachment write (`LoreStore.writeAttachment`'s two overloads).
-    ///
-    /// Whole-branch review round 3, Important 3: `DocumentPane` used to
-    /// format these with bare `error.localizedDescription`. That reads fine
-    /// for a genuine `NSError` (`Data.write` on the paste path throws a real
-    /// `CocoaError` with a real message), but `LoreError` — thrown by both
-    /// overloads' own guards — is a plain `Error, Equatable` with no
-    /// `LocalizedError` conformance, so the SAME formatting produced
-    /// `"The operation couldn't be completed. (LoreFeature.LoreError error
-    /// 8.)"` for exactly the case this wave's directory-drop guard exists to
-    /// explain. `LoreError` cases get the same hand-written treatment
-    /// `describeCreate`/`describeCreateFolder` already give the errors THEY
-    /// see; anything else (a `CocoaError` from the underlying write, a
-    /// filesystem error from `copyItem`) falls back to its own
-    /// `localizedDescription`, which is reliable for those types.
-    static func describeAttachmentWrite(_ error: Error) -> String {
-        guard let loreError = error as? LoreError else {
-            return error.localizedDescription
-        }
-        switch loreError {
-        case .notARegularFile(let url):
-            return "“\(url.lastPathComponent)” is a folder, not a file, so it "
-                + "was not added. Only individual files can be attached."
-        case .outsideVault(let url):
-            return "“\(url.lastPathComponent)” would have been written outside "
-                + "the vault, so nothing was added."
-        case .noVault:
-            return "No vault is open, so there is nowhere to put the attachment."
-        case .externalChange(let url):
-            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was added."
-        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
-            return "The attachment could not be added: \(reason)"
-        case .invalidName, .alreadyExists:
-            // Not reachable from an attachment write — raised only by
-            // `createFolder` — kept for the same reason the other
-            // "not reachable" arms in this file are kept.
-            return "The attachment could not be added."
         }
     }
 
@@ -343,8 +271,10 @@ final class SidebarOperations {
             preview = nil
             do {
                 let count = try store.applyTrashFolder(plan)
-                message = "Moved “\(plan.folder.lastPathComponent)” to the Trash "
-                    + "(\(count) document\(count == 1 ? "" : "s"))."
+                notice = Notice(
+                    text: "Moved “\(plan.folder.lastPathComponent)” to the Trash "
+                        + "(\(count) document\(count == 1 ? "" : "s")).",
+                    kind: .success)
             } catch let error as LoreError {
                 message = Self.describe(error, folder: plan.folder)
             } catch {
@@ -358,33 +288,6 @@ final class SidebarOperations {
     }
 
     /// The user-facing sentence for each way a folder trash can be declined.
-    static func describe(_ error: LoreError, folder: URL) -> String {
-        let name = folder.lastPathComponent
-        switch error {
-        case .trashFailed(_, let reason):
-            return "“\(name)” could not be moved to the Trash: \(reason) "
-                + "Nothing was deleted — Lore never falls back to deleting it permanently."
-        case .noVault:
-            return "No vault is open, so nothing was deleted."
-        // Reachable: `applyTrashFolder` refuses per-session, before touching
-        // anything, when a tab under the folder is dirty and its flush fails
-        // — same rule and same reason as single-document `LoreStore.trash`.
-        case .unsavedEdits(_, let reason):
-            return "“\(name)” was not deleted because \(reason)"
-        // Reachable: `applyTrashFolder`'s own containment guard throws this
-        // for the vault root itself or a target outside the vault, in case a
-        // stale or forged plan reaches here without going through
-        // `planTrashFolder`'s own refusal.
-        case .outsideVault:
-            return "“\(name)” was not deleted: it is the vault's own folder, or outside "
-                + "the vault entirely."
-        case .externalChange, .invalidName, .alreadyExists, .notARegularFile:
-            // Not reachable from `applyTrashFolder` — kept for the same reason
-            // the single-document `describe(_:row:)` keeps its own unreachable
-            // cases: a true sentence rather than a silent gap in the switch.
-            return "“\(name)” was not deleted."
-        }
-    }
 
     /// Dismisses the sheet in either of its states.
     func dismiss() {
@@ -432,40 +335,56 @@ final class SidebarOperations {
     func confirmTrash() {
         guard let row = pendingTrash else { return }
         pendingTrash = nil
+        let name = row.path.lastPathComponent
         // One implementation, in `deleteDocument`, which the store-level test
-        // drives directly.
-        message = deleteDocument(row, in: store)
+        // drives directly. A non-nil return is a REFUSAL and keeps the modal
+        // treatment: it names something the user has to resolve before the
+        // delete can happen at all.
+        if let refusal = deleteDocument(row, in: store) {
+            message = refusal
+            return
+        }
+        // The undo hint is conditional on there actually BEING an undo:
+        // `trash` only arms `lastTrash` when macOS told it where the file
+        // went. Promising ⌘Z when nothing would happen is worse than staying
+        // quiet about it.
+        notice = Notice(
+            text: store.canUndoTrash
+                ? "Moved “\(name)” to the Trash. Press ⌘Z to undo."
+                : "Moved “\(name)” to the Trash.",
+            kind: .success)
     }
 
     func cancelTrash() { pendingTrash = nil }
 
-    /// The user-facing sentence for each way a delete can be declined. Pure, so
-    /// it is asserted directly rather than through a view.
-    static func describe(_ error: LoreError, row: IndexRow) -> String {
-        let name = row.path.lastPathComponent
-        switch error {
-        case .unsavedEdits(_, let reason):
-            // `reason` already names the unsaved edits AND the way out
-            // (reload, overwrite, or save a copy) — see `LoreStore.trash`.
-            return "“\(name)” was not deleted because \(reason)"
-        case .trashFailed(_, let reason):
-            return "“\(name)” could not be moved to the Trash: \(reason) "
-                + "Nothing was deleted — Lore never falls back to deleting it permanently."
-        case .noVault:
-            return "No vault is open, so nothing was deleted."
-        case .externalChange:
-            return "“\(name)” changed outside Lore, so nothing was deleted. "
-                + "Resolve it in the open tab, then delete it again."
-        case .outsideVault(let url):
-            // Not reachable from a delete — `outsideVault` is raised only by
-            // `create` — but the switch is exhaustive on purpose, so this says
-            // something true rather than nothing.
-            return "“\(url.lastPathComponent)” is outside the vault, so nothing was deleted."
-        case .invalidName, .alreadyExists, .notARegularFile:
-            // Not reachable from a document delete either — raised only by
-            // `createFolder` / `writeAttachment(copying:besideNote:)` — kept
-            // for the same reason as `outsideVault` above.
-            return "“\(name)” was not deleted."
+    /// Puts back the file the last confirmed trash removed.
+    ///
+    /// Bound to ⌘Z by `LoreRootView`. A no-op when there is nothing to undo,
+    /// so the shortcut is safe to press at any time — and deliberately silent
+    /// in that case rather than reporting "nothing to undo", which would turn
+    /// an idle keystroke into an interruption.
+    func undoLastTrash() {
+        guard let pending = store.lastTrash else { return }
+        let name = pending.name
+        do {
+            try store.undoTrash()
+            notice = Notice(text: "Restored “\(name)”.", kind: .success)
+        } catch let error as LoreError {
+            // A refused restore is a MODAL: the file is still in the Trash and
+            // the user has a decision to make about the name that now blocks
+            // it. That is not toast-weight.
+            message = Self.describeRestore(error)
+        } catch {
+            message = "“\(name)” couldn't be restored: \(error.localizedDescription)"
         }
     }
+
+    /// Whether ⌘Z currently has a delete to reverse.
+    var canUndoTrash: Bool { store.canUndoTrash }
+
+    /// The user-facing sentence for each way a delete can be declined. Pure, so
+    /// it is asserted directly rather than through a view.
+
+    /// The user-facing sentence for each way undoing a delete can fail.
+    ///
 }

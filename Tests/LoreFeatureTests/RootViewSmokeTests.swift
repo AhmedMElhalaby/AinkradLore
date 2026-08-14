@@ -39,7 +39,8 @@ final class RootViewSmokeTests: XCTestCase {
         XCTAssertEqual(store.tabs.count, 2)
         for session in store.tabs {
             _ = DocumentPane(store: store, session: session,
-                             theme: HostTheme(TestTokens.make()))
+                             theme: HostTheme(TestTokens.make()),
+                             ops: SidebarOperations(store: store))
         }
         _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
     }
@@ -65,7 +66,8 @@ final class RootViewSmokeTests: XCTestCase {
         XCTAssertFalse(session.engine is MarkdownEngine,
                        "this test must exercise a non-markdown engine")
         _ = DocumentPane(store: store, session: session,
-                         theme: HostTheme(TestTokens.make()))
+                         theme: HostTheme(TestTokens.make()),
+                         ops: SidebarOperations(store: store))
     }
 
     func test_backlinksPanelBuilds() throws {

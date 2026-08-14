@@ -19,9 +19,11 @@ struct DocumentPanelBar: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, AinkradSpacing.md)
+        .padding(.horizontal, LoreMetrics.gutter)
         .padding(.vertical, AinkradSpacing.xs)
-        .background(theme.tokens.background)
+        // Chrome, not content — same rule as the sidebar and the document
+        // header. See `LoreRootView`'s sidebar background.
+        .background(theme.tokens.surface)
     }
 
     @ViewBuilder
@@ -37,7 +39,7 @@ struct DocumentPanelBar: View {
             }
             .padding(.horizontal, AinkradSpacing.sm)
             .padding(.vertical, AinkradSpacing.xs)
-            .background(ChamferShape(cut: 4).fill(open == panel
+            .background(ChamferShape(cut: LoreMetrics.chamfer).fill(open == panel
                         ? theme.tokens.accentSecondary.opacity(0.2) : .clear))
             .contentShape(Rectangle())
         }

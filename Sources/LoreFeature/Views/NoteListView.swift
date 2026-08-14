@@ -46,6 +46,20 @@ struct NoteListView: View {
             && DocumentVisibility.visibleRows(store.rows, showAllFiles: false).isEmpty
     }
 
+    /// Whether the reason this list has nothing to show is that the vault is
+    /// still being read, rather than that it is empty.
+    ///
+    /// A `static` on the view, not a computed property, for the reason
+    /// `LoreRootView.emptyState(for:)` already documents: SwiftUI views are
+    /// only smoke-testable in this project, so the decision the branch is
+    /// built from is asserted directly.
+    ///
+    /// Requires a vault: with none open there is nothing to index, and the
+    /// `noVault` empty state (owned by `LoreRootView`) is the correct answer.
+    static func isStillIndexing(_ store: LoreStore) -> Bool {
+        store.vaultRoot != nil && store.isIndexing
+    }
+
     var body: some View {
         // The search field and the "+" button used to live HERE, which meant
         // neither existed in tree mode — this view is not even mounted then.
@@ -70,7 +84,21 @@ struct NoteListView: View {
                 }
             }
 
-            if visible.isEmpty {
+            if visible.isEmpty && NoteListView.isStillIndexing(store) {
+                // An empty sidebar during the first scan of a large vault is
+                // indistinguishable from an empty vault — and the copy the
+                // empty case shows ("No notes yet · Press ⌘N") is actively
+                // wrong advice while the rows are still arriving. Gated on
+                // `visible.isEmpty` so a rescan of a vault that already has
+                // rows never blanks the list the user is reading.
+                VStack(spacing: AinkradSpacing.sm) {
+                    AinkradSpinner(size: 20)
+                    Text("Indexing vault…")
+                        .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Indexing vault")
+            } else if visible.isEmpty {
                 AinkradEmptyState(
                     icon: store.rows.isEmpty ? "tray"
                         : allVisibleRowsAreHiddenByDefault ? "eye.slash" : "magnifyingglass",

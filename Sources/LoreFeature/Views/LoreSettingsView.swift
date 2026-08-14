@@ -52,7 +52,31 @@ struct LoreSettingsView: View {
 
             AinkradFormRow(title: "Index",
                            help: "Rebuild the search index from the files on disk.") {
-                AinkradButton(title: "Rebuild index", style: .ghost) { try? store.rebuild() }
+                HStack(spacing: AinkradSpacing.sm) {
+                    // `rebuildInBackground()`, never `try? store.rebuild()`:
+                    // the synchronous path walks and parses the whole vault on
+                    // the main actor, which on a large vault is a multi-second
+                    // freeze — and the `try?` threw the failure away, so a
+                    // rebuild that could not run looked identical to one that
+                    // did.
+                    AinkradButton(title: "Rebuild index", style: .ghost) {
+                        store.rebuildInBackground()
+                    }
+                    .disabled(store.isIndexing)
+                    if store.isIndexing {
+                        AinkradSpinner(size: 14)
+                        Text("Indexing…")
+                            .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+                    }
+                }
+            }
+
+            // The rescan's own failure, which used to be discarded. Distinct
+            // from `failure` above, which reports a refused VAULT CHOICE — two
+            // different problems with two different fixes.
+            if let indexError = store.indexError {
+                AinkradBanner(message: "The index couldn't be rebuilt: \(indexError)",
+                              status: .danger)
             }
         }
         .padding(AinkradSpacing.lg)
