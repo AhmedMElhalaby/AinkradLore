@@ -71,12 +71,18 @@ struct TabBarView: View {
     /// smaller on screen must not mean harder to hit.
     @ViewBuilder
     private func closeButton(_ session: DocumentSession) -> some View {
-        AinkradIconGlyph(systemName: "xmark", size: 9)
-            .foregroundStyle(theme.tokens.foreground.opacity(hovering == session.id ? 0.9 : 0.45))
-            .frame(width: 20, height: 20)
-            .contentShape(Rectangle())
-            .onHover { hovering = $0 ? session.id : nil }
-            .onTapGesture { attemptClose(session) }
+        let name = session.title.isEmpty ? session.url.lastPathComponent : session.title
+        Button {
+            attemptClose(session)
+        } label: {
+            AinkradIconGlyph(systemName: "xmark", size: 9)
+                .foregroundStyle(theme.tokens.foreground.opacity(hovering == session.id ? 0.9 : 0.45))
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 ? session.id : nil }
+        .accessibilityLabel("Close \(name)")
     }
 
     /// ⌘W closes the selected tab, through the same refusal path as the button.

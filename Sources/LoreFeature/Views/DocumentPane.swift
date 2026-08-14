@@ -216,13 +216,21 @@ struct DocumentPane: View {
             }
         }
         // Esc closes the slideover. Zero-sized and hidden, the same pattern
-        // `TabBarView.closeShortcut` already uses for ⌘W.
+        // `TabBarView.closeShortcut` already uses for ⌘W. Gated on a panel
+        // actually being open: `.keyboardShortcut(.cancelAction)` is
+        // dispatched at `performKeyEquivalent` time, BEFORE `keyDown` reaches
+        // the first responder, so an unconditionally-mounted claim on Esc
+        // would steal it from `MarkdownEditor`'s own `cancelOperation`
+        // handling (dismissing the `[[`-completion popup) even when there is
+        // no panel to close.
         .overlay {
-            Button("Close panel") { panels.dismiss() }
-                .keyboardShortcut(.cancelAction)
-                .opacity(0)
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
+            if panels.open != nil {
+                Button("Close panel") { panels.dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
         }
         .alert("Create this note?",
                isPresented: Binding(get: { unresolved != nil },

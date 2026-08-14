@@ -125,7 +125,7 @@ extension MarkdownEditor {
     /// A floating label, hidden unless the document is over the hard cap. Added
     /// to the SCROLL view rather than the text view so it stays put while the
     /// document scrolls under it, and so it never becomes part of the text.
-    static func addStylingNotice(to scroll: NSScrollView,
+    private static func addStylingNotice(to scroll: NSScrollView,
                                   tokens: HostThemeTokens) -> NSTextField {
         let notice = NSTextField(labelWithString:
             "Styling off — document over \(MarkdownDocumentModel.stylingHardCap / (1024 * 1024)) MB")

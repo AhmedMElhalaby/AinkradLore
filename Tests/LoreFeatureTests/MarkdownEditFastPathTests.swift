@@ -265,6 +265,49 @@ final class MarkdownEditFastPathTests: XCTestCase {
                              site: "a block boundary")
     }
 
+    /// Whole-branch review, MINOR 6: AppKit posts `textViewDidChangeSelection`
+    /// BETWEEN the storage mutation and `textDidChange`, so
+    /// `revealForSelectionChange` can run once against `revealIndex.blocks`
+    /// that still describe the PRE-edit string laid over the ALREADY-edited
+    /// one. The suspected gap is an insertion at the exact last offset of a
+    /// block (`blockRange.upperBound`, immediately before the boundary) —
+    /// unlike a boundary-crossing insertion, the caret does not move onto or
+    /// off a widened boundary, so the stale pass and the fresh pass could in
+    /// principle disagree about what is revealed. Asserted immediately after
+    /// `textDidChange`, with the 150 ms debounce given no chance to run and
+    /// paper over a wrong frame — if this fails, the fast path can leave
+    /// wrong text on screen for that whole debounce window.
+    func test_anInsertionAtTheExactLastOffsetOfABlockMatchesAFullRenderImmediately() throws {
+        let text = Self.fixture()
+        let (probe, _) = makeEditor(text)
+        let boundary = try XCTUnwrap(
+            probe.revealIndex.blocks.first(where: { block in
+                (text as NSString).substring(with: NSRange(location: block.lowerBound,
+                                                           length: min(5, block.count)))
+                    .hasPrefix("## Se")
+            })?.upperBound,
+            "the fixture must contain a heading block to find the end of")
+
+        // FAST: caret at the block's exact last offset, no settle afterward.
+        let (fast, fastView) = makeEditor(text)
+        let fastStorage = try XCTUnwrap(fastView.textStorage)
+        fastView.setSelectedRange(NSRange(location: boundary, length: 0))
+        fastView.insertText("x", replacementRange: NSRange(location: boundary, length: 0))
+        XCTAssertTrue(fast.lastEditTookFastPath,
+                      "an insertion at a block's last offset should still be a single-block edit")
+
+        // FULL: the same edit, then a whole-document render on top — also
+        // with no settle, so both sides are compared at the same instant.
+        let (full, fullView) = makeEditor(text)
+        let fullStorage = try XCTUnwrap(fullView.textStorage)
+        fullView.setSelectedRange(NSRange(location: boundary, length: 0))
+        fullView.insertText("x", replacementRange: NSRange(location: boundary, length: 0))
+        full.renderStyles()
+
+        assertSameAttributes(attributeDump(fastStorage), attributeDump(fullStorage),
+                             site: "a block's exact last offset")
+    }
+
     // MARK: - The bail-outs
 
     /// Each listed case must fall back to the full render rather than take the

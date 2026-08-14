@@ -78,7 +78,14 @@ enum EditorSpellCheck {
 final class MenuSuggestionDebouncer {
     static let interval: TimeInterval = 0.15
 
-    private var timer: Timer?
+    // `nonisolated(unsafe)`: `deinit` on a `@MainActor` class is itself
+    // nonisolated (it may run once nothing else can reach `self`), so it
+    // cannot touch a main-actor-isolated stored property without this. Every
+    // OTHER access to `timer` is still on the main actor, through this
+    // class's own main-actor-isolated methods.
+    private nonisolated(unsafe) var timer: Timer?
+
+    deinit { timer?.invalidate() }
 
     func schedule(text: String, offset: Int, tag: Int,
                  apply: @escaping @MainActor ([String]) -> Void) {
@@ -155,24 +162,49 @@ enum MarkdownEditorMenuActions {
     /// Toggles a level-2 `## ` prefix on the caret's line. There is no
     /// existing heading transform in `MarkdownEditing` to reuse — `toggleWrap`
     /// wraps a SELECTION on both sides, and a heading marker is a LINE prefix.
-    private static func toggleHeading(in tv: NSTextView) {
+    static func toggleHeading(in tv: NSTextView) {
         let ns = tv.string as NSString
         let selection = tv.selectedRange()
         let lineRange = ns.lineRange(for: NSRange(location: selection.location, length: 0))
         let line = ns.substring(with: lineRange)
         let prefix = "## "
         let newLine: String
-        let delta: Int
+        // An existing `#{1,6}` marker (followed by whitespace, per CommonMark
+        // ATX headings) is stripped BEFORE re-prefixing, so `# Title`
+        // toggles to `## Title` rather than `## # Title`, and `### x`
+        // toggles to `## x` rather than `## ### x`. A line that merely
+        // starts with `#` without the required whitespace (`#tag`) is not a
+        // heading at all — `stripHeadingMarker` returns nil for it, and it
+        // is prefixed like any other line. Level 2 specifically is the one
+        // case that TOGGLES OFF: the marker this command itself would have
+        // written, so stripping it and stopping there is what makes this a
+        // toggle rather than a one-way "make this level 2" — the strip
+        // already leaves any OTHER level re-prefixed to level 2, which reads
+        // as promoting/demoting into this command's own level rather than a
+        // second, un-toggleable action.
+        let stripped = stripHeadingMarker(from: line)
         if line.hasPrefix(prefix) {
-            newLine = String(line.dropFirst(prefix.count))
-            delta = -(prefix as NSString).length
+            newLine = stripped ?? line
         } else {
-            newLine = prefix + line
-            delta = (prefix as NSString).length
+            newLine = prefix + (stripped ?? line)
         }
+        let delta = (newLine as NSString).length - (line as NSString).length
         let text = ns.replacingCharacters(in: lineRange, with: newLine)
         let cursor = NSRange(location: max(lineRange.location, selection.location + delta),
                              length: selection.length)
         MarkdownEditorTyping.apply(EditResult(text: text, selection: cursor), to: tv)
+    }
+
+    /// Strips a leading ATX heading marker (`#` through `######`, followed by
+    /// whitespace) from `line`, returning nil if `line` isn't a heading.
+    static func stripHeadingMarker(from line: String) -> String? {
+        var hashCount = 0
+        var index = line.startIndex
+        while index < line.endIndex, line[index] == "#", hashCount < 6 {
+            hashCount += 1
+            index = line.index(after: index)
+        }
+        guard hashCount > 0, index < line.endIndex, line[index] == " " else { return nil }
+        return String(line[line.index(after: index)...])
     }
 }

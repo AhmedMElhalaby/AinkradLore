@@ -26,17 +26,23 @@ struct DocumentPanelBar: View {
 
     @ViewBuilder
     private func button(_ panel: DocumentPanel) -> some View {
-        HStack(spacing: AinkradSpacing.xs) {
-            AinkradIconGlyph(systemName: panel.systemName, size: 11)
-            Text("\(counts[panel] ?? 0)")
-                .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+        let count = counts[panel] ?? 0
+        Button {
+            onToggle(panel)
+        } label: {
+            HStack(spacing: AinkradSpacing.xs) {
+                AinkradIconGlyph(systemName: panel.systemName, size: 11)
+                Text("\(count)")
+                    .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+            }
+            .padding(.horizontal, AinkradSpacing.sm)
+            .padding(.vertical, AinkradSpacing.xs)
+            .background(ChamferShape(cut: 4).fill(open == panel
+                        ? theme.tokens.accentSecondary.opacity(0.2) : .clear))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, AinkradSpacing.sm)
-        .padding(.vertical, AinkradSpacing.xs)
-        .background(ChamferShape(cut: 4).fill(open == panel
-                    ? theme.tokens.accentSecondary.opacity(0.2) : .clear))
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
         .help(panel.title)
-        .onTapGesture { onToggle(panel) }
+        .accessibilityLabel("\(panel.title), \(count) items")
     }
 }

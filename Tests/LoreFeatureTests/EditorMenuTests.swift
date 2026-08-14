@@ -2,6 +2,7 @@ import AppKit
 import XCTest
 @testable import LoreFeature
 
+@MainActor
 final class EditorMenuTests: XCTestCase {
 
     // MARK: - Word lookup
@@ -120,5 +121,88 @@ final class EditorMenuTests: XCTestCase {
                                           suggestions: [],
                                           actions: .noop)
         XCTAssertFalse(items.map(\.title).contains("Ignore Spelling"))
+    }
+
+    // MARK: - toggleHeading's marker strip (whole-branch review, MINOR 4)
+    //
+    // `toggleHeading` used to test only `line.hasPrefix("## ")`, so a line
+    // already carrying a DIFFERENT heading level got a second `## ` prefixed
+    // onto it instead of toggled: `# Title` became `## # Title`. These assert
+    // `stripHeadingMarker` directly — the piece that decides what counts as
+    // an existing heading to strip.
+
+    func test_stripHeadingMarker_noHeadingReturnsNil() {
+        XCTAssertNil(MarkdownEditorMenuActions.stripHeadingMarker(from: "plain text"))
+    }
+
+    func test_stripHeadingMarker_singleHash() {
+        let stripped = try? XCTUnwrap(
+            MarkdownEditorMenuActions.stripHeadingMarker(from: "# Title"))
+        XCTAssertEqual(stripped, "Title")
+    }
+
+    /// `## x` must toggle OFF, not double to `## ## x`.
+    func test_stripHeadingMarker_doubleHashStripsCleanly() {
+        let stripped = try? XCTUnwrap(
+            MarkdownEditorMenuActions.stripHeadingMarker(from: "## x"))
+        XCTAssertEqual(stripped, "x")
+    }
+
+    func test_stripHeadingMarker_sixHashesIsTheMax() {
+        let stripped = try? XCTUnwrap(
+            MarkdownEditorMenuActions.stripHeadingMarker(from: "###### deepest"))
+        XCTAssertEqual(stripped, "deepest")
+    }
+
+    /// A line that merely STARTS with `#` but has no space after the run of
+    /// hashes — a tag, not a heading — must be left alone.
+    func test_stripHeadingMarker_hashWithNoSpaceIsNotAHeading() {
+        XCTAssertNil(MarkdownEditorMenuActions.stripHeadingMarker(from: "#tag"))
+    }
+
+    // MARK: - toggleHeading end to end, through the real edit path
+
+    private func makeTextView(_ text: String) -> NSTextView {
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        tv.isRichText = false
+        tv.string = text
+        return tv
+    }
+
+    func test_toggleHeading_promotesAPlainLineToLevelTwo() throws {
+        let tv = makeTextView("Title")
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        MarkdownEditorMenuActions.toggleHeading(in: tv)
+        XCTAssertEqual(tv.string, "## Title")
+    }
+
+    /// `# Title` retoggles to `## Title`, never `## # Title`.
+    func test_toggleHeading_reprefixesALevelOneHeadingRatherThanDoubling() throws {
+        let tv = makeTextView("# Title")
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        MarkdownEditorMenuActions.toggleHeading(in: tv)
+        XCTAssertEqual(tv.string, "## Title")
+    }
+
+    func test_toggleHeading_levelTwoTogglesOff() throws {
+        let tv = makeTextView("## Title")
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        MarkdownEditorMenuActions.toggleHeading(in: tv)
+        XCTAssertEqual(tv.string, "Title")
+    }
+
+    func test_toggleHeading_levelSixReprefixesToLevelTwo() throws {
+        let tv = makeTextView("###### Title")
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        MarkdownEditorMenuActions.toggleHeading(in: tv)
+        XCTAssertEqual(tv.string, "## Title")
+    }
+
+    /// `#tag` is not a heading, so toggling prefixes it rather than stripping.
+    func test_toggleHeading_aHashTagLineGetsPrefixedNotStripped() throws {
+        let tv = makeTextView("#tag")
+        tv.setSelectedRange(NSRange(location: 1, length: 0))
+        MarkdownEditorMenuActions.toggleHeading(in: tv)
+        XCTAssertEqual(tv.string, "## #tag")
     }
 }
