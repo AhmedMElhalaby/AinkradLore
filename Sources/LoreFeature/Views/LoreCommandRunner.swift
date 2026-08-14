@@ -36,7 +36,9 @@ struct LoreCommandRunner {
     var context: LoreCommands.Context {
         LoreCommands.Context(hasVault: store.vaultRoot != nil,
                              hasDocument: store.selectedTab != nil,
-                             canUndoDelete: store.canUndoTrash)
+                             canUndoDelete: store.canUndoTrash,
+                             canGoBack: store.canGoBack,
+                             canGoForward: store.canGoForward)
     }
 
     /// Runs `id`, or does nothing if it is not currently available.
@@ -84,6 +86,10 @@ struct LoreCommandRunner {
             openPalette(.commands)
         case .quickOpen:
             openPalette(.documents)
+        case .goBack:
+            store.goBack()
+        case .goForward:
+            store.goForward()
         // Routed through the responder chain rather than a held reference —
         // see `LoreFind`. A no-op when focus is not in a text view, which is
         // the right answer: ⌘F in the sidebar is not a request to search a

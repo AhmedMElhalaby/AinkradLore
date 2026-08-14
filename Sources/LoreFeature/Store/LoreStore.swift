@@ -331,6 +331,9 @@ public final class LoreStore {
         tabs = []
         selectedTab = nil
         openError = nil
+        // History outlives no vault: its URLs point into the one being closed.
+        history = []
+        historyIndex = nil
     }
     func settleForTesting() async { await coordinator.settleForTesting() }
     func handleVaultChange() { coordinator.handleVaultChange() }
@@ -348,12 +351,24 @@ public final class LoreStore {
     public func open(_ row: IndexRow) { open(url: row.path) }
 
     public func open(url: URL) {
+        open(url: url, recordingHistory: true)
+    }
+
+    /// Opens `url`, optionally without recording the visit.
+    ///
+    /// `recordingHistory: false` is what `goBack()`/`goForward()` use: moving
+    /// through history is not itself a new visit, and recording it would make
+    /// Back push an entry that Forward then has to step over — a stack that
+    /// grows every time you use it and never returns you where you started.
+    func open(url: URL, recordingHistory: Bool) {
         // Canonical on both sides. Compared raw, opening the already-open
         // `/tmp/v/a.md` as `/private/tmp/v/a.md` (or via a canonical `row.path`)
         // produced a SECOND session on the same file, each with its own mtime
         // baseline and its own debounced autosave racing the other.
         if let existing = tabs.first(where: { Self.pathKey($0.url) == Self.pathKey(url) }) {
+            touch(existing)
             selectedTab = existing
+            if recordingHistory { recordVisit(existing.url) }
             return
         }
         do {
@@ -361,12 +376,128 @@ public final class LoreStore {
             tabs.append(session)
             selectedTab = session
             openError = nil
+            if recordingHistory { recordVisit(session.url) }
+            evictColdSessions()
         } catch {
             openError = (url, error)
         }
     }
 
-    public func selectTab(_ session: DocumentSession) { selectedTab = session }
+    public func selectTab(_ session: DocumentSession) {
+        touch(session)
+        selectedTab = session
+        recordVisit(session.url)
+    }
+
+    // MARK: - Warm sessions
+
+    /// How many documents stay loaded in memory at once.
+    ///
+    /// With the tab strip gone, `tabs` is no longer a list the user reads — it
+    /// is a CACHE of documents that are still open behind the one on screen.
+    /// Keeping them warm is the decision that makes single-document navigation
+    /// safe: following a `[[link]]` never has to flush or close the document
+    /// you came from, so it can never hit `closeTab`'s unsaved-work refusal
+    /// mid-navigation, and per-document dirty state survives a round trip.
+    ///
+    /// Eight is a judgement, not a measurement: enough that Back through a
+    /// chain of links finds every document still loaded (with its scroll
+    /// position and undo stack intact), few enough that a long session does
+    /// not accumulate unbounded `DocumentSession`s, each holding a parsed
+    /// document and a file watcher's worth of state.
+    static let warmSessionLimit = 8
+
+    /// Marks `session` as most-recently-used.
+    ///
+    /// `tabs` is kept in LRU order — least recent first — which is only
+    /// possible now that nothing renders it as a strip. Reordering a visible
+    /// tab bar under the user would have been unacceptable; reordering a
+    /// cache is invisible.
+    private func touch(_ session: DocumentSession) {
+        guard let index = tabs.firstIndex(where: { $0 === session }) else { return }
+        tabs.append(tabs.remove(at: index))
+    }
+
+    /// Drops the coldest sessions once over the limit.
+    ///
+    /// REFUSES to evict anything that would lose work: the selected document,
+    /// anything dirty, anything in conflict, and anything whose last save
+    /// failed. The limit is therefore a target rather than a guarantee — with
+    /// nine dirty documents open, nine stay open. That is the correct trade:
+    /// a cache that silently discards unsaved edits to honour a size bound is
+    /// the exact class of bug this codebase spends most of its comments
+    /// preventing.
+    private func evictColdSessions() {
+        guard tabs.count > Self.warmSessionLimit else { return }
+        var overflow = tabs.count - Self.warmSessionLimit
+        for session in tabs where overflow > 0 {
+            guard session !== selectedTab,
+                  !session.isDirty, !session.conflict, session.lastSaveError == nil
+            else { continue }
+            session.cancelPendingSave()
+            tabs.removeAll { $0 === session }
+            overflow -= 1
+        }
+    }
+
+    // MARK: - History
+
+    /// Documents visited, oldest first — the back/forward stack.
+    ///
+    /// Replaces the tab strip's job of "get me back to what I was just
+    /// looking at". In a vault, that is almost always a LINEAR trail (follow a
+    /// link, read, come back), which a stack models exactly and a strip models
+    /// only by accident of ordering.
+    public private(set) var history: [URL] = []
+    /// Where in `history` the open document sits. Nil before anything opens.
+    public private(set) var historyIndex: Int?
+
+    public var canGoBack: Bool { (historyIndex ?? 0) > 0 }
+    public var canGoForward: Bool {
+        guard let index = historyIndex else { return false }
+        return index + 1 < history.count
+    }
+
+    /// Records a visit, truncating any forward entries.
+    ///
+    /// Truncation is what makes Forward mean something: after going Back and
+    /// then opening something new, the trail you abandoned is not somewhere
+    /// you can return to — the same rule every browser follows, and the
+    /// absence of it is how a forward stack turns into a list of places the
+    /// user has no memory of choosing.
+    ///
+    /// Re-visiting the CURRENT document records nothing: clicking the open
+    /// note in the sidebar is not navigation, and treating it as such fills
+    /// the stack with duplicates that make Back appear broken.
+    private func recordVisit(_ url: URL) {
+        let key = Self.pathKey(url)
+        if let index = historyIndex, history.indices.contains(index),
+           Self.pathKey(history[index]) == key {
+            return
+        }
+        if let index = historyIndex, index + 1 < history.count {
+            history.removeSubrange((index + 1)...)
+        }
+        history.append(url)
+        historyIndex = history.count - 1
+    }
+
+    /// Opens the previously visited document.
+    @discardableResult
+    public func goBack() -> Bool {
+        guard canGoBack, let index = historyIndex else { return false }
+        historyIndex = index - 1
+        open(url: history[index - 1], recordingHistory: false)
+        return true
+    }
+
+    @discardableResult
+    public func goForward() -> Bool {
+        guard canGoForward, let index = historyIndex else { return false }
+        historyIndex = index + 1
+        open(url: history[index + 1], recordingHistory: false)
+        return true
+    }
 
     /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
     /// 500ms debounce, so a tab closed immediately after a keystroke could
@@ -399,9 +530,13 @@ public final class LoreStore {
         session.cancelPendingSave()
         tabs.remove(at: idx)
         if selectedTab === session {
-            selectedTab = tabs.indices.contains(idx) ? tabs[idx]
-                        : tabs.indices.contains(idx - 1) ? tabs[idx - 1]
-                        : tabs.last
+            // The most recently used document, which `tabs`' LRU ordering puts
+            // last. This used to pick the closed tab's NEIGHBOUR, which was
+            // right when `tabs` was a visible strip (the eye expects the gap to
+            // close sideways) and is wrong now that it is a cache: adjacency in
+            // a cache is meaningless, and "what I was looking at before this
+            // one" is the only answer a user can predict.
+            selectedTab = tabs.last
         }
         return true
     }

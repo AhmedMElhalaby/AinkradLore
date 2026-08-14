@@ -44,8 +44,16 @@ final class RootViewSmokeTests: XCTestCase {
                              panelRequest: .constant(nil),
                              onOutlineChange: { _ in }, onScrollHandler: { _ in })
         }
-        _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()),
-                       ops: SidebarOperations(store: store))
+        // The tab strip is gone; the header is the chrome row that replaced
+        // it. Built here for BOTH states — with a document and without —
+        // because it now renders in the empty state too, where it carries the
+        // sidebar toggle and the history chevrons.
+        _ = DocumentHeaderBar(session: store.selectedTab, store: store,
+                              theme: HostTheme(TestTokens.make()),
+                              row: nil, ops: SidebarOperations(store: store))
+        _ = DocumentHeaderBar(session: nil, store: store,
+                              theme: HostTheme(TestTokens.make()),
+                              row: nil, ops: SidebarOperations(store: store))
     }
 
     /// Regression for the whole-branch review finding: `BacklinksPanel` was

@@ -27,6 +27,7 @@ struct LoreCommand: Identifiable, Hashable {
         case newNote, newFolder, chooseVault, importNotes
         case toggleSidebar, closeDocument, saveNow, undoDelete
         case findInDocument, findNext, findPrevious, replaceInDocument
+        case goBack, goForward
         case rebuildIndex, toggleShowAllFiles
         case toggleOutline, toggleBacklinks
         case commandPalette, quickOpen
@@ -47,6 +48,10 @@ struct LoreCommand: Identifiable, Hashable {
         case document
         /// Needs a delete that can still be undone.
         case undoableDelete
+        /// Needs somewhere to go back to.
+        case backHistory
+        /// Needs somewhere to go forward to.
+        case forwardHistory
     }
 
     let id: ID
@@ -115,6 +120,10 @@ enum LoreCommands {
               shortcut: LoreShortcut("w"), requires: .document, group: .document),
         .init(id: .quickOpen, title: "Quick Open…", systemName: "doc.text.magnifyingglass",
               shortcut: LoreShortcut("p"), requires: .vault, group: .document),
+        .init(id: .goBack, title: "Back", systemName: "chevron.left",
+              shortcut: LoreShortcut("["), requires: .backHistory, group: .document),
+        .init(id: .goForward, title: "Forward", systemName: "chevron.right",
+              shortcut: LoreShortcut("]"), requires: .forwardHistory, group: .document),
         .init(id: .findInDocument, title: "Find…", systemName: "magnifyingglass",
               shortcut: LoreShortcut("f"), requires: .document, group: .document),
         .init(id: .findNext, title: "Find Next", systemName: "chevron.down",
@@ -157,6 +166,8 @@ enum LoreCommands {
         var hasVault: Bool
         var hasDocument: Bool
         var canUndoDelete: Bool
+        var canGoBack: Bool = false
+        var canGoForward: Bool = false
 
         static let empty = Context(hasVault: false, hasDocument: false,
                                    canUndoDelete: false)
@@ -173,6 +184,8 @@ enum LoreCommands {
         case .vault: return context.hasVault
         case .document: return context.hasDocument
         case .undoableDelete: return context.canUndoDelete
+        case .backHistory: return context.canGoBack
+        case .forwardHistory: return context.canGoForward
         }
     }
 

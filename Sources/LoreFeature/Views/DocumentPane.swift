@@ -107,8 +107,6 @@ struct DocumentPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DocumentHeaderBar(session: session, vaultRoot: store.vaultRoot, theme: theme,
-                              row: headerRow, ops: ops)
             if session.isReadOnly { readOnlyBanner }
             if session.conflict { conflictBanner }
             // A save error and a conflict are different situations with
@@ -294,21 +292,6 @@ struct DocumentPane: View {
             createFailure = nil
             toasts.show(failure, status: .danger)
         }
-    }
-
-    /// This document's index row, matched CANONICALLY.
-    ///
-    /// Canonical on both sides for the reason `LoreStore.trash` documents at
-    /// length: a session opened via `open(url:)` keeps the caller's spelling,
-    /// so a raw `==` silently finds nothing for a tab opened with a
-    /// non-canonical URL — and the header would then drop its actions menu on
-    /// exactly the documents that look most ordinary.
-    ///
-    /// Nil for a document with no index row (one outside the vault), where
-    /// rename / move / trash have nothing to act on.
-    private var headerRow: IndexRow? {
-        let path = VaultIndexCoordinator.canonical(session.url)
-        return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
     }
 
     /// Which banners are currently up, as a value `.animation(_:value:)` can

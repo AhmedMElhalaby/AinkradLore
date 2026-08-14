@@ -65,6 +65,22 @@ struct LoreRootView: View {
             dismissPalette: { palette = nil })
     }
 
+    /// The open document's index row, matched CANONICALLY.
+    ///
+    /// Canonical on both sides for the reason `LoreStore.trash` documents at
+    /// length: a session opened via `open(url:)` keeps the caller's spelling,
+    /// so a raw `==` silently finds nothing for a document opened with a
+    /// non-canonical URL — and the header would then drop its actions menu on
+    /// exactly the documents that look most ordinary.
+    ///
+    /// Nil with no document open, and for one outside the vault, where
+    /// rename / move / trash have nothing to act on.
+    private var headerRow: IndexRow? {
+        guard let session = store.selectedTab else { return nil }
+        let path = VaultIndexCoordinator.canonical(session.url)
+        return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
+    }
+
     /// A filtered tree of mostly-empty branches is worse than a list, so an
     /// active search or tag filter always wins over the persisted tree
     /// preference — the tree is only shown when nothing is filtering it.
@@ -87,21 +103,13 @@ struct LoreRootView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             VStack(spacing: 0) {
-                HStack(spacing: AinkradSpacing.sm) {
-                    AinkradIconButton(
-                        systemName: store.sidebarCollapsed
-                            ? "sidebar.left" : "sidebar.leading",
-                        tooltip: store.sidebarCollapsed ? "Show sidebar" : "Hide sidebar") {
-                            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                                store.setSidebarCollapsed(!store.sidebarCollapsed)
-                            }
-                        }
-                    if !store.tabs.isEmpty {
-                        TabBarView(store: store, theme: theme, ops: ops,
-                                   onSelect: { _ in attempted = nil })
-                    }
-                    Spacer(minLength: 0)
-                }
+                // The header renders in EVERY state, including the empty one:
+                // it carries the sidebar toggle and the history chevrons, and
+                // hiding those with no document open would make a collapsed
+                // sidebar unrecoverable except by a shortcut nobody has been
+                // told about.
+                DocumentHeaderBar(session: store.selectedTab, store: store, theme: theme,
+                                  row: headerRow, ops: ops)
                 content
             }
             // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
