@@ -48,6 +48,18 @@ struct DocumentPane: View {
     /// sidebars — so the header's document menu drives the SAME confirmations
     /// and refusals the sidebar's context menu does.
     let ops: SidebarOperations
+    /// A command's request to open a panel. Consumed and cleared here — see
+    /// `LoreRootView.openPanel` for why the request travels down rather than
+    /// the state travelling up.
+    @Binding var panelRequest: DocumentPanel?
+    /// Publishes this document's headings upward, so the ⌘⇧O palette can list
+    /// them without re-parsing the document (`MarkdownEngine.outline` is a
+    /// full AST parse, and this view already caches it).
+    let onOutlineChange: ([OutlineEntry]) -> Void
+    /// Publishes the editor's scroll handler upward, so a heading picked in
+    /// the palette can jump. Same channel `OutlineSection` already uses, just
+    /// forwarded one level further.
+    let onScrollHandler: (((Int) -> Void)?) -> Void
     /// The raw target of a Cmd-clicked link that resolved to nothing. Non-nil
     /// only while the "create it?" prompt is up — clicking a dead link must
     /// never create a file silently.
@@ -126,7 +138,10 @@ struct DocumentPane: View {
                               },
                               resolveEmbedTarget: { store.resolveLink($0) },
                               linkTarget: { store.linkTarget(for: $0) },
-                              registerScrollHandler: { handler in scrollHandler = handler },
+                              registerScrollHandler: { handler in
+                                  scrollHandler = handler
+                                  onScrollHandler(handler)
+                              },
                               isReadOnly: session.isReadOnly,
                               // Beside `session.url`, never in a vault-wide
                               // folder — see `LoreStore.writeAttachment`'s doc
@@ -207,6 +222,13 @@ struct DocumentPane: View {
         .animation(reduceMotion ? nil : AinkradMotion.materialize,
                    value: bannerSignature)
         .onAppear { refreshOutline(); refreshBacklinksCount() }
+        .onChange(of: panelRequest) { _, requested in
+            guard let requested else { return }
+            panelRequest = nil
+            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
+                panels.toggle(requested)
+            }
+        }
         // Same two triggers `BacklinksPanel` uses for the reasons it already
         // documents (a rename changes `url` without changing `session.id`),
         // plus `reloadGeneration`: "Reload from disk" replaces the engine's
@@ -317,6 +339,7 @@ struct DocumentPane: View {
     /// the wrong place; it can never crash or select out of bounds.
     private func refreshOutline() {
         outline = (session.engine as? MarkdownEngine)?.outline ?? []
+        onOutlineChange(outline)
     }
 
     /// The same accessor `BacklinksPanel` itself uses to count referrers

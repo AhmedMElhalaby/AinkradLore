@@ -19,12 +19,47 @@ struct LoreRootView: View {
     /// finished import cannot leave its report showing the next time the sheet
     /// opens — the coordinator's whole lifetime is one import.
     @State private var importing: ImportCoordinator?
+    /// Non-nil while the command palette is up, carrying which list it shows.
+    @State private var palette: LorePaletteMode?
+    /// The open document's headings and its scroll handler, published upward by
+    /// `DocumentPane` so ⌘⇧O can jump without this view re-parsing the
+    /// document — `MarkdownEngine.outline` is a full AST parse.
+    @State private var outline: [OutlineEntry] = []
+    @State private var jumpToOffset: ((Int) -> Void)?
+    /// A request to open one of the document panels, raised by a command.
+    ///
+    /// A one-shot REQUEST rather than the panel state itself: `DocumentPane`
+    /// owns which panel is open (`DocumentPanelState`), and moving that
+    /// ownership up here just so a command could reach it would put the
+    /// pane's own bottom-bar toggles on a round trip through the root view
+    /// for no benefit. `DocumentPane` consumes and clears this.
+    @State private var openPanel: DocumentPanel?
     @Environment(\.ainkradReduceMotion) private var reduceMotion
 
     init(store: LoreStore, theme: HostTheme) {
         self.store = store
         self.theme = theme
         _ops = State(initialValue: SidebarOperations(store: store))
+    }
+
+    /// Everything a command needs in order to run, assembled once.
+    ///
+    /// Rebuilt per render rather than stored: it is a bundle of references and
+    /// closures over this view's own state, so a cached copy would capture a
+    /// stale `importing`/`palette` binding — and its `context` must be read at
+    /// the moment a command runs, not at the moment it was drawn.
+    private var runner: LoreCommandRunner {
+        LoreCommandRunner(
+            store: store,
+            ops: ops,
+            beginImport: {
+                if let root = store.vaultRoot {
+                    importing = ImportCoordinator(vaultRoot: root)
+                }
+            },
+            togglePanel: { panel in openPanel = panel },
+            openPalette: { palette = $0 },
+            dismissPalette: { palette = nil })
     }
 
     /// A filtered tree of mostly-empty branches is worse than a list, so an
@@ -58,9 +93,8 @@ struct LoreRootView: View {
                                 store.setSidebarCollapsed(!store.sidebarCollapsed)
                             }
                         }
-                        .keyboardShortcut("\\", modifiers: .command)
                     if !store.tabs.isEmpty {
-                        TabBarView(store: store, theme: theme,
+                        TabBarView(store: store, theme: theme, ops: ops,
                                    onSelect: { _ in attempted = nil })
                     }
                     Spacer(minLength: 0)
@@ -84,24 +118,29 @@ struct LoreRootView: View {
         // `loreSidebarOperations` below, whose `LoreNoticeBridge` reads the
         // center this injects.
         .ainkradToastHost()
-        // ⌘Z undoes the last confirmed delete. Zero-sized and hidden, the same
-        // pattern `TabBarView.closeShortcut` uses for ⌘W.
-        //
-        // Mounted only while there IS something to undo, for the reason
-        // `DocumentPane`'s Esc button documents: `.keyboardShortcut` is
-        // dispatched at `performKeyEquivalent` time, before `keyDown` reaches
-        // the first responder, so an unconditional claim on ⌘Z would steal
-        // undo from the text editor — where ⌘Z means "undo my typing" and is
-        // far more likely to be what the user meant.
+        // Every shortcut in the app, bound from ONE list. Replaces the
+        // hand-placed overlays that used to sit at each command's point of
+        // use — see `LoreCommandShortcuts`, including why availability gates
+        // the binding itself rather than just the action.
+        .loreCommandShortcuts(runner)
+        // An OVERLAY, not a `.sheet`. Two reasons, and the first is a hard
+        // constraint: `loreSidebarOperations` below already owns a `.sheet` on
+        // this same view, and two `.sheet` modifiers on one view are
+        // unreliable on macOS — the failure mode being a dialog that silently
+        // never appears (see `SidebarOperationsPresentation`). The second is
+        // that a command palette is not a document-modal question; it is a
+        // transient surface over the work, which is what an overlay reads as.
         .overlay {
-            if ops.canUndoTrash {
-                Button("Undo delete") { ops.undoLastTrash() }
-                    .keyboardShortcut("z", modifiers: .command)
-                    .opacity(0)
-                    .frame(width: 0, height: 0)
-                    .accessibilityHidden(true)
+            if let mode = palette {
+                LorePalette(mode: mode, store: store, runner: runner, theme: theme,
+                            outline: outline,
+                            onDismiss: { palette = nil },
+                            onJumpToOffset: { jumpToOffset?($0) })
+                    .transition(reduceMotion ? .opacity
+                                : .opacity.combined(with: .scale(scale: 0.98)))
             }
         }
+        .animation(reduceMotion ? nil : AinkradMotion.materialize, value: palette)
         // Attached at the surface ROOT: `ainkradConfirmDialog` dims and centers
         // within the view it modifies, so attaching it to the 280pt sidebar
         // would scope a destructive confirmation to a narrow column.
@@ -152,7 +191,6 @@ struct LoreRootView: View {
                     }
                 }
                 AinkradIconButton(systemName: "plus", action: quickCapture)
-                    .keyboardShortcut("n", modifiers: .command)
             }
             .padding(.horizontal, AinkradSpacing.md)
             .padding(.top, AinkradSpacing.md)
@@ -183,7 +221,10 @@ struct LoreRootView: View {
         } else if let session = store.selectedTab {
             // Identity is the session's stable id — NOT its url, which changes
             // when the session adopts a "save a copy" resolution.
-            DocumentPane(store: store, session: session, theme: theme, ops: ops)
+            DocumentPane(store: store, session: session, theme: theme, ops: ops,
+                         panelRequest: $openPanel,
+                         onOutlineChange: { outline = $0 },
+                         onScrollHandler: { jumpToOffset = $0 })
                 .id(session.id)
         } else {
             switch Self.emptyState(for: store) {

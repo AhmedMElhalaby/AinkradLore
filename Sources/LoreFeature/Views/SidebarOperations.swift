@@ -77,6 +77,43 @@ final class SidebarOperations {
     /// The row a trash was requested for, awaiting confirmation.
     var pendingTrash: IndexRow?
 
+    /// The session whose close was REFUSED — `closeTab` returned false,
+    /// meaning it still holds unsaved work and is still open.
+    ///
+    /// Lifted here from `TabBarView`'s local `@State` so that ⌘W reaches the
+    /// same refusal question whether it was pressed on the tab strip or run as
+    /// a command. Left in the view, the command path would have had to either
+    /// duplicate the dialog or — far worse — ignore the `false` return, which
+    /// is precisely the data-loss bug that return value exists to prevent.
+    var refusedClose: DocumentSession?
+
+    /// The sentence explaining why a close was refused.
+    ///
+    /// Moved here with `refusedClose` for the same reason: one refusal, one
+    /// explanation, reachable from every path that can trigger it.
+    var refusedCloseMessage: String {
+        guard let session = refusedClose else { return "" }
+        let name = session.title.isEmpty ? session.url.lastPathComponent : session.title
+        if session.conflict {
+            return "“\(name)” changed on disk outside Lore, so its unsaved edits couldn't be "
+                 + "saved. Close anyway and those edits are lost — or cancel and resolve the "
+                 + "conflict in the document."
+        }
+        if let error = session.lastSaveError {
+            return "“\(name)” couldn't be saved: \(error.localizedDescription). "
+                 + "Close anyway and its unsaved edits are lost."
+        }
+        return "“\(name)” still has unsaved changes that couldn't be saved. "
+             + "Close anyway and they are lost."
+    }
+
+    /// Discards the refused session's unsaved work, at the user's explicit
+    /// request.
+    func confirmForcedClose() {
+        if let session = refusedClose { store.closeTab(session, force: true) }
+        refusedClose = nil
+    }
+
     init(store: LoreStore) { self.store = store }
 
     // MARK: - Rename

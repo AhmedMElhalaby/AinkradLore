@@ -4,13 +4,14 @@ import AinkradAppKit
 struct TabBarView: View {
     @Bindable var store: LoreStore
     let theme: HostTheme
+    /// Rename / move / trash / close-refusal, shared with the rest of the
+    /// surface. The refused-close state used to be this view's own `@State`;
+    /// it moved to `SidebarOperations` so ⌘W reaches the same question whether
+    /// it is pressed here or run as a command.
+    let ops: SidebarOperations
     /// Called when a tab is activated, so the root view can drop a stale
     /// open-failure it may still be showing.
     var onSelect: (DocumentSession) -> Void = { _ in }
-
-    /// The session whose close was REFUSED — `closeTab` returned false, meaning
-    /// it still holds unsaved work and is still open. We keep the tab and ask.
-    @State private var refused: DocumentSession?
     @State private var hovering: DocumentSession.ID?
 
     /// Tall enough that a `.sm`-padded tab plus its chamfer sits fully INSIDE
@@ -31,16 +32,6 @@ struct TabBarView: View {
             .padding(.vertical, AinkradSpacing.xs)
         }
         .frame(height: Self.barHeight)
-        .overlay(closeShortcut)
-        .ainkradConfirmDialog(
-            isPresented: refusalBinding,
-            title: "Unsaved changes",
-            message: refusalMessage,
-            confirmTitle: "Close anyway",
-            isDestructive: true) {
-                if let session = refused { store.closeTab(session, force: true) }
-                refused = nil
-            }
     }
 
     @ViewBuilder
@@ -85,42 +76,11 @@ struct TabBarView: View {
         .accessibilityLabel("Close \(name)")
     }
 
-    /// ⌘W closes the selected tab, through the same refusal path as the button.
-    private var closeShortcut: some View {
-        Button("Close tab") {
-            if let session = store.selectedTab { attemptClose(session) }
-        }
-        .keyboardShortcut("w", modifiers: .command)
-        .opacity(0)
-        .frame(width: 0, height: 0)
-        .accessibilityHidden(true)
-    }
-
     /// `closeTab` is refusable: false means the tab is STILL OPEN with unsaved
     /// work whose save failed or conflicted. Ignoring that return is exactly
     /// the data-loss bug this path exists to prevent, so we surface why and
     /// make discarding an explicit choice.
     private func attemptClose(_ session: DocumentSession) {
-        if !store.closeTab(session) { refused = session }
-    }
-
-    private var refusalBinding: Binding<Bool> {
-        Binding(get: { refused != nil }, set: { if !$0 { refused = nil } })
-    }
-
-    private var refusalMessage: String {
-        guard let session = refused else { return "" }
-        let name = session.title.isEmpty ? session.url.lastPathComponent : session.title
-        if session.conflict {
-            return "“\(name)” changed on disk outside Lore, so its unsaved edits couldn't be "
-                 + "saved. Close anyway and those edits are lost — or cancel and resolve the "
-                 + "conflict in the document."
-        }
-        if let error = session.lastSaveError {
-            return "“\(name)” couldn't be saved: \(error.localizedDescription). "
-                 + "Close anyway and its unsaved edits are lost."
-        }
-        return "“\(name)” still has unsaved changes that couldn't be saved. "
-             + "Close anyway and they are lost."
+        if !store.closeTab(session) { ops.refusedClose = session }
     }
 }

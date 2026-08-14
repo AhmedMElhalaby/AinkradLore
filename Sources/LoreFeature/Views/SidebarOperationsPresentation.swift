@@ -26,6 +26,19 @@ extension View {
                 message: ops.pendingTrash.map { ops.trashMessage(for: $0) } ?? "",
                 confirmTitle: "Move to Trash",
                 isDestructive: true) { ops.confirmTrash() }
+            // A SECOND confirm dialog on the same view is safe where a second
+            // `.sheet` would not be: `ainkradConfirmDialog` is an `.overlay`,
+            // not a presentation, so the two cannot race the way the stacked
+            // sheets documented above do. Only one can be armed at a time in
+            // practice — a close refusal and a trash confirmation come from
+            // different gestures.
+            .ainkradConfirmDialog(
+                isPresented: Binding(get: { ops.refusedClose != nil },
+                                     set: { if !$0 { ops.refusedClose = nil } }),
+                title: "Unsaved changes",
+                message: ops.refusedCloseMessage,
+                confirmTitle: "Close anyway",
+                isDestructive: true) { ops.confirmForcedClose() }
     }
 }
 

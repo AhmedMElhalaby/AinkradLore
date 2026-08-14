@@ -40,9 +40,12 @@ final class RootViewSmokeTests: XCTestCase {
         for session in store.tabs {
             _ = DocumentPane(store: store, session: session,
                              theme: HostTheme(TestTokens.make()),
-                             ops: SidebarOperations(store: store))
+                             ops: SidebarOperations(store: store),
+                             panelRequest: .constant(nil),
+                             onOutlineChange: { _ in }, onScrollHandler: { _ in })
         }
-        _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
+        _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()),
+                       ops: SidebarOperations(store: store))
     }
 
     /// Regression for the whole-branch review finding: `BacklinksPanel` was
@@ -67,7 +70,9 @@ final class RootViewSmokeTests: XCTestCase {
                        "this test must exercise a non-markdown engine")
         _ = DocumentPane(store: store, session: session,
                          theme: HostTheme(TestTokens.make()),
-                         ops: SidebarOperations(store: store))
+                         ops: SidebarOperations(store: store),
+                         panelRequest: .constant(nil),
+                         onOutlineChange: { _ in }, onScrollHandler: { _ in })
     }
 
     func test_backlinksPanelBuilds() throws {
