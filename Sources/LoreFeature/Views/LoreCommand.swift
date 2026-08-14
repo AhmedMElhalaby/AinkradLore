@@ -26,6 +26,7 @@ struct LoreCommand: Identifiable, Hashable {
     enum ID: String, CaseIterable, Hashable {
         case newNote, newFolder, chooseVault, importNotes
         case toggleSidebar, closeDocument, saveNow, undoDelete
+        case findInDocument, findNext, findPrevious, replaceInDocument
         case rebuildIndex, toggleShowAllFiles
         case toggleOutline, toggleBacklinks
         case commandPalette, quickOpen
@@ -114,6 +115,17 @@ enum LoreCommands {
               shortcut: LoreShortcut("w"), requires: .document, group: .document),
         .init(id: .quickOpen, title: "Quick Open…", systemName: "doc.text.magnifyingglass",
               shortcut: LoreShortcut("p"), requires: .vault, group: .document),
+        .init(id: .findInDocument, title: "Find…", systemName: "magnifyingglass",
+              shortcut: LoreShortcut("f"), requires: .document, group: .document),
+        .init(id: .findNext, title: "Find Next", systemName: "chevron.down",
+              shortcut: LoreShortcut("g"), requires: .document, group: .document),
+        .init(id: .findPrevious, title: "Find Previous", systemName: "chevron.up",
+              shortcut: LoreShortcut("g", shift: true), requires: .document,
+              group: .document),
+        .init(id: .replaceInDocument, title: "Find and Replace…",
+              systemName: "arrow.left.arrow.right",
+              shortcut: LoreShortcut("f", option: true), requires: .document,
+              group: .document),
         // Vault
         .init(id: .newFolder, title: "New Folder…", systemName: "folder.badge.plus",
               shortcut: nil, requires: .vault, group: .vault),

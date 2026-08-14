@@ -38,6 +38,18 @@ extension MarkdownEditor {
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
+        // The system find bar. `usesFindBar` puts it inside the scroll view
+        // rather than in a floating panel, which is what keeps it attached to
+        // the document it is searching when several are open.
+        //
+        // Safe alongside the markdown styling passes: find highlighting is
+        // drawn with the layout manager's TEMPORARY attributes, while
+        // `MarkdownStyleRendering` writes real attributes into the text
+        // storage. The two never touch the same storage, so a restyle on the
+        // next keystroke cannot erase the highlights — which is precisely the
+        // collision that would have made this unusable.
+        tv.usesFindBar = true
+        tv.isIncrementalSearchingEnabled = true
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)

@@ -8,6 +8,10 @@ struct LoreSettingsView: View {
     @Environment(\.ainkradTypography) private var typo
     /// Why the last vault choice did not take. Nil when nothing has failed.
     @State private var failure: String?
+    /// View state, not a persisted preference: the shortcut list is reference
+    /// material someone opens, reads and is done with, so remembering that it
+    /// was open once is not worth a stored key.
+    @State private var shortcutsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.lg) {
@@ -77,6 +81,14 @@ struct LoreSettingsView: View {
             if let indexError = store.indexError {
                 AinkradBanner(message: "The index couldn't be rebuilt: \(indexError)",
                               status: .danger)
+            }
+
+            // Collapsed by default: it is reference material, consulted
+            // occasionally, and expanded it is longer than everything above it
+            // put together.
+            AinkradDisclosureGroup(title: "Keyboard shortcuts",
+                                   isExpanded: $shortcutsExpanded) {
+                LoreShortcutsReference(theme: theme)
             }
         }
         .padding(AinkradSpacing.lg)

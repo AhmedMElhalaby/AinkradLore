@@ -84,6 +84,18 @@ struct LoreCommandRunner {
             openPalette(.commands)
         case .quickOpen:
             openPalette(.documents)
+        // Routed through the responder chain rather than a held reference —
+        // see `LoreFind`. A no-op when focus is not in a text view, which is
+        // the right answer: ⌘F in the sidebar is not a request to search a
+        // document the user is not looking at.
+        case .findInDocument:
+            LoreFind.perform(.showFindInterface)
+        case .findNext:
+            LoreFind.perform(.nextMatch)
+        case .findPrevious:
+            LoreFind.perform(.previousMatch)
+        case .replaceInDocument:
+            LoreFind.perform(.showReplaceInterface)
         }
     }
 

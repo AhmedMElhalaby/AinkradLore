@@ -34,6 +34,9 @@ struct LoreRootView: View {
     /// pane's own bottom-bar toggles on a round trip through the root view
     /// for no benefit. `DocumentPane` consumes and clears this.
     @State private var openPanel: DocumentPanel?
+    /// Set when ↓ is pressed in the search field, handing the keyboard to the
+    /// results list. `NoteListView` consumes and clears it.
+    @State private var listFocusRequest: Bool?
     @Environment(\.ainkradReduceMotion) private var reduceMotion
 
     init(store: LoreStore, theme: HostTheme) {
@@ -170,6 +173,18 @@ struct LoreRootView: View {
             // type into either way.
             HStack(spacing: AinkradSpacing.sm) {
                 AinkradSearchField(text: $query, placeholder: "Search notes")
+                    // ↓ hands the keyboard to the results. Without this, the
+                    // only way from a typed query to the note it found was the
+                    // mouse — which is the whole reason a search field that
+                    // filters a list is not a search surface.
+                    .onMoveCommand { direction in
+                        if direction == .down { listFocusRequest = true }
+                    }
+                    // Esc clears the query rather than dismissing anything:
+                    // `onExitCommand` is scoped to the focused view, so this
+                    // only fires while the caret is in the field, and clearing
+                    // is what Esc means in a search box.
+                    .onExitCommand { query = "" }
                 // Folder creation belongs to Folders mode only — "All
                 // notes" (`NoteListView`) has no folder affordances at
                 // all, by design. Gated on `effectiveSidebarMode` rather
@@ -208,7 +223,7 @@ struct LoreRootView: View {
             } else {
                 NoteListView(store: store, query: $query, selected: $selected, theme: theme,
                             onSelect: openRow, onNew: quickCapture, ops: ops,
-                            activeTag: $activeTag)
+                            activeTag: $activeTag, focusRequest: $listFocusRequest)
             }
         }
     }

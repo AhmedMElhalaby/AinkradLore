@@ -205,7 +205,7 @@ final class RootViewSmokeTests: XCTestCase {
         _ = NoteListView(store: store, query: .constant(""), selected: .constant(nil),
                          theme: HostTheme(TestTokens.make()), onSelect: { _ in },
                          onNew: {}, ops: SidebarOperations(store: store),
-                         activeTag: .constant(nil))
+                         activeTag: .constant(nil), focusRequest: .constant(nil))
     }
 
     func test_documentErrorCard_builds() {

@@ -15,6 +15,17 @@ struct NoteListView: View {
     /// Lifted to `LoreRootView` so it can decide whether an active tag filter
     /// should force the flat list even while the sidebar is in tree mode.
     @Binding var activeTag: String?
+    /// Set by the search field's ↓ to hand the keyboard to this list. A
+    /// one-shot request, consumed here — the same shape as
+    /// `DocumentPane.panelRequest`, and for the same reason: the field cannot
+    /// reach into this view's focus state directly.
+    @Binding var focusRequest: Bool?
+
+    /// Which row the KEYBOARD is on. Deliberately separate from `selected`,
+    /// which is the open document: arrowing through a list must not open every
+    /// document it passes over.
+    @State private var focusedIndex: Int?
+    @FocusState private var listFocused: Bool
 
     private var visible: [IndexRow] {
         // The default-hidden filter applies to BROWSING (`store.rows`) only,
@@ -114,22 +125,94 @@ struct NoteListView: View {
                     action: store.rows.isEmpty ? onNew
                         : allVisibleRowsAreHiddenByDefault ? { store.setShowAllFiles(true) } : nil)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(visible, id: \.path) { row in
-                            LoreSidebarRow.document(
-                                row: row, depth: 0,
-                                isSelected: selected?.path == row.path,
-                                subtitle: row.tags.isEmpty
-                                    ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
-                                emptyTitleFallback: "Untitled",
-                                onTap: { selected = row; onSelect(row) })
-                                .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(visible.enumerated()), id: \.element.path) { index, row in
+                                LoreSidebarRow.document(
+                                    row: row, depth: 0,
+                                    isSelected: selected?.path == row.path,
+                                    subtitle: row.tags.isEmpty
+                                        ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
+                                    emptyTitleFallback: "Untitled",
+                                    onTap: { selected = row; onSelect(row) })
+                                    // A focus ring DISTINCT from selection.
+                                    // They mean different things — "the
+                                    // keyboard is here" versus "this is the
+                                    // open document" — and drawing them the
+                                    // same way makes ↓ look like it is opening
+                                    // documents it has not opened.
+                                    .overlay {
+                                        if focusedIndex == index {
+                                            ChamferShape(cut: LoreMetrics.chamfer)
+                                                .strokeBorder(theme.tokens.accentPrimary,
+                                                              lineWidth: 1.5)
+                                        }
+                                    }
+                                    .id(row.path)
+                                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                            }
                         }
+                    }
+                    // Keeps a keyboard-moved focus on screen. Without this ↓
+                    // walks the focus ring straight out of the viewport and
+                    // the list appears to stop responding.
+                    .onChange(of: focusedIndex) { _, index in
+                        guard let index, visible.indices.contains(index) else { return }
+                        proxy.scrollTo(visible[index].path, anchor: .bottom)
                     }
                 }
             }
         }
         .padding(AinkradSpacing.md)
+        // The list itself is focusable, so ↑/↓ reach it once the user has
+        // arrowed down out of the search field.
+        .focusable()
+        .focused($listFocused)
+        .onMoveCommand { direction in
+            switch direction {
+            case .down: moveFocus(.down)
+            case .up: moveFocus(.up)
+            default: break
+            }
+        }
+        // Return opens the focused row. `onMoveCommand`/`onKeyPress` are the
+        // only route: a `keyboardShortcut(.defaultAction)` claim here would be
+        // dispatched globally and steal Return from every text field on the
+        // surface.
+        .onKeyPress(.return) {
+            guard let index = focusedIndex, visible.indices.contains(index) else {
+                return .ignored
+            }
+            let row = visible[index]
+            selected = row
+            onSelect(row)
+            return .handled
+        }
+        // The focused row must survive a re-rank: after typing another letter
+        // the list is a different list, and an index held across that change
+        // points at a different document — the one thing keyboard navigation
+        // must never do is open something other than what is highlighted.
+        .onChange(of: visible.map(\.path)) { _, paths in
+            focusedIndex = LoreListNavigation.reconciled(previous: focusedPath, ids: paths)
+        }
+        .onChange(of: focusRequest) { _, requested in
+            guard requested != nil else { return }
+            focusRequest = nil
+            listFocused = true
+            focusedIndex = LoreListNavigation.move(.down, from: nil, count: visible.count)
+        }
+    }
+
+    /// The path of the focused row, held so a re-ranked list can be reconciled
+    /// by IDENTITY rather than by position.
+    private var focusedPath: URL? {
+        guard let focusedIndex, visible.indices.contains(focusedIndex) else { return nil }
+        return visible[focusedIndex].path
+    }
+
+    private func moveFocus(_ direction: LoreListNavigation.Direction) {
+        focusedIndex = LoreListNavigation.move(direction, from: focusedIndex,
+                                               count: visible.count)
     }
 }
