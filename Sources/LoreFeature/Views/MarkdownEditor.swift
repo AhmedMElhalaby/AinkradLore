@@ -36,6 +36,15 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// See `EditorContext.writeDroppedFile`. `nil` disables the drop
     /// destination.
     let writeDroppedFile: (@MainActor (URL) -> String?)?
+    /// Fired on every selection change with the live document text and
+    /// selection — the host's context-menu wiring (`MarkdownEditorMenu.swift`)
+    /// uses this to keep its menu items current without reaching back into
+    /// AppKit itself. See that file for why the items cannot be computed at
+    /// the exact moment of a right-click.
+    let onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)?
+    /// Called once the text view exists, with the actions its own context
+    /// menu should run. See `MarkdownEditorMenu.swift`.
+    let registerMenuActions: (@MainActor (EditorMenuActions) -> Void)?
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
@@ -46,7 +55,9 @@ public struct MarkdownEditor: NSViewRepresentable {
                 scrollTarget: Binding<Int?> = .constant(nil),
                 allowsTaskToggle: Bool = false,
                 writePastedImage: (@MainActor (Data, String) -> String?)? = nil,
-                writeDroppedFile: (@MainActor (URL) -> String?)? = nil) {
+                writeDroppedFile: (@MainActor (URL) -> String?)? = nil,
+                onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
+                registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
@@ -55,154 +66,17 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.allowsTaskToggle = allowsTaskToggle
         self.writePastedImage = writePastedImage
         self.writeDroppedFile = writeDroppedFile
-    }
-
-    public func makeNSView(context: Context) -> NSScrollView {
-        // Built by hand rather than via `NSTextView.scrollableTextView()`
-        // because the text view has to be a subclass — Cmd-click detection has
-        // no delegate hook, only `mouseDown(with:)`.
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-
-        let tv = LinkTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 400))
-        tv.autoresizingMask = [.width]
-        tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = false
-        tv.minSize = NSSize(width: 0, height: 0)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                            height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.containerSize = NSSize(width: 0,
-                                                 height: CGFloat.greatestFiniteMagnitude)
-        tv.delegate = context.coordinator
-        tv.isRichText = false
-        tv.allowsUndo = true
-        // Markdown source, not prose. macOS's automatic substitutions turn `"`
-        // into typographic quotes and `--` into an em dash, which corrupts the
-        // very characters the parser reads — and, for `"`, gives the key two
-        // owners, since `MarkdownEditing.pairs` also auto-pairs it. Which one
-        // won depended on a System Settings toggle; now neither does.
-        tv.isAutomaticQuoteSubstitutionEnabled = false
-        tv.isAutomaticDashSubstitutionEnabled = false
-        tv.isAutomaticTextReplacementEnabled = false
-        tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        tv.drawsBackground = true
-        tv.backgroundColor = NSColor(tokens.background)
-        tv.insertionPointColor = NSColor(tokens.accentPrimary)
-        // Margins and measure come from the theme, and are a function of the
-        // view's width — see `MarkdownEditorLayout`. Set once here for the
-        // initial size, then maintained by `onWidthChange`.
-        tv.textContainerInset = MarkdownEditorLayout.containerInset(
-            forViewWidth: tv.bounds.width, theme: MarkdownTheme(tokens: tokens))
-        tv.onWidthChange = { [weak coordinator = context.coordinator] width in
-            coordinator?.applyContainerInset(forWidth: width)
-        }
-        tv.onCommandClick = { [weak coordinator = context.coordinator] index in
-            coordinator?.openLink(atUTF16: index) ?? false
-        }
-        tv.onPlainClick = { [weak coordinator = context.coordinator] index in
-            coordinator?.toggleTask(atUTF16: index) ?? false
-        }
-        // Losing first responder INSIDE the same window — clicking the title
-        // field, the sidebar, another pane — is not covered by
-        // `hidesOnDeactivate`, and would otherwise leave a `.popUpMenu`-level
-        // panel floating over the UI. `textDidEndEditing` covers the common
-        // routes; this covers the rest (focus moved by keyboard, by the shell,
-        // or to a control that does not end editing).
-        tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
-            coordinator?.completionPanel.hide()
-        }
-        tv.onPasteImage = { [weak coordinator = context.coordinator] data, name in
-            coordinator?.insertAttachment(fromPastedImage: data, name: name) ?? false
-        }
-        tv.onDropFileURLs = { [weak coordinator = context.coordinator] urls in
-            coordinator?.insertAttachments(fromDroppedFiles: urls) ?? false
-        }
-        // See `LinkTextView`'s doc comment on why this is registered here,
-        // post-construction, rather than in an overridden initializer.
-        tv.registerForDraggedTypes([.fileURL])
-        scroll.documentView = tv
-
-        // The caret moves under the list when the document scrolls, so the list
-        // has to follow it.
-        scroll.contentView.postsBoundsChangedNotifications = true
-        context.coordinator.observeScrolling(of: scroll.contentView)
-
-        context.coordinator.textView = tv
-        context.coordinator.allowsTaskToggle = allowsTaskToggle
-        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
-        context.coordinator.writePastedImage = writePastedImage
-        context.coordinator.writeDroppedFile = writeDroppedFile
-        context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
-        tv.string = text
-        context.coordinator.applyStyles()
-        return scroll
-    }
-
-    /// A floating label, hidden unless the document is over the hard cap. Added
-    /// to the SCROLL view rather than the text view so it stays put while the
-    /// document scrolls under it, and so it never becomes part of the text.
-    private static func addStylingNotice(to scroll: NSScrollView,
-                                         tokens: HostThemeTokens) -> NSTextField {
-        let notice = NSTextField(labelWithString:
-            "Styling off — document over \(MarkdownDocumentModel.stylingHardCap / (1024 * 1024)) MB")
-        notice.font = .systemFont(ofSize: 11)
-        notice.textColor = NSColor(tokens.accentSecondary)
-        notice.isHidden = true
-        notice.translatesAutoresizingMaskIntoConstraints = false
-        scroll.addSubview(notice)
-        NSLayoutConstraint.activate([
-            notice.trailingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: -20),
-            notice.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 6)
-        ])
-        return notice
-    }
-
-    public func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let tv = context.coordinator.textView else { return }
-        context.coordinator.completions = completions
-        context.coordinator.onOpenLink = onOpenLink
-        context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
-        context.coordinator.linkTarget = linkTarget
-        context.coordinator.allowsTaskToggle = allowsTaskToggle
-        context.coordinator.writePastedImage = writePastedImage
-        context.coordinator.writeDroppedFile = writeDroppedFile
-        if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
-        tv.backgroundColor = NSColor(tokens.background)
-        tv.insertionPointColor = NSColor(tokens.accentPrimary)
-        context.coordinator.tokens = tokens
-        context.coordinator.applyStyles()
-        if let offset = scrollTarget.wrappedValue {
-            context.coordinator.scrollToOffset(offset)
-            // Scheduled, not written synchronously: `updateNSView` is inside a
-            // view-update pass, and writing a `Binding` from there is the
-            // "modifying state during view update" trap.
-            DispatchQueue.main.async { scrollTarget.wrappedValue = nil }
-        }
-        // Deliberately no completion recompute here: `updateNSView` runs on
-        // every ancestor redraw (theme change, banner appearing, window
-        // resize), and querying the index on a redraw is both wasted work and
-        // a way to make a popup appear when the user did not type.
+        self.onSelectionChange = onSelectionChange
+        self.registerMenuActions = registerMenuActions
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(text: $text, tokens: tokens) }
 
-    /// Tearing the editor down must take the floating panel with it — this is
-    /// the path that fires on a tab close and on a document switch (the pane
-    /// re-`id`s the editor, so the old one is dismantled).
-    ///
-    /// `assumeIsolated` only where it is true. AppKit always dismantles on the
-    /// main thread, but asserting that would turn a wrong assumption into a
-    /// crash in the user's editor; off the main thread this degrades to a hop
-    /// instead.
-    public static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { coordinator.tearDown() }
-        } else {
-            Task { @MainActor in coordinator.tearDown() }
-        }
-    }
+    // `makeNSView`, `updateNSView`, `dismantleNSView` and `addStylingNotice`
+    // — the AppKit-object lifecycle — live in `MarkdownEditorView.swift`.
+    // This file keeps the `NSViewRepresentable`'s declared surface (the
+    // properties, the initializer, `makeCoordinator`) together with the
+    // `Coordinator` those lifecycle methods drive.
 
     @MainActor
     public final class Coordinator: NSObject, NSTextViewDelegate {
@@ -230,6 +104,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// has stopped styling rather than leaving the user to wonder.
         weak var stylingNotice: NSTextField?
         let completionPanel = LinkCompletionPanel()
+        /// See `MarkdownEditor.onSelectionChange`.
+        var onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)?
 
         /// Long enough that a burst of typing is one parse, short enough that
         /// the picture settles within a pause the user does not notice.
@@ -257,6 +133,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// reveal state in full: if a caret move leaves this unchanged there is
         /// nothing to redraw, which is what keeps arrowing free of styling work.
         var revealedBlockIndices: Range<Int> = 0..<0
+        /// First-responder state as of the last reveal pass. Compared against
+        /// the LIVE state on every selection-change notification so a focus
+        /// change — which does not move the caret and therefore would not flip
+        /// `revealedBlockIndices` — still forces a full re-apply rather than
+        /// being short-circuited away as "same selection, nothing to do".
+        var lastRevealFocus = true
         /// Every `.embed` span's position, source range and owning block, for
         /// the CURRENT text. Rebuilt only when the text is re-rendered, from
         /// the same pass that builds `revealIndex` — never on a caret move.
@@ -275,6 +157,36 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// The embed-level analogue of `revealedBlockIndices`: if a caret
         /// move leaves this unchanged there is no embed work to do.
         var revealedEmbedSpans: Set<Int> = []
+        /// Whether the LAST text change was handled by the single-block fast
+        /// path rather than a full render. Exists so the bail-out cases can be
+        /// asserted directly instead of inferred from a timing — "it fell back"
+        /// is the claim, and a timing cannot make it.
+        /// Written only by `textDidChange` in `MarkdownEditorEditPath.swift`;
+        /// internal rather than `private(set)` because Swift has no cross-file
+        /// `private`, exactly as `styleCache` above.
+        var lastEditTookFastPath = false
+        /// What the last full `renderStyles()` pass actually painted, and from
+        /// what. The redundant-redraw guard in `applyStyles` compares against
+        /// it; `renderStyles` is the only writer, so it cannot claim a render
+        /// that did not happen.
+        ///
+        /// `nil` until the first render, which is why a fresh editor always
+        /// renders once.
+        var renderedSnapshot: (text: String, tokens: HostThemeTokens)?
+        /// How many times `applyStyles()` has been entered. Counts the CALLS,
+        /// not the renders — the two differ exactly when the entry point
+        /// decides it has nothing to do, which is the thing under measurement.
+        ///
+        /// Exists for the same reason `revealIndexBuilds` does: Task 10 could
+        /// establish by reading that `updateNSView` calls `applyStyles()`
+        /// unconditionally on every ancestor redraw, but "SwiftUI redraws this
+        /// per keystroke" is a claim about SwiftUI's scheduling, and reading
+        /// cannot settle it. See `MarkdownTypingLagBenchmark`.
+        var applyStylesCalls = 0
+        /// How many of those calls reached a full `renderStyles()`. The gap
+        /// between this and `applyStylesCalls` is what the redundant-render
+        /// guard buys.
+        var applyStylesRenders = 0
         /// How many times the index has been built. Exists so a test can pin
         /// the claim that a caret move never rebuilds it — the claim is the
         /// whole performance contract of the reveal path, and an earlier
@@ -301,7 +213,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// `textDidChange`. AppKit always pairs them, and anything that edits
         /// the storage WITHOUT the pair leaves the cache describing a stale
         /// string, which `applyStyles()` then repairs with a real parse.
-        private var pendingEdit: (range: NSRange, replacementLength: Int)?
+        /// Internal, not private: `shouldChangeTextIn` and `textDidChange` now
+        /// live in `MarkdownEditorEditPath.swift`, and Swift has no cross-file
+        /// `private`. Nothing outside that file touches it.
+        var pendingEdit: PendingEdit?
 
         var cachedSpansForTesting: [StyleSpan] { styleCache.spans }
         /// `nonisolated(unsafe)` only so `deinit` can unregister it. It is
@@ -341,42 +256,6 @@ public struct MarkdownEditor: NSViewRepresentable {
             scrollObserver = nil
         }
 
-        // MARK: - Text
-
-        /// Records WHERE the edit is about to happen, so `textDidChange` can
-        /// shift the cached spans instead of re-parsing. Never vetoes an edit.
-        ///
-        /// A nil `replacementString` is an attributes-only change: there is no
-        /// delta to shift by, so the cache is left to notice the mismatch.
-        public func textView(_ tv: NSTextView, shouldChangeTextIn affected: NSRange,
-                             replacementString: String?) -> Bool {
-            // `tv.string` is still the PRE-edit text here, which is the only
-            // moment the cache's currency can be checked against it. Spans that
-            // did not describe the text before the edit cannot be shifted into
-            // describing it after.
-            pendingEdit = styleCache.describes(tv.string)
-                ? replacementString.map { (affected, ($0 as NSString).length) }
-                : nil
-            return true
-        }
-
-        public func textDidChange(_ notification: Notification) {
-            guard let tv = textView else { return }
-            text.wrappedValue = tv.string
-            if let edit = pendingEdit {
-                styleCache.shift(editedRange: edit.range,
-                                 delta: edit.replacementLength - edit.range.length,
-                                 newText: tv.string)
-            }
-            pendingEdit = nil
-            // Renders the SHIFTED spans — no parse on the keystroke path. The
-            // real parse lands one debounce later.
-            renderStyles()
-            scheduleParse()
-            // The ONE place `completions` is called: a keystroke happened.
-            refreshCompletions()
-        }
-
         /// Caret moved without the text changing (click, arrow key). Cheap and
         /// index-free: it can only ever dismiss, never open, so it never asks
         /// the store for rows.
@@ -386,14 +265,36 @@ public struct MarkdownEditor: NSViewRepresentable {
             // construction — see `revealForSelectionChange`, which parses
             // nothing and usually does no work at all.
             revealForSelectionChange()
+            if let tv = textView {
+                onSelectionChange?(tv.string, tv.selectedRange(), tv.spellCheckerDocumentTag)
+            }
             guard completionPanel.isVisible, let tv = textView else { return }
             if activePrefix(in: tv) == nil { completionPanel.hide() }
         }
 
         /// Focus left the editor. Nothing the list offers can be accepted from
         /// here, so it must not keep floating.
+        ///
+        /// Also re-applies reveal: `NSTextView` posts this as it loses first
+        /// responder, and reveal is a function of focus, so a focus change
+        /// must re-apply it exactly as a selection change does. `false` is
+        /// passed explicitly rather than read live — see
+        /// `tv.onResignFirstResponder`'s doc comment above; this delegate
+        /// method is posted from the same `resignFirstResponder` call, before
+        /// `NSWindow` has reassigned first responder away from `tv`.
         public func textDidEndEditing(_ notification: Notification) {
             completionPanel.hide()
+            revealForSelectionChange(forcedFocus: false)
+        }
+
+        /// `NSText` posts this only on the first EDIT after becoming first
+        /// responder, not on becoming it — `tv.onBecomeFirstResponder` above
+        /// is what actually covers "focus arrived here". Kept for the case
+        /// this DOES fire (a click that both focuses and edits in one step):
+        /// the live read is correct here, since `becomeFirstResponder` has
+        /// already returned by the time any edit can happen.
+        public func textDidBeginEditing(_ notification: Notification) {
+            revealForSelectionChange()
         }
 
         // MARK: - Keys the popup owns, and only while it is open
@@ -436,7 +337,9 @@ public struct MarkdownEditor: NSViewRepresentable {
             return LinkCompletionContext.activePrefix(in: text, caret: caret)
         }
 
-        private func refreshCompletions() {
+        /// Internal for the same cross-file reason as `pendingEdit`: its one
+        /// caller, `textDidChange`, lives in `MarkdownEditorEditPath.swift`.
+        func refreshCompletions() {
             guard let tv = textView, let completions,
                   let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return

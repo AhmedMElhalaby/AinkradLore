@@ -11,27 +11,37 @@ import AinkradAppKit
 /// declared and unused.
 enum MarkdownEditorLayout {
 
-    /// The `textContainerInset` for a text view `viewWidth` points wide.
+    /// Left-aligns the measured text column for a view `width` points wide.
     ///
-    /// One symmetric inset does both jobs. `widthTracksTextView` makes the
-    /// container `viewWidth - 2 * inset`, so growing the inset both narrows the
-    /// column and CENTRES it — there is no separate centring step to get wrong,
-    /// and no second coordinate source for `MarkdownBlockBackgrounds` to
-    /// disagree with.
-    ///
-    /// The theme's inset is a FLOOR, never a target: on a narrow pane the cap
-    /// is not binding and the margin must not shrink below what makes the text
-    /// comfortable.
+    /// This used to CENTRE the column — `(viewWidth - maxMeasure) / 2` — which
+    /// on a wide pane pushed the text into the middle of the window and left a
+    /// large empty margin before every line. The measure cap is what keeps
+    /// lines readable; centering was never doing that work, and the column now
+    /// simply starts where the pane starts.
     static func containerInset(forViewWidth viewWidth: CGFloat,
                                theme: MarkdownTheme) -> NSSize {
-        var horizontal = theme.contentInset
-        if let measure = theme.maxMeasure {
-            horizontal = max(horizontal, (viewWidth - measure) / 2)
-        }
         // Clamped so a view narrower than twice the inset still leaves a
         // positive column rather than an inverted one.
-        horizontal = min(horizontal, max(0, viewWidth / 2 - 1))
+        let horizontal = min(theme.contentInset, max(0, viewWidth / 2 - 1))
         return NSSize(width: horizontal, height: theme.contentInset)
+    }
+
+    /// The text container's own width for a view `viewWidth` points wide.
+    ///
+    /// `maxMeasure` is a MAXIMUM, not a fixed width: pinning the container to
+    /// it regardless of the view's actual width left the container wider than
+    /// the visible pane on any window narrower than the measure, and with
+    /// `isHorizontallyResizable = false` and no horizontal scroller that
+    /// overflow was clipped and unreachable — worse than the centring this
+    /// task removed. The container must fit inside whatever space the inset
+    /// leaves, so it is capped at both the theme's measure AND the space
+    /// actually available after both horizontal insets.
+    static func containerWidth(forViewWidth viewWidth: CGFloat,
+                               theme: MarkdownTheme) -> CGFloat {
+        let inset = containerInset(forViewWidth: viewWidth, theme: theme)
+        let available = max(0, viewWidth - inset.width * 2)
+        guard let measure = theme.maxMeasure else { return available }
+        return min(measure, available)
     }
 }
 
@@ -157,6 +167,12 @@ extension MarkdownEditor.Coordinator {
     /// milliseconds, is the thing being avoided there.
     func applyStyles() {
         guard let tv = textView else { return }
+        applyStylesCalls += 1
+        // The redundant-redraw guard — see `isRenderStale` in
+        // `MarkdownEditorEditPath.swift` for what it checks and why a keystroke
+        // reaches here at all.
+        if !isRenderStale(for: tv) { return }
+        applyStylesRenders += 1
         if !styleCache.describes(tv.string) {
             if tv.string.utf16.count <= MarkdownStyleCache.synchronousParseCap {
                 styleCache.reparse(tv.string)
@@ -171,7 +187,13 @@ extension MarkdownEditor.Coordinator {
     }
 
     /// Applies the cached spans. No parse, ever.
-    func renderStyles() {
+    ///
+    /// `forcedFocus` overrides the live first-responder read for callers that
+    /// already KNOW the answer and cannot trust a live read at this exact
+    /// moment — see `revealForSelectionChange`'s doc comment on why
+    /// `resignFirstResponder`'s own callback is exactly such a moment. `nil`
+    /// (every other caller) reads live, as before.
+    func renderStyles(forcedFocus: Bool? = nil) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let window = styleCache.isOverViewportCap
             ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
@@ -201,7 +223,7 @@ extension MarkdownEditor.Coordinator {
         // doc comment for who reads it and why a fresh scan per render is safe.
         documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)
             ?? .leftToRight
-        collapseHiddenMarkers(in: storage, window: window)
+        collapseHiddenMarkers(in: storage, window: window, forcedFocus: forcedFocus)
         // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
         // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see
         // `EmbedRendering.swift`'s doc comment on the chip pill), collapsed
@@ -226,20 +248,43 @@ extension MarkdownEditor.Coordinator {
         }
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
+        // LAST, and only here: what is on screen now, and what produced it.
+        // Recorded after every early-return-free path through this method, so
+        // the guard in `applyStyles` can never be told a render happened that
+        // did not.
+        renderedSnapshot = (tv.string, tokens)
+    }
+
+    /// `NSTextView`'s first-responder state, read live rather than cached —
+    /// a cached copy can go stale the moment focus moves elsewhere.
+    ///
+    /// A text view with NO window (as in unit tests that build one directly,
+    /// never inserting it into a window) has no first-responder concept at
+    /// all; treated as focused rather than unfocused, since "no window" is
+    /// not the same claim as "lost focus to something else".
+    var isTextViewFocused: Bool {
+        guard let tv = textView else { return false }
+        guard let window = tv.window else { return true }
+        return window.firstResponder === tv
     }
 
     /// Hides the markers of every block the selection is NOT in, and records
     /// the reveal state that `revealForSelectionChange` compares against.
     ///
-    /// The whole-document version, run only as part of a full render.
-    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?) {
+    /// The whole-document version, run only as part of a full render. See
+    /// `renderStyles`'s doc comment for `forcedFocus`.
+    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?,
+                                       forcedFocus: Bool? = nil) {
         guard let tv = textView else { return }
         let selection = tv.selectedRange()
-        revealedBlockIndices = MarkdownEditorReveal.revealedBlockIndices(
-            revealIndex.blocks, selection: selection)
+        let focused = forcedFocus ?? isTextViewFocused
+        lastRevealFocus = focused
+        revealedBlockIndices = focused ? MarkdownEditorReveal.revealedBlockIndices(
+            revealIndex.blocks, selection: selection) : 0..<0
         var hidden = MarkdownReveal.hiddenMarkers(spans: styleCache.spans,
                                                   selection: selection,
-                                                  blocks: revealIndex.blocks)
+                                                  blocks: revealIndex.blocks,
+                                                  isFocused: focused)
         if let window {
             hidden = hidden.filter {
                 $0.lowerBound < NSMaxRange(window) && $0.upperBound > window.location
@@ -268,12 +313,32 @@ extension MarkdownEditor.Coordinator {
     /// ordinary prose crosses one every few keypresses; the full path would
     /// have restyled the note each time. Block ranges depend only on the TEXT
     /// and are rebuilt only when the text is rendered.
-    func revealForSelectionChange() {
+    /// `forcedFocus`: pass the KNOWN state rather than let this read live
+    /// when the caller is invoked from inside `resignFirstResponder` — at
+    /// that point `NSWindow` has not yet reassigned `_firstResponder` away
+    /// from `tv` (it does so only after `resignFirstResponder` RETURNS), so
+    /// a live read of `window.firstResponder === tv` still answers `true`
+    /// and this whole focus-changed branch never triggers. A deferred
+    /// `DispatchQueue.main.async` read would also see the post-reassignment
+    /// value, but passing the already-known answer is simpler and doesn't
+    /// leave a frame where the markers are wrong. `nil` (the ordinary
+    /// selection-change path) reads live, as before.
+    func revealForSelectionChange(forcedFocus: Bool? = nil) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         guard !revealIndex.blocks.isEmpty else { return }
         let selection = tv.selectedRange()
-        let now = MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
-                                                            selection: selection)
+        let focused = forcedFocus ?? isTextViewFocused
+        // A focus change does not move the caret, so `now == was` below would
+        // otherwise short-circuit an unfocus away as "same selection, nothing
+        // to do" and leave the caret's block visibly revealed to a reader who
+        // is no longer editing. Route it through the full render instead,
+        // which is the only path that knows how to re-hide markers wholesale.
+        guard focused == lastRevealFocus else {
+            renderStyles(forcedFocus: focused)
+            return
+        }
+        let now = focused ? MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
+                                                            selection: selection) : 0..<0
         let was = revealedBlockIndices
         guard now != was else {
             // NOT a block flip — but an embed's reveal is a SPAN-level
@@ -355,95 +420,6 @@ extension MarkdownEditor.Coordinator {
         MarkdownStyleRenderer.collapse(hidden, in: storage)
     }
 
-    // MARK: - Container geometry
-
-    /// Re-centres the text column for a view `width` points wide.
-    ///
-    /// Called on every width change, because the inset is a function of the
-    /// width: without this the column would keep the margins it was born with
-    /// and drift off-centre as the window resizes.
-    func applyContainerInset(forWidth width: CGFloat) {
-        guard let tv = textView else { return }
-        let inset = MarkdownEditorLayout.containerInset(
-            forViewWidth: width, theme: MarkdownTheme(tokens: tokens))
-        guard tv.textContainerInset != inset else { return }
-        tv.textContainerInset = inset
-        // The drawn decoration is positioned from the container, so it has to
-        // be repainted when the container moves.
-        tv.needsDisplay = true
-    }
-
-    // MARK: - Parsing
-
-    /// Re-arms the debounce. Only its firing parses, so a burst of typing
-    /// costs one parse rather than one per character.
-    func scheduleParse() {
-        parseTimer?.invalidate()
-        let timer = Timer(timeInterval: Self.parseDebounce, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.parseNow() }
-        }
-        parseTimer = timer
-        // `.common` so the parse still lands while the user is scrolling or
-        // holding a menu open, rather than after they stop.
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    /// Parses OFF the main actor and applies the result back on it.
-    ///
-    /// This used to be a synchronous parse on the main actor, called from a
-    /// main-run-loop timer. On a large note that is measured in whole
-    /// seconds, and a main-actor second is not lag — it is a beachball, once
-    /// per pause in typing. The parse itself is pure (`derive` touches no
-    /// AppKit and no editor state), so the only thing that must stay on the
-    /// main actor is applying the answer.
-    ///
-    /// Two guards keep a slow parse from styling the wrong characters:
-    ///
-    /// 1. `generation` — a newer parse having been started makes this one's
-    ///    result garbage, even if the text looks right.
-    /// 2. the SNAPSHOT check — the spans index `snapshot` and nothing else,
-    ///    so they are installed only if the view still holds exactly that
-    ///    string. This is the same identity rule `describes(_:)` encodes,
-    ///    applied across the hop.
-    ///
-    /// When the text HAS moved on, nothing is applied and nothing is
-    /// re-armed here: the edit that moved it went through `textDidChange`,
-    /// which armed the debounce already.
-    func parseNow() {
-        // Invalidated, not merely dropped: `applyStyles` calls this DIRECTLY on
-        // the open path, so there may be a debounce timer still armed, and a
-        // released-but-live `Timer` would fire into a parse that has already
-        // been launched.
-        parseTimer?.invalidate()
-        parseTimer = nil
-        guard let tv = textView else { return }
-        let snapshot = tv.string
-        guard styleCache.isStale || !styleCache.describes(snapshot) else { return }
-        parseGeneration += 1
-        let generation = parseGeneration
-        Task.detached(priority: .userInitiated) {
-            let derived = MarkdownStyleCache.derive(snapshot)
-            await MainActor.run { [weak self] in
-                self?.applyParsed(derived, of: snapshot, generation: generation)
-            }
-        }
-    }
-
-    private func applyParsed(_ derived: MarkdownStyleCache.Derived,
-                             of snapshot: String, generation: Int) {
-        guard generation == parseGeneration,
-              let tv = textView, tv.string == snapshot else { return }
-        styleCache.adopt(derived, for: snapshot)
-        renderStyles()
-    }
-
-    /// In viewport mode the styled range follows the scroll, so scrolling
-    /// has to re-render — but only when the window actually moved, since
-    /// this fires continuously during a drag.
-    func restyleForViewportIfNeeded() {
-        guard styleCache.isOverViewportCap, let tv = textView else { return }
-        let window = MarkdownStyleRenderer.viewportWindow(of: tv)
-        if let last = lastViewportWindow, NSEqualRanges(last, window) { return }
-        renderStyles()
-    }
+    // Container geometry and the off-actor parse pipeline (the debounce,
+    // `parseNow`, viewport restyling) live in `MarkdownEditorParsing.swift`.
 }

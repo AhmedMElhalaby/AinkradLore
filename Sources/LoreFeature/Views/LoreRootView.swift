@@ -19,6 +19,7 @@ struct LoreRootView: View {
     /// finished import cannot leave its report showing the next time the sheet
     /// opens — the coordinator's whole lifetime is one import.
     @State private var importing: ImportCoordinator?
+    @Environment(\.ainkradReduceMotion) private var reduceMotion
 
     init(store: LoreStore, theme: HostTheme) {
         self.store = store
@@ -35,63 +36,27 @@ struct LoreRootView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: AinkradSpacing.sm) {
-                // Search and quick-capture live ABOVE the mode picker, outside
-                // both sidebars. They used to live inside `NoteListView`, which
-                // is not mounted in tree mode — so in tree mode the user could
-                // not search and could not create a note at all. Typing a query
-                // still swings the sidebar to the flat list (see
-                // `effectiveSidebarMode`); the point is that the field exists to
-                // type into either way.
-                HStack(spacing: AinkradSpacing.sm) {
-                    AinkradSearchField(text: $query, placeholder: "Search notes")
-                    // Folder creation belongs to Folders mode only — "All
-                    // notes" (`NoteListView`) has no folder affordances at
-                    // all, by design. Gated on `effectiveSidebarMode` rather
-                    // than `store.sidebarMode` so an active search/tag filter
-                    // (which silently forces the flat list — see
-                    // `effectiveSidebarMode`) hides this too: it would
-                    // otherwise sit above a list that is not the tree, next to
-                    // rows it cannot affect.
-                    if effectiveSidebarMode == .tree, let root = store.vaultRoot {
-                        AinkradIconButton(systemName: "folder.badge.plus",
-                                         tooltip: "New Folder") {
-                            ops.beginNewFolder(in: root)
-                        }
-                    }
-                    if let root = store.vaultRoot {
-                        AinkradIconButton(systemName: "square.and.arrow.down",
-                                         tooltip: "Import…") {
-                            importing = ImportCoordinator(vaultRoot: root)
-                        }
-                    }
-                    AinkradIconButton(systemName: "plus", action: quickCapture)
-                        .keyboardShortcut("n", modifiers: .command)
-                }
-                .padding(.horizontal, AinkradSpacing.md)
-                .padding(.top, AinkradSpacing.md)
-
-                AinkradSegmentedPicker(
-                    items: [LoreStore.SidebarMode.tree, .all],
-                    selection: Binding(get: { store.sidebarMode },
-                                       set: { store.setSidebarMode($0) })
-                ) { mode in mode == .tree ? "Folders" : "All notes" }
-                .padding(.horizontal, AinkradSpacing.md)
-
-                if effectiveSidebarMode == .tree {
-                    FolderTreeView(store: store, theme: theme, selected: $selected,
-                                  onSelect: openRow, ops: ops)
-                } else {
-                    NoteListView(store: store, query: $query, selected: $selected, theme: theme,
-                                onSelect: openRow, onNew: quickCapture, ops: ops,
-                                activeTag: $activeTag)
-                }
+            if !store.sidebarCollapsed {
+                sidebar
+                    .frame(width: 280)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
             }
-                .frame(width: 280)
             VStack(spacing: 0) {
-                if !store.tabs.isEmpty {
-                    TabBarView(store: store, theme: theme,
-                               onSelect: { _ in attempted = nil })
+                HStack(spacing: AinkradSpacing.sm) {
+                    AinkradIconButton(
+                        systemName: store.sidebarCollapsed
+                            ? "sidebar.left" : "sidebar.leading",
+                        tooltip: store.sidebarCollapsed ? "Show sidebar" : "Hide sidebar") {
+                            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
+                                store.setSidebarCollapsed(!store.sidebarCollapsed)
+                            }
+                        }
+                        .keyboardShortcut("\\", modifiers: .command)
+                    if !store.tabs.isEmpty {
+                        TabBarView(store: store, theme: theme,
+                                   onSelect: { _ in attempted = nil })
+                    }
+                    Spacer(minLength: 0)
                 }
                 content
             }
@@ -121,6 +86,61 @@ struct LoreRootView: View {
             }
             if let url = attempted, !store.rows.contains(where: { $0.path == url }) {
                 attempted = nil
+            }
+        }
+    }
+
+    @ViewBuilder private var sidebar: some View {
+        VStack(alignment: .leading, spacing: AinkradSpacing.sm) {
+            // Search and quick-capture live ABOVE the mode picker, outside
+            // both sidebars. They used to live inside `NoteListView`, which
+            // is not mounted in tree mode — so in tree mode the user could
+            // not search and could not create a note at all. Typing a query
+            // still swings the sidebar to the flat list (see
+            // `effectiveSidebarMode`); the point is that the field exists to
+            // type into either way.
+            HStack(spacing: AinkradSpacing.sm) {
+                AinkradSearchField(text: $query, placeholder: "Search notes")
+                // Folder creation belongs to Folders mode only — "All
+                // notes" (`NoteListView`) has no folder affordances at
+                // all, by design. Gated on `effectiveSidebarMode` rather
+                // than `store.sidebarMode` so an active search/tag filter
+                // (which silently forces the flat list — see
+                // `effectiveSidebarMode`) hides this too: it would
+                // otherwise sit above a list that is not the tree, next to
+                // rows it cannot affect.
+                if effectiveSidebarMode == .tree, let root = store.vaultRoot {
+                    AinkradIconButton(systemName: "folder.badge.plus",
+                                     tooltip: "New Folder") {
+                        ops.beginNewFolder(in: root)
+                    }
+                }
+                if let root = store.vaultRoot {
+                    AinkradIconButton(systemName: "square.and.arrow.down",
+                                     tooltip: "Import…") {
+                        importing = ImportCoordinator(vaultRoot: root)
+                    }
+                }
+                AinkradIconButton(systemName: "plus", action: quickCapture)
+                    .keyboardShortcut("n", modifiers: .command)
+            }
+            .padding(.horizontal, AinkradSpacing.md)
+            .padding(.top, AinkradSpacing.md)
+
+            AinkradSegmentedPicker(
+                items: [LoreStore.SidebarMode.tree, .all],
+                selection: Binding(get: { store.sidebarMode },
+                                   set: { store.setSidebarMode($0) })
+            ) { mode in mode == .tree ? "Folders" : "All notes" }
+            .padding(.horizontal, AinkradSpacing.md)
+
+            if effectiveSidebarMode == .tree {
+                FolderTreeView(store: store, theme: theme, selected: $selected,
+                              onSelect: openRow, ops: ops)
+            } else {
+                NoteListView(store: store, query: $query, selected: $selected, theme: theme,
+                            onSelect: openRow, onNew: quickCapture, ops: ops,
+                            activeTag: $activeTag)
             }
         }
     }

@@ -27,7 +27,7 @@ final class MarkdownRevealBenchmark: XCTestCase {
         for location in stride(from: 0, to: 20_000, by: 500) {
             _ = MarkdownReveal.hiddenMarkers(spans: spans,
                                              selection: NSRange(location: location, length: 0),
-                                             blocks: blocks)
+                                             blocks: blocks, isFocused: true)
         }
         XCTAssertEqual(MarkdownParseCounter.count, 0,
                        "caret movement must never trigger a parse")

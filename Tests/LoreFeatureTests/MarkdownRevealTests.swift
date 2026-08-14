@@ -1,14 +1,114 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import LoreFeature
 
 final class MarkdownRevealTests: XCTestCase {
 
-    private func hidden(_ body: String, selection: NSRange) -> [Range<Int>] {
+    private func hidden(_ body: String, selection: NSRange,
+                        isFocused: Bool = true) -> [Range<Int>] {
         let model = MarkdownDocumentModel(body: body)
         return MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                             selection: selection,
-                                            blocks: MarkdownReveal.blocks(in: body))
+                                            blocks: MarkdownReveal.blocks(in: body),
+                                            isFocused: isFocused)
+    }
+
+    /// An unfocused editor KEEPS its selection, so the block the caret was
+    /// last in stayed revealed and its syntax stayed on screen. Reveal is a
+    /// function of the selection AND of first-responder state: unfocused means
+    /// no revealed block at all.
+    func test_losingFocusHidesEveryMarker() {
+        let body = "**bold**\n\nplain paragraph"
+        let caretInsideTheSpan = NSRange(location: 3, length: 0)
+        XCTAssertTrue(hidden(body, selection: caretInsideTheSpan).isEmpty,
+                      "focused: the caret's own block reveals")
+        XCTAssertFalse(hidden(body, selection: caretInsideTheSpan, isFocused: false).isEmpty,
+                       "unfocused: nothing reveals")
+    }
+
+    /// The end-to-end regression for the resign-first-responder timing bug,
+    /// driven through the REAL production wiring rather than a re-declared
+    /// copy of it.
+    ///
+    /// A first version of this test built its own `LinkTextView` and assigned
+    /// `onResignFirstResponder`/`onBecomeFirstResponder` closures by hand,
+    /// hardcoding the `forcedFocus` argument inline. That proved the
+    /// MECHANISM (`revealForSelectionChange(forcedFocus:)` does what it
+    /// says) but not the actual bug, which was never in the mechanism — it
+    /// was in what `MarkdownEditor.makeNSView` passes to it. That version
+    /// would keep passing even if the production closure at
+    /// `MarkdownEditor.swift`'s `tv.onResignFirstResponder` were reverted
+    /// back to a bare `revealForSelectionChange()`, because the test's own
+    /// hardcoded `false` would still be there doing the work. It only failed
+    /// if `forcedFocus` were deleted outright — a compile error, not a
+    /// regression.
+    ///
+    /// This version instead hosts the real `MarkdownEditor` SwiftUI view in
+    /// an `NSHostingView` inside a REAL `NSWindow` — the same technique
+    /// `RichTextEngineTests.hostedWindow` already uses in this target — which
+    /// forces SwiftUI to actually run `MarkdownEditor.makeNSView` and
+    /// produce the real `LinkTextView` with the real `onResignFirstResponder`/
+    /// `onBecomeFirstResponder` closures attached, exactly as the app wires
+    /// them. Reverting `MarkdownEditor.swift`'s resign/become closures back
+    /// to unforced calls turns THIS test red — confirmed locally (see the
+    /// fix report).
+    @MainActor
+    func test_resigningFirstResponderActuallyHidesTheMarkers() throws {
+        let body = "**bold**\n\nplain paragraph"
+        let hosting = NSHostingView(rootView: AnyView(
+            MarkdownEditor(text: .constant(body), tokens: TestTokens.make())))
+        hosting.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+
+        let tv = try XCTUnwrap(Self.findLinkTextView(in: hosting),
+                               "MarkdownEditor.makeNSView must have produced a LinkTextView by now")
+        // A caret click, not a test-only shortcut: `setSelectedRange` is the
+        // same call AppKit itself makes on a mouse click, and — because
+        // `tv.delegate` is the real coordinator, wired by the real
+        // `makeNSView` — it drives the real `textViewDidChangeSelection`.
+        tv.setSelectedRange(NSRange(location: 3, length: 0))
+
+        let storage = try XCTUnwrap(tv.textStorage)
+        func markerSize() -> CGFloat {
+            (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize ?? -1
+        }
+
+        XCTAssertTrue(window.makeFirstResponder(tv))
+        XCTAssertGreaterThan(markerSize(), 1, "focused: the caret's own block is revealed")
+
+        // Resigns to the WINDOW itself — always a valid first responder, so
+        // this exercises the real `resignFirstResponder` call without
+        // needing a second view to hand focus to.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertLessThan(markerSize(), 0.1, "resigning first responder must hide the markers")
+
+        XCTAssertTrue(window.makeFirstResponder(tv))
+        XCTAssertGreaterThan(markerSize(), 1, "regaining first responder must reveal them again")
+    }
+
+    /// Depth-first search of a REAL, SwiftUI-produced view hierarchy for the
+    /// `LinkTextView` `MarkdownEditor.makeNSView` builds — it sits inside an
+    /// `NSScrollView`'s `documentView`, several levels below the hosting view.
+    private static func findLinkTextView(in view: NSView) -> LinkTextView? {
+        if let tv = view as? LinkTextView { return tv }
+        for subview in view.subviews {
+            if let found = findLinkTextView(in: subview) { return found }
+        }
+        return nil
+    }
+
+    /// Unfocused hides EVERY marker, not merely the caret's block.
+    func test_unfocusedHidesMarkersInEveryBlock() {
+        let body = "**a**\n\n*b*\n\n`c`"
+        let model = MarkdownDocumentModel(body: body)
+        let markers = model.styleSpans.filter { if case .marker = $0.kind { return true } else { return false } }
+        XCTAssertEqual(hidden(body, selection: NSRange(location: 2, length: 0),
+                              isFocused: false).count,
+                       markers.count)
     }
 
     /// With the caret elsewhere, every marker is hidden — this is the clean
@@ -182,7 +282,7 @@ extension MarkdownRevealTests {
             MarkdownStyleRenderer.collapse(
                 MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                              selection: NSRange(location: caret, length: 0),
-                                             blocks: blocks),
+                                             blocks: blocks, isFocused: true),
                 in: storage)
             return (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?
                 .pointSize ?? -1
@@ -312,7 +412,7 @@ extension MarkdownRevealTests {
         var callbacks = 0
         tv.onWidthChange = { [weak coordinator] width in
             callbacks += 1
-            coordinator?.applyContainerInset(forWidth: width)
+            coordinator?.applyContainerGeometry(forWidth: width)
         }
 
         tv.setFrameSize(NSSize(width: 2000, height: 600))

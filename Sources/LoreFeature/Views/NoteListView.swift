@@ -89,15 +89,14 @@ struct NoteListView: View {
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         ForEach(visible, id: \.path) { row in
-                            AinkradListRow(
+                            LoreSidebarRow.document(
+                                row: row, depth: 0,
                                 isSelected: selected?.path == row.path,
-                                onTap: { selected = row; onSelect(row) },
-                                leading: { AinkradIconGlyph(systemName: "doc.text") },
-                                title: row.title.isEmpty ? "Untitled" : row.title,
                                 subtitle: row.tags.isEmpty
                                     ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
-                                trailing: { EmptyView() })
-                            .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                                emptyTitleFallback: "Untitled",
+                                onTap: { selected = row; onSelect(row) })
+                                .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
                         }
                     }
                 }

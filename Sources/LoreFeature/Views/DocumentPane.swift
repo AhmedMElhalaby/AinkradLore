@@ -74,6 +74,20 @@ struct DocumentPane: View {
     /// task removing from the styling path.
     @State private var outlineDebouncer = OutlineRefreshDebouncer()
 
+    /// Cached the same way `outline` is, and for the same reason: the bottom
+    /// bar's badge needs a count even while the slideover is shut, but
+    /// `store.backlinks(to:)` hits SQLite — reading it straight from `body`
+    /// would re-query on every unrelated redraw. Refreshed on exactly the
+    /// triggers `BacklinksPanel` itself uses (`onAppear`, `onChange(of: url)`)
+    /// plus `reloadGeneration`, matching `outline`'s triggers, so the badge
+    /// never falls behind the panel's own count once it's opened.
+    @State private var backlinksCount: Int = 0
+
+    /// Which of Outline / Linked mentions the right-edge slideover is
+    /// showing, if either.
+    @State private var panels = DocumentPanelState()
+    @Environment(\.ainkradReduceMotion) private var reduceMotion
+
     var body: some View {
         VStack(spacing: 0) {
             if session.isReadOnly { readOnlyBanner }
@@ -162,41 +176,62 @@ struct DocumentPane: View {
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
 
-            // Outbound links (the outline, and — inside `BacklinksPanel` —
-            // the unresolved-links list) only exist for markdown documents:
-            // only `MarkdownEngine` parses a body for headings or `[[…]]`/
-            // `![[…]]` syntax, so an attachment or plain-text document has
-            // no outbound link graph to show. RECEIVING backlinks is a
+            // The outline is markdown-only — `counts[.outline]` reads `0` for
+            // any other engine because `refreshOutline` already returns `[]`
+            // there, so no gate is needed here. Receiving backlinks is a
             // different question: any document type can be a link TARGET
-            // (Task 7 made attachments resolvable targets), so a PDF or
-            // other attachment can have referrers even though it emits none
-            // itself. `BacklinksPanel` therefore always renders; only the
-            // markdown-only outline is gated on the engine type.
-            if session.engine is MarkdownEngine {
-                // Gated on the CACHED outline being non-empty, not merely on
-                // the document being markdown: a markdown note with no
-                // headings yet is exactly as noise-free a case as a
-                // plain-text file, and showing an empty "Outline (0)" here
-                // would be noise, not information.
-                if !outline.isEmpty {
-                    OutlineSection(store: store, outline: outline,
-                                  theme: theme) { offset in scrollHandler?(offset) }
-                        .frame(maxHeight: 200)
+            // (Task 7 made attachments resolvable targets), so the Linked
+            // mentions button and its count apply to every document type,
+            // same asymmetry `BacklinksPanel` already encoded.
+            DocumentPanelBar(counts: [.outline: outline.count,
+                                      .backlinks: backlinksCount],
+                             open: panels.open, theme: theme) { panel in
+                withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
+                    panels.toggle(panel)
                 }
             }
-            BacklinksPanel(store: store, url: session.url, theme: theme)
-                .frame(maxHeight: 200)
         }
         .background(theme.tokens.background)
-        .onAppear { refreshOutline() }
+        .onAppear { refreshOutline(); refreshBacklinksCount() }
         // Same two triggers `BacklinksPanel` uses for the reasons it already
         // documents (a rename changes `url` without changing `session.id`),
         // plus `reloadGeneration`: "Reload from disk" replaces the engine's
         // note in place without either of those changing, and the outline
         // must not keep showing headings from the text that was just
         // discarded.
-        .onChange(of: session.url) { refreshOutline() }
-        .onChange(of: session.reloadGeneration) { refreshOutline() }
+        .onChange(of: session.url) { refreshOutline(); refreshBacklinksCount() }
+        .onChange(of: session.reloadGeneration) { refreshOutline(); refreshBacklinksCount() }
+        .overlay(alignment: .topTrailing) {
+            if let panel = panels.open {
+                DocumentSlideover(panel: panel, theme: theme,
+                                  onClose: { panels.dismiss() }) {
+                    switch panel {
+                    case .outline:
+                        OutlineSection(store: store, outline: outline,
+                                       theme: theme) { offset in scrollHandler?(offset) }
+                    case .backlinks:
+                        BacklinksPanel(store: store, url: session.url, theme: theme)
+                    }
+                }
+            }
+        }
+        // Esc closes the slideover. Zero-sized and hidden, the same pattern
+        // `TabBarView.closeShortcut` already uses for ⌘W. Gated on a panel
+        // actually being open: `.keyboardShortcut(.cancelAction)` is
+        // dispatched at `performKeyEquivalent` time, BEFORE `keyDown` reaches
+        // the first responder, so an unconditionally-mounted claim on Esc
+        // would steal it from `MarkdownEditor`'s own `cancelOperation`
+        // handling (dismissing the `[[`-completion popup) even when there is
+        // no panel to close.
+        .overlay {
+            if panels.open != nil {
+                Button("Close panel") { panels.dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+        }
         .alert("Create this note?",
                isPresented: Binding(get: { unresolved != nil },
                                     set: { if !$0 { unresolved = nil } })) {
@@ -234,6 +269,14 @@ struct DocumentPane: View {
     /// the wrong place; it can never crash or select out of bounds.
     private func refreshOutline() {
         outline = (session.engine as? MarkdownEngine)?.outline ?? []
+    }
+
+    /// The same accessor `BacklinksPanel` itself uses to count referrers
+    /// (`LoreStore.backlinks(to:)`) — cached here rather than queried a
+    /// second time from a separate path, so the bottom bar's badge and the
+    /// panel's own count can never disagree.
+    private func refreshBacklinksCount() {
+        backlinksCount = store.backlinks(to: session.url).count
     }
 
     /// Creates the note this dead link names, via the store's single
