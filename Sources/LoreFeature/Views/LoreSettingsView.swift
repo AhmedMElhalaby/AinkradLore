@@ -54,6 +54,44 @@ struct LoreSettingsView: View {
                 AinkradToggle(isOn: showAllFilesBinding)
             }
 
+            // The editor's OWN settings — not inherited from the host theme.
+            // The host owns hue; how large the text is and how wide the column
+            // runs are properties of the document and the person reading it.
+            // See `EditorSettings`.
+            AinkradSectionHeader(title: "Editor")
+
+            AinkradFormRow(title: "Text size",
+                           help: "Line height and paragraph spacing move with "
+                               + "it, so the page keeps its rhythm. ⌘+ and ⌘− "
+                               + "adjust it per session; ⌘0 resets.") {
+                AinkradSegmentedPicker(
+                    items: EditorSettings.Density.allCases,
+                    selection: Binding(
+                        get: { store.editorSettings.density },
+                        set: { density in
+                            var next = store.editorSettings
+                            next.density = density
+                            store.setEditorSettings(next)
+                        })
+                ) { $0.title }
+            }
+
+            AinkradFormRow(title: "Line width",
+                           help: "How wide the text column runs. A measure much "
+                               + "beyond ~70 characters is tiring to read, which "
+                               + "is what full width gives you on a wide display "
+                               + "— it is there for tables and wide code blocks.") {
+                AinkradSelect(items: EditorSettings.Measure.allCases,
+                              selection: Binding(
+                                get: { store.editorSettings.measure },
+                                set: { measure in
+                                    var next = store.editorSettings
+                                    next.measure = measure
+                                    store.setEditorSettings(next)
+                                }),
+                              label: { $0.title })
+            }
+
             AinkradFormRow(title: "Index",
                            help: "Rebuild the search index from the files on disk.") {
                 HStack(spacing: AinkradSpacing.sm) {

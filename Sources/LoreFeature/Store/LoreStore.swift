@@ -39,6 +39,11 @@ public final class LoreStore {
     /// a per-vault-host UI choice, not per-document.
     public private(set) var sidebarCollapsed: Bool = false
 
+    /// The reader's preferences for the writing surface — see `EditorSettings`
+    /// for why the editor owns these rather than inheriting them from the host
+    /// theme.
+    public private(set) var editorSettings: EditorSettings = .default
+
     /// The one file `trash(_:)` most recently moved to the Trash, and where
     /// macOS put it — the whole of what `undoTrash()` needs to put it back.
     ///
@@ -99,6 +104,7 @@ public final class LoreStore {
     private static let outlinePanelExpandedKey = "outlinePanelExpanded"
     private static let showAllFilesKey = "showAllFiles"
     private static let sidebarCollapsedKey = "sidebarCollapsed"
+    private static let editorSettingsKey = "editorSettings"
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -132,9 +138,33 @@ public final class LoreStore {
            let text = String(data: data, encoding: .utf8) {
             sidebarCollapsed = (text == "1")
         }
+        // Decoded leniently: a settings blob written by a NEWER Lore (or a
+        // corrupt one) falls back to the defaults rather than refusing to
+        // start. Preferences are not worth failing a launch over.
+        if let data = documents.data(forKey: Self.editorSettingsKey),
+           let decoded = try? JSONDecoder().decode(EditorSettings.self, from: data) {
+            editorSettings = decoded
+        }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
+    }
+
+    /// Persist the editor's own display preferences.
+    public func setEditorSettings(_ settings: EditorSettings) {
+        editorSettings = settings
+        if let data = try? JSONEncoder().encode(settings) {
+            documents.setData(data, forKey: Self.editorSettingsKey)
+        }
+    }
+
+    /// ⌘+ / ⌘− / ⌘0.
+    public func zoomEditor(by step: Int) {
+        setEditorSettings(editorSettings.zoomed(by: step))
+    }
+
+    public func resetEditorZoom() {
+        setEditorSettings(editorSettings.zoomReset())
     }
 
     /// Persist the sidebar's folder-tree-vs-flat-list choice.

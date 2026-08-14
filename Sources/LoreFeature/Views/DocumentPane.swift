@@ -116,6 +116,7 @@ struct DocumentPane: View {
 
             session.engine.makeEditor(
                 EditorContext(theme: theme,
+                              editorSettings: store.editorSettings,
                               onChange: {
                                   session.markChanged()
                                   // Debounced — see `outlineDebouncer`'s doc

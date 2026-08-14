@@ -303,7 +303,7 @@ extension MarkdownEditor.Coordinator {
                 ) as? NSParagraphStyle
                 let style = MarkdownParagraphStyles.embedImageStyle(
                     basedOn: existingStyle, height: size.height,
-                    theme: MarkdownTheme(tokens: tokens))
+                    theme: MarkdownTheme(tokens: tokens, settings: settings))
                 storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
                 // Resolved once here, from the SURROUNDING text — never the
                 // embed's own paragraph, which is just a filename and is

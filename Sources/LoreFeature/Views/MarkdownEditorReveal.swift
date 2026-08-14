@@ -198,7 +198,7 @@ extension MarkdownEditor.Coordinator {
         let window = styleCache.isOverViewportCap
             ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
         lastViewportWindow = window
-        let theme = MarkdownTheme(tokens: tokens)
+        let theme = MarkdownTheme(tokens: tokens, settings: settings)
         MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
                                     tokens: tokens, theme: theme,
                                     limitedTo: window)
@@ -391,7 +391,7 @@ extension MarkdownEditor.Coordinator {
                                       depths: revealIndex.depths,
                                       in: ns, to: storage,
                                       tokens: tokens,
-                                      theme: MarkdownTheme(tokens: tokens))
+                                      theme: MarkdownTheme(tokens: tokens, settings: settings))
         // Re-run RIGHT AFTER `restyle`, scoped to this one block, so an
         // embed's collapse/paragraph-style/drawn-image never has a frame
         // where it looks wrong. `restyle` above just reset this block's

@@ -5,6 +5,11 @@ import AinkradAppKit
 public struct MarkdownEditor: NSViewRepresentable {
     @Binding var text: String
     let tokens: HostThemeTokens
+    /// Display preferences. Threaded down from `EditorContext` so the five
+    /// places that build a `MarkdownTheme` all build the SAME one — the
+    /// alternative was a process-wide current-settings global, which would
+    /// have made two Lore instances in one host share a font size.
+    let settings: EditorSettings
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
     /// entirely — which is how plain-text documents get no link affordances.
     let completions: (@MainActor (String) -> [IndexRow])?
@@ -47,6 +52,7 @@ public struct MarkdownEditor: NSViewRepresentable {
     let registerMenuActions: (@MainActor (EditorMenuActions) -> Void)?
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
+                settings: EditorSettings = .default,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
@@ -58,7 +64,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 writeDroppedFile: (@MainActor (URL) -> String?)? = nil,
                 onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
-        self._text = text; self.tokens = tokens
+        self._text = text; self.tokens = tokens; self.settings = settings
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
@@ -70,7 +76,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.registerMenuActions = registerMenuActions
     }
 
-    public func makeCoordinator() -> Coordinator { Coordinator(text: $text, tokens: tokens) }
+    public func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, tokens: tokens, settings: settings)
+    }
 
     // `makeNSView`, `updateNSView`, `dismantleNSView` and `addStylingNotice`
     // — the AppKit-object lifecycle — live in `MarkdownEditorView.swift`.
@@ -82,6 +90,10 @@ public struct MarkdownEditor: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var tokens: HostThemeTokens
+        /// Kept in sync by `updateNSView`, so changing a setting restyles the
+        /// document the user is already looking at rather than only the next
+        /// one they open.
+        var settings: EditorSettings
         var completions: (@MainActor (String) -> [IndexRow])?
         var onOpenLink: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
@@ -226,8 +238,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// `dismantleNSView` would leak one observer per document opened.
         nonisolated(unsafe) private var scrollObserver: (any NSObjectProtocol)?
 
-        init(text: Binding<String>, tokens: HostThemeTokens) {
-            self.text = text; self.tokens = tokens
+        init(text: Binding<String>, tokens: HostThemeTokens,
+             settings: EditorSettings = .default) {
+            self.text = text; self.tokens = tokens; self.settings = settings
             super.init()
             completionPanel.onPick = { [weak self] row in self?.insert(row) }
         }

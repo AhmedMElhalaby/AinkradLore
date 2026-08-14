@@ -90,6 +90,12 @@ struct LoreCommandRunner {
             store.goBack()
         case .goForward:
             store.goForward()
+        case .zoomIn:
+            store.zoomEditor(by: 1)
+        case .zoomOut:
+            store.zoomEditor(by: -1)
+        case .zoomReset:
+            store.resetEditorZoom()
         // Routed through the responder chain rather than a held reference —
         // see `LoreFind`. A no-op when focus is not in a text view, which is
         // the right answer: ⌘F in the sidebar is not a request to search a

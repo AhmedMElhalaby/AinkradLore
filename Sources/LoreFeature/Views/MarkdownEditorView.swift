@@ -59,7 +59,7 @@ extension MarkdownEditor {
         // initial size, then kept in sync by `onWidthChange` via
         // `applyContainerGeometry`, which owns both together so they cannot
         // drift apart on resize.
-        let initialTheme = MarkdownTheme(tokens: tokens)
+        let initialTheme = MarkdownTheme(tokens: tokens, settings: settings)
         tv.textContainerInset = MarkdownEditorLayout.containerInset(
             forViewWidth: tv.bounds.width, theme: initialTheme)
         tv.textContainer?.widthTracksTextView = false
@@ -167,6 +167,17 @@ extension MarkdownEditor {
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
         context.coordinator.tokens = tokens
+        // Display settings changing must re-lay out the document the reader is
+        // ALREADY looking at — a font size that only applies to the next
+        // document opened reads as a broken setting. The geometry is
+        // re-applied explicitly because container inset and width are a
+        // function of the theme AND the view width, and `applyStyles` alone
+        // does not touch them (see `applyContainerGeometry`, which owns both
+        // together so they cannot drift apart).
+        if context.coordinator.settings != settings {
+            context.coordinator.settings = settings
+            context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
+        }
         context.coordinator.applyStyles()
         if let offset = scrollTarget.wrappedValue {
             context.coordinator.scrollToOffset(offset)

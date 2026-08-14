@@ -28,6 +28,7 @@ struct LoreCommand: Identifiable, Hashable {
         case toggleSidebar, closeDocument, saveNow, undoDelete
         case findInDocument, findNext, findPrevious, replaceInDocument
         case goBack, goForward
+        case zoomIn, zoomOut, zoomReset
         case rebuildIndex, toggleShowAllFiles
         case toggleOutline, toggleBacklinks
         case commandPalette, quickOpen
@@ -155,6 +156,15 @@ enum LoreCommands {
               shortcut: LoreShortcut("b", shift: true), requires: .document, group: .view),
         .init(id: .toggleShowAllFiles, title: "Show All Files", systemName: "eye",
               shortcut: nil, requires: .vault, group: .view),
+        // `.always`, not `.document`: the setting is a persisted preference,
+        // so adjusting it with nothing open is meaningful — the next document
+        // opens at the size you chose.
+        .init(id: .zoomIn, title: "Bigger Text", systemName: "textformat.size.larger",
+              shortcut: LoreShortcut("+"), requires: .always, group: .view),
+        .init(id: .zoomOut, title: "Smaller Text", systemName: "textformat.size.smaller",
+              shortcut: LoreShortcut("-"), requires: .always, group: .view),
+        .init(id: .zoomReset, title: "Actual Size", systemName: "textformat.size",
+              shortcut: LoreShortcut("0"), requires: .always, group: .view),
         .init(id: .commandPalette, title: "Command Palette", systemName: "command",
               shortcut: LoreShortcut("k"), requires: .always, group: .view),
     ]

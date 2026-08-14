@@ -178,6 +178,7 @@ private struct MarkdownDocumentEditor: View {
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
+                           settings: ctx.editorSettings,
                            completions: ctx.completions, onOpenLink: ctx.openLink,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
