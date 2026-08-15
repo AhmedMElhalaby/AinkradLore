@@ -252,6 +252,9 @@ struct LoreRootView: View {
                     .padding(.horizontal, AinkradSpacing.md)
             }
 
+            SidebarShortcutsSection(store: store, theme: theme, selected: $selected,
+                                    onSelect: openRow, ops: ops)
+
             if effectiveSidebarMode == .tree {
                 FolderTreeView(store: store, theme: theme, selected: $selected,
                               onSelect: openRow, ops: ops)

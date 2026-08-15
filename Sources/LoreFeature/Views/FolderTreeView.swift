@@ -177,7 +177,7 @@ struct FolderTreeView: View {
                     isSelected: selected?.path == row.path,
                     onTap: { selected = row; onSelect(row) })
                     .loreDraggableDocument(row)
-                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops, store: store))
             }
             ForEach(node.children) { child in outline(child, depth: depth + 1) }
         }

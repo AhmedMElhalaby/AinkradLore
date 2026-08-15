@@ -164,9 +164,23 @@ struct MessageSheet: View {
 /// `Divider()` gave the destructive row is expressed instead by
 /// `AinkradMenuItem.isDestructive`'s own tint, which is what the row-hover
 /// design already leans on to separate "safe" actions from the trash one.
+/// - Parameter store: Supplied only so the menu can offer Pin / Unpin, which
+///   needs to know the CURRENT state to name itself. Optional so the existing
+///   call sites that have no store to hand keep working unchanged — the item
+///   is simply absent there, which is correct: a menu that cannot read the pin
+///   state cannot label itself honestly either.
 @MainActor
-func loreRowMenuItems(row: IndexRow, ops: SidebarOperations) -> [AinkradMenuItem] {
-    var items = [
+func loreRowMenuItems(row: IndexRow, ops: SidebarOperations,
+                      store: LoreStore? = nil) -> [AinkradMenuItem] {
+    var items: [AinkradMenuItem] = []
+    if let store {
+        let pinned = store.isPinned(row.path)
+        items.append(AinkradMenuItem(title: pinned ? "Unpin" : "Pin",
+                                     systemName: pinned ? "pin.slash" : "pin") {
+            store.togglePinned(row.path)
+        })
+    }
+    items += [
         AinkradMenuItem(title: "Rename…", systemName: "pencil") { ops.beginRename(row) },
         AinkradMenuItem(title: "Move to…", systemName: "folder") { ops.beginMove(row) },
     ]

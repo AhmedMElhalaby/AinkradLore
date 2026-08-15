@@ -51,6 +51,11 @@ public final class LoreStore {
     /// with no way to drag it back.
     public internal(set) var sidebarWidth: CGFloat = LoreMetrics.defaultSidebarWidth
 
+    /// Canonical path keys of pinned documents — see `LoreStore+Shortcuts`.
+    internal var pinnedPaths: Set<String> = []
+    /// Canonical path keys of recently opened documents, most recent first.
+    internal var recentPaths: [String] = []
+
     /// The reader's preferences for the writing surface — see `EditorSettings`
     /// for why the editor owns these rather than inheriting them from the host
     /// theme.
@@ -158,6 +163,7 @@ public final class LoreStore {
             // drag back with.
             sidebarWidth = LoreMetrics.clampSidebarWidth(CGFloat(width))
         }
+        loadShortcutLists()
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
@@ -424,33 +430,6 @@ public final class LoreStore {
             selectedTab = tabs.last
         }
         return true
-    }
-
-    /// Every distinct tag across all indexed notes, sorted — drives the sidebar
-    /// tag-filter chips.
-    public var allTags: [String] { Array(Set(rows.flatMap(\.tags))).sorted() }
-
-    /// How many notes carry each tag.
-    ///
-    /// Computed with `allTags` rather than separately: both walk every row's
-    /// tag list, and the chip row reads them together on the same render.
-    public var tagCounts: [String: Int] {
-        rows.reduce(into: [:]) { counts, row in
-            for tag in row.tags { counts[tag, default: 0] += 1 }
-        }
-    }
-
-    /// Immediate subdirectories of the vault root (dotfiles excluded) — the
-    /// choices offered for `defaultNoteFolder` in Settings.
-    public var subfolders: [String] {
-        guard let root = vaultRoot else { return [] }
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        return urls
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .map(\.lastPathComponent)
-            .filter { !$0.hasPrefix(".") }
-            .sorted()
     }
 
     /// Switching vaults is a teardown of the old one, not just a new root:

@@ -199,7 +199,7 @@ struct NoteListView: View {
                                         }
                                     }
                                     .id(row.path)
-                                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops, store: store))
                             }
                         }
                     }

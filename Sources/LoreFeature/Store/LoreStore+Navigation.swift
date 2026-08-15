@@ -95,6 +95,9 @@ extension LoreStore {
         }
         history.append(url)
         historyIndex = history.count - 1
+        // Recents ride the same signal as history — one notion of "the user
+        // went somewhere", so the two can never disagree about what that was.
+        noteRecentlyOpened(url)
     }
 
     /// Opens the previously visited document.
