@@ -69,15 +69,7 @@ enum LoreSidebarRow {
                 subtitle: attributedSubtitle == nil ? subtitle : nil,
                 trailing: { EmptyView() })
             if let attributedSubtitle {
-                Text(attributedSubtitle)
-                    .font(.caption)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // Indented to the row's TITLE column, not its icon, so the
-                    // excerpt reads as belonging to the title above it.
-                    .padding(.leading, AinkradSpacing.lg + AinkradSpacing.md)
-                    .padding(.trailing, AinkradSpacing.md)
-                    .padding(.bottom, AinkradSpacing.xs)
+                SearchExcerptLine(text: attributedSubtitle)
             }
         }
         // The whole cell taps, excerpt included — an excerpt that is not part
@@ -122,6 +114,30 @@ enum LoreSidebarRow {
 
     static func icon(for row: IndexRow) -> String {
         row.type == AttachmentEngine.identifier ? "doc" : "doc.text"
+    }
+}
+
+/// The search excerpt beneath a row.
+///
+/// A view for the same reason `SelectionBar` is one: these row builders are
+/// `static` functions with no `self` to hold an `@Environment` on, and the
+/// excerpt has to read the host's typography rather than SwiftUI's own
+/// `.caption` — otherwise it is the one line in the sidebar that ignores the
+/// type scale everything else follows.
+private struct SearchExcerptLine: View {
+    let text: AttributedString
+    @Environment(\.ainkradTypography) private var typo
+
+    var body: some View {
+        Text(text)
+            .font(AinkradFontResolver.font(.caption, typography: typo))
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Indented to the row's TITLE column, not its icon, so the excerpt
+            // reads as belonging to the title above it.
+            .padding(.leading, AinkradSpacing.lg + AinkradSpacing.md)
+            .padding(.trailing, AinkradSpacing.md)
+            .padding(.bottom, AinkradSpacing.xs)
     }
 }
 

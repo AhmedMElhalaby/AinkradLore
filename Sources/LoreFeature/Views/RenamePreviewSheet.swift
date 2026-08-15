@@ -135,12 +135,13 @@ struct RenamePreviewSheet: View {
     /// Non-nil once the plan has been applied: the sheet switches to reporting.
     let report: RenameReport?
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onConfirm: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
-            Text(report == nil ? preview.title : "Done").font(.headline)
+            Text(report == nil ? preview.title : "Done").font(AinkradFontResolver.font(.headline, typography: typo))
                 .foregroundStyle(theme.tokens.foreground)
             if let report {
                 reportBody(report)

@@ -9,6 +9,7 @@ import AinkradAppKit
 struct ImportEntryView: View {
     @Bindable var coordinator: ImportCoordinator
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onClose: () -> Void
 
     var body: some View {
@@ -56,7 +57,7 @@ struct ImportEntryView: View {
     private var sourcePicker: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
             Text("Import into this vault")
-                .font(.headline)
+                .font(AinkradFontResolver.font(.headline, typography: typo))
                 .foregroundStyle(theme.tokens.foreground)
             Text("Lore shows you everything it would write, and writes nothing until you "
                  + "approve it. Anything you have already imported is skipped.")
@@ -89,7 +90,7 @@ struct ImportEntryView: View {
     @ViewBuilder private func report_(_ report: ImportReport) -> some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
             Text(Self.headline(report))
-                .font(.headline)
+                .font(AinkradFontResolver.font(.headline, typography: typo))
                 .foregroundStyle(theme.tokens.foreground)
             // Skipped and failed are listed, never summarised away. A silent
             // partial import is the one outcome this whole milestone exists to
@@ -127,7 +128,7 @@ struct ImportEntryView: View {
             Image(systemName: icon).foregroundStyle(tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(id).foregroundStyle(theme.tokens.foreground)
-                Text(reason).font(.caption)
+                Text(reason).font(AinkradFontResolver.font(.caption, typography: typo))
                     .foregroundStyle(theme.tokens.foreground.opacity(0.7))
             }
         }

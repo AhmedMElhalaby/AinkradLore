@@ -54,6 +54,7 @@ public struct ImportPreviewSheet: View {
     let onCancel: () -> Void
 
     @Environment(\.ainkradTheme) private var theme
+    @Environment(\.ainkradTypography) private var typo
 
     public init(selection: ImportSelection, onImport: @escaping (ImportPlan) -> Void,
                 onCancel: @escaping () -> Void) {
@@ -67,7 +68,7 @@ public struct ImportPreviewSheet: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
             Text(headline)
-                .font(.headline)
+                .font(AinkradFontResolver.font(.headline, typography: typo))
                 .foregroundStyle(theme.foreground)
             // Lazy: a few thousand notes is an ordinary Apple Notes library,
             // and this list must not be the thing that makes import feel broken.

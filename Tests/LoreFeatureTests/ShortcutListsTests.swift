@@ -78,6 +78,13 @@ final class ShortcutListsTests: XCTestCase {
         XCTAssertTrue(store.isPinned(a))
         XCTAssertEqual(store.pinnedRows.map(\.path.lastPathComponent), ["a.md"])
 
+        // A relaunch CLOSES the first store before the second opens. Without
+        // this the two hold `DatabaseQueue`s on one SQLite file and the second
+        // one's first write fails with "database is locked" — intermittently,
+        // depending on whether the first store's background rescan is still
+        // writing. Production never has two stores on one index; the test
+        // should not either.
+        store.shutdown()
         let reopened = LoreStore(documents: docs,
                                  indexPath: root.appendingPathComponent(".idx.sqlite"))
         try reopened.setVaultRootForTesting(root)

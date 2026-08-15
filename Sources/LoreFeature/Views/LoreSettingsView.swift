@@ -12,9 +12,16 @@ struct LoreSettingsView: View {
     /// material someone opens, reads and is done with, so remembering that it
     /// was open once is not worth a stored key.
     @State private var shortcutsExpanded = false
+    @State private var showAllFilesHelpExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.lg) {
+            // Grouped rather than one flat stack. The page grew from three
+            // rows to eight over this milestone, and a flat list of eight
+            // unrelated controls makes the reader scan all of them to find the
+            // one they came for.
+            AinkradSectionHeader(title: "Vault")
+
             AinkradFormRow(title: "Vault folder",
                            help: "The folder of markdown files Lore reads and writes.") {
                 HStack(spacing: AinkradSpacing.sm) {
@@ -42,16 +49,25 @@ struct LoreSettingsView: View {
                 }
             }
 
+            AinkradSectionHeader(title: "Display")
+
+            // The help text was seven lines inside a form row — longer than
+            // everything above it put together, and unreadable as a caption.
+            // One line states the setting; the disclosure holds the caveat
+            // that only matters once someone has hit it.
             AinkradFormRow(title: "Show all files",
-                           help: "Show every file in the sidebar, including "
-                               + "attachments Lore can't render inline (zip "
-                               + "archives, credentials files, other "
-                               + "binaries). Off by default so the sidebar "
-                               + "stays a list of documents. Files stay fully "
-                               + "indexed, linkable and openable either way —"
-                               + " this only changes what the browse list "
-                               + "draws.") {
+                           help: "Show attachments and other non-document "
+                               + "files in the sidebar.") {
                 AinkradToggle(isOn: showAllFilesBinding)
+            }
+            AinkradDisclosureGroup(title: "What this affects",
+                                   isExpanded: $showAllFilesHelpExpanded) {
+                Text("Off by default so the sidebar stays a list of documents. "
+                     + "Files stay fully indexed, linkable and openable either "
+                     + "way — this only changes what the browse list draws.")
+                    .font(AinkradFontResolver.font(.caption, typography: typo))
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // The editor's OWN settings — not inherited from the host theme.
@@ -91,6 +107,8 @@ struct LoreSettingsView: View {
                                 }),
                               label: { $0.title })
             }
+
+            AinkradSectionHeader(title: "Index")
 
             AinkradFormRow(title: "Index",
                            help: "Rebuild the search index from the files on disk.") {

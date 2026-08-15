@@ -20,6 +20,7 @@ struct NoteListView: View {
     /// `DocumentPane.panelRequest`, and for the same reason: the field cannot
     /// reach into this view's focus state directly.
     @Binding var focusRequest: Bool?
+    @Environment(\.ainkradTypography) private var typo
 
     /// Which row the KEYBOARD is on. Deliberately separate from `selected`,
     /// which is the open document: arrowing through a list must not open every
@@ -169,7 +170,7 @@ struct NoteListView: View {
                             if !query.isEmpty {
                                 Text(visible.count == 1 ? "1 result"
                                                         : "\(visible.count) results")
-                                    .font(.caption)
+                                    .font(AinkradFontResolver.font(.caption, typography: typo))
                                     .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.bottom, 2)

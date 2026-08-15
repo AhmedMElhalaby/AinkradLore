@@ -82,7 +82,9 @@ struct DocumentMentionsFooter: View {
             ForEach(backlinks) { link in
                 Button { onOpen(link.row.path) } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(link.row.title).bold().lineLimit(1)
+                        Text(link.row.title)
+                            .font(AinkradFontResolver.font(.headline, typography: typo))
+                            .lineLimit(1)
                         if !link.context.isEmpty {
                             // The LINE the link sits on. A bare list of
                             // filenames is meaningfully less useful than seeing

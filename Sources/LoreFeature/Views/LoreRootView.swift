@@ -30,6 +30,7 @@ struct LoreRootView: View {
     /// results list. `NoteListView` consumes and clears it.
     @State private var listFocusRequest: Bool?
     @Environment(\.ainkradReduceMotion) private var reduceMotion
+    @Environment(\.ainkradTypography) private var typo
 
     init(store: LoreStore, theme: HostTheme) {
         self.store = store
@@ -247,7 +248,7 @@ struct LoreRootView: View {
             // to infer it from a picker that moved on its own.
             if store.sidebarMode == .tree && effectiveSidebarMode == .all {
                 Text("Showing matches across all folders.")
-                    .font(.caption)
+                    .font(AinkradFontResolver.font(.caption, typography: typo))
                     .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
                     .padding(.horizontal, AinkradSpacing.md)
             }

@@ -75,6 +75,7 @@ private struct LoreNoticeBridge: View {
 struct SidebarOperationSheet: View {
     @Bindable var ops: SidebarOperations
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
 
     var body: some View {
         switch ops.activeSheet {
@@ -102,12 +103,13 @@ struct NameSheet: View {
     let title: String
     @Binding var text: String
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onConfirm: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
-            Text(title).font(.headline).foregroundStyle(theme.tokens.foreground)
+            Text(title).font(AinkradFontResolver.font(.headline, typography: typo)).foregroundStyle(theme.tokens.foreground)
             TextField("New name", text: $text)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(onConfirm)
@@ -131,11 +133,12 @@ struct NameSheet: View {
 struct MessageSheet: View {
     let text: String
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
-            Text("Not done").font(.headline).foregroundStyle(theme.tokens.foreground)
+            Text("Not done").font(AinkradFontResolver.font(.headline, typography: typo)).foregroundStyle(theme.tokens.foreground)
             Text(text).foregroundStyle(theme.tokens.foreground.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
             HStack { Spacer(); AinkradButton(title: "OK", style: .primary, action: onDismiss) }
