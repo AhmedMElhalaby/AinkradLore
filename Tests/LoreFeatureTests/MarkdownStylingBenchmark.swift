@@ -114,7 +114,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_keystrokesDoNotParse() {
         let (coordinator, tv, _) = makeEditor("# Title\n\nSome **bold** here.\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
             for character in "hello world" {
                 tv.insertText(String(character), replacementRange: tv.selectedRange())
@@ -129,7 +129,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_reRenderingUnchangedTextDoesNotParse() {
         let (coordinator, _, _) = makeEditor("# Title\n\n- [ ] task\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             for _ in 0..<10 { coordinator.applyStyles() }
             XCTAssertEqual(MarkdownParseCounter.count, 0)
         }
@@ -143,7 +143,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_externallyReplacedSmallTextParsesOnceSynchronously() {
         let (coordinator, tv, _) = makeEditor("start")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.string = "# Replaced\n"
             coordinator.applyStyles()
             coordinator.applyStyles()
@@ -162,7 +162,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
             let large = "# Replaced\n\n**bold**\n\n"
                 + String(repeating: "Some prose with a [[Link]] in it.\n\n", count: 2_000)
             XCTAssertGreaterThan(large.utf16.count, MarkdownStyleCache.synchronousParseCap)
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.string = large
             coordinator.applyStyles()
             XCTAssertEqual(MarkdownParseCounter.count, 0,
@@ -184,7 +184,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_theDebouncedParseEventuallyRuns() {
         let (coordinator, tv, _) = makeEditor("plain text\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             for character in "# " { tv.insertText(String(character), replacementRange: tv.selectedRange()) }
             XCTAssertEqual(MarkdownParseCounter.count, 0)
@@ -205,7 +205,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_aDocumentOverTheHardCapIsNeverParsed() {
         let huge = String(repeating: "x", count: MarkdownDocumentModel.stylingHardCap + 1)
         var cache = MarkdownStyleCache()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         cache.reparse(huge)
         XCTAssertEqual(MarkdownParseCounter.count, 0,
                        "an over-cap document must cost zero parses")
@@ -218,7 +218,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     /// The guard must not swallow ordinary documents.
     func test_aDocumentUnderTheHardCapIsStillParsed() {
         var cache = MarkdownStyleCache()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         cache.reparse("# Heading\n\n**bold**\n")
         XCTAssertEqual(MarkdownParseCounter.count, 1)
         XCTAssertFalse(cache.isOverHardCap)

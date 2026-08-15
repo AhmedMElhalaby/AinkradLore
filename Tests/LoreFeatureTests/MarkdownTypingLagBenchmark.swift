@@ -107,7 +107,7 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
                 // whole-document renderer.
                 let middle = (tv.string as NSString).length / 2
                 tv.setSelectedRange(NSRange(location: middle, length: 0))
-                MarkdownParseCounter.reset()
+                resetParseCounter()
 
                 // One warm keystroke, then twenty measured.
                 tv.insertText("x", replacementRange: tv.selectedRange())

@@ -31,6 +31,11 @@ public final class DocumentSession: Identifiable {
     /// vanish into the autosave's `try?` with `isDirty` as the only hint.
     /// Cleared by every successful write and every successful resolution.
     public private(set) var lastSaveError: Error?
+    /// When this session last wrote to disk, or nil if it never has.
+    ///
+    /// Only ever set by `write()`, so it means "bytes reached the file",
+    /// never "the user stopped typing".
+    public private(set) var lastSavedAt: Date?
 
     /// True when the engine cannot write this document back faithfully — today
     /// only a `PlainTextEngine` whose bytes failed a strict UTF-8 decode. Such
@@ -283,6 +288,11 @@ public final class DocumentSession: Identifiable {
         isDirty = false
         conflict = false
         lastSaveError = nil
+        // Recorded so the UI can distinguish "saved a moment ago" from "never
+        // had anything to save". `!isDirty` alone cannot: a freshly opened,
+        // untouched document is also not dirty, and reporting "Saved" for it
+        // claims a write that never happened.
+        lastSavedAt = Date()
         // The file is truth; the index is derived. A failed index write must
         // never make a successful save look like a failure.
         try? coordinator.indexDocument(engine, at: url)

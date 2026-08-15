@@ -15,6 +15,29 @@ struct NoteListView: View {
     /// Lifted to `LoreRootView` so it can decide whether an active tag filter
     /// should force the flat list even while the sidebar is in tree mode.
     @Binding var activeTag: String?
+    /// Set by the search field's ↓ to hand the keyboard to this list. A
+    /// one-shot request, consumed here — the same shape as
+    /// `DocumentPane.panelRequest`, and for the same reason: the field cannot
+    /// reach into this view's focus state directly.
+    @Binding var focusRequest: Bool?
+    @Environment(\.ainkradTypography) private var typo
+
+    /// Which row the KEYBOARD is on. Deliberately separate from `selected`,
+    /// which is the open document: arrowing through a list must not open every
+    /// document it passes over.
+    @State private var focusedIndex: Int?
+    @FocusState private var listFocused: Bool
+
+    /// Search results with their excerpts, when a query is active.
+    ///
+    /// Empty while browsing: `snippet()` is only meaningful against a MATCH,
+    /// and asking for hits with no query would return the whole vault with a
+    /// leading fragment of each document as its "excerpt" — noise dressed up
+    /// as relevance.
+    private var hits: [SearchHit] {
+        guard !query.isEmpty else { return [] }
+        return store.searchHits(query)
+    }
 
     private var visible: [IndexRow] {
         // The default-hidden filter applies to BROWSING (`store.rows`) only,
@@ -46,6 +69,20 @@ struct NoteListView: View {
             && DocumentVisibility.visibleRows(store.rows, showAllFiles: false).isEmpty
     }
 
+    /// Whether the reason this list has nothing to show is that the vault is
+    /// still being read, rather than that it is empty.
+    ///
+    /// A `static` on the view, not a computed property, for the reason
+    /// `LoreRootView.emptyState(for:)` already documents: SwiftUI views are
+    /// only smoke-testable in this project, so the decision the branch is
+    /// built from is asserted directly.
+    ///
+    /// Requires a vault: with none open there is nothing to index, and the
+    /// `noVault` empty state (owned by `LoreRootView`) is the correct answer.
+    static func isStillIndexing(_ store: LoreStore) -> Bool {
+        store.vaultRoot != nil && store.isIndexing
+    }
+
     var body: some View {
         // The search field and the "+" button used to live HERE, which meant
         // neither existed in tree mode — this view is not even mounted then.
@@ -58,19 +95,56 @@ struct NoteListView: View {
             if !store.allTags.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AinkradSpacing.xs) {
+                        // The way OUT of a filter, and only while one is on.
+                        // Clearing a tag previously meant finding the active
+                        // chip again in a horizontally scrolling row and
+                        // clicking exactly it — which, once the row has
+                        // scrolled, means hunting for something you cannot see.
+                        if activeTag != nil {
+                            AinkradChip(label: "Clear", systemName: "xmark") {
+                                activeTag = nil
+                            }
+                            .accessibilityLabel("Clear tag filter")
+                        }
                         ForEach(store.allTags, id: \.self) { tag in
-                            AinkradSwatchChip(label: "#\(tag)",
+                            // The COUNT tells you whether a tag is worth
+                            // filtering by before you click it — a tag on two
+                            // notes and a tag on two hundred look identical
+                            // otherwise.
+                            AinkradSwatchChip(label: "#\(tag) \(store.tagCounts[tag] ?? 0)",
                                               swatch: theme.tokens.accentSecondary,
                                               isOn: activeTag == tag) {
                                 activeTag = (activeTag == tag) ? nil : tag
                             }
+                            // The chip's ON state is a fill and nothing else,
+                            // so whether a tag filter is active was carried by
+                            // colour alone.
+                            .accessibilityLabel(activeTag == tag
+                                                ? "Tag \(tag), filtering"
+                                                : "Filter by tag \(tag)")
+                            .accessibilityAddTraits(activeTag == tag
+                                                    ? [.isButton, .isSelected] : .isButton)
                         }
                     }
                     .padding(.vertical, 2)
                 }
             }
 
-            if visible.isEmpty {
+            if visible.isEmpty && NoteListView.isStillIndexing(store) {
+                // An empty sidebar during the first scan of a large vault is
+                // indistinguishable from an empty vault — and the copy the
+                // empty case shows ("No notes yet · Press ⌘N") is actively
+                // wrong advice while the rows are still arriving. Gated on
+                // `visible.isEmpty` so a rescan of a vault that already has
+                // rows never blanks the list the user is reading.
+                VStack(spacing: AinkradSpacing.sm) {
+                    AinkradSpinner(size: 20)
+                    Text("Indexing vault…")
+                        .foregroundStyle(theme.tokens.foreground.opacity(0.7))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Indexing vault")
+            } else if visible.isEmpty {
                 AinkradEmptyState(
                     icon: store.rows.isEmpty ? "tray"
                         : allVisibleRowsAreHiddenByDefault ? "eye.slash" : "magnifyingglass",
@@ -86,22 +160,130 @@ struct NoteListView: View {
                     action: store.rows.isEmpty ? onNew
                         : allVisibleRowsAreHiddenByDefault ? { store.setShowAllFiles(true) } : nil)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(visible, id: \.path) { row in
-                            LoreSidebarRow.document(
-                                row: row, depth: 0,
-                                isSelected: selected?.path == row.path,
-                                subtitle: row.tags.isEmpty
-                                    ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
-                                emptyTitleFallback: "Untitled",
-                                onTap: { selected = row; onSelect(row) })
-                                .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            // The result COUNT. Without it, "did my search
+                            // find three things or thirty" needs scrolling to
+                            // answer — and a count is also the only signal
+                            // that a query narrowed anything at all.
+                            if !query.isEmpty {
+                                Text(visible.count == 1 ? "1 result"
+                                                        : "\(visible.count) results")
+                                    .font(AinkradFontResolver.font(.caption, typography: typo))
+                                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.bottom, 2)
+                                    .accessibilityLabel(
+                                        "\(visible.count) results for \(query)")
+                            }
+                            ForEach(Array(visible.enumerated()), id: \.element.path) { index, row in
+                                LoreSidebarRow.document(
+                                    row: row, depth: 0,
+                                    isSelected: selected?.path == row.path,
+                                    subtitle: subtitle(for: row),
+                                    attributedSubtitle: snippet(for: row),
+                                    emptyTitleFallback: "Untitled",
+                                    onTap: { selected = row; onSelect(row) })
+                                    .loreDraggableDocument(row)
+                                    // A focus ring DISTINCT from selection.
+                                    // They mean different things — "the
+                                    // keyboard is here" versus "this is the
+                                    // open document" — and drawing them the
+                                    // same way makes ↓ look like it is opening
+                                    // documents it has not opened.
+                                    .overlay {
+                                        if focusedIndex == index {
+                                            ChamferShape(cut: LoreMetrics.chamfer)
+                                                .strokeBorder(theme.tokens.accentPrimary,
+                                                              lineWidth: 1.5)
+                                        }
+                                    }
+                                    .id(row.path)
+                                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops, store: store))
+                            }
                         }
+                    }
+                    // Keeps a keyboard-moved focus on screen. Without this ↓
+                    // walks the focus ring straight out of the viewport and
+                    // the list appears to stop responding.
+                    .onChange(of: focusedIndex) { _, index in
+                        guard let index, visible.indices.contains(index) else { return }
+                        proxy.scrollTo(visible[index].path, anchor: .bottom)
                     }
                 }
             }
         }
         .padding(AinkradSpacing.md)
+        // The list itself is focusable, so ↑/↓ reach it once the user has
+        // arrowed down out of the search field.
+        .focusable()
+        .focused($listFocused)
+        .onMoveCommand { direction in
+            switch direction {
+            case .down: moveFocus(.down)
+            case .up: moveFocus(.up)
+            default: break
+            }
+        }
+        // Return opens the focused row. `onMoveCommand`/`onKeyPress` are the
+        // only route: a `keyboardShortcut(.defaultAction)` claim here would be
+        // dispatched globally and steal Return from every text field on the
+        // surface.
+        .onKeyPress(.return) {
+            guard let index = focusedIndex, visible.indices.contains(index) else {
+                return .ignored
+            }
+            let row = visible[index]
+            selected = row
+            onSelect(row)
+            return .handled
+        }
+        // The focused row must survive a re-rank: after typing another letter
+        // the list is a different list, and an index held across that change
+        // points at a different document — the one thing keyboard navigation
+        // must never do is open something other than what is highlighted.
+        .onChange(of: visible.map(\.path)) { _, paths in
+            focusedIndex = LoreListNavigation.reconciled(previous: focusedPath, ids: paths)
+        }
+        .onChange(of: focusRequest) { _, requested in
+            guard requested != nil else { return }
+            focusRequest = nil
+            listFocused = true
+            focusedIndex = LoreListNavigation.move(.down, from: nil, count: visible.count)
+        }
+    }
+
+    /// The tag line, shown while BROWSING. Replaced by the matched excerpt
+    /// once a query is active: with both, a result row would carry two
+    /// subtitles and the more useful one would be second.
+    private func subtitle(for row: IndexRow) -> String? {
+        guard query.isEmpty, !row.tags.isEmpty else { return nil }
+        return row.tags.map { "#\($0)" }.joined(separator: " ")
+    }
+
+    /// The matched excerpt for a row, with the matches emphasised.
+    ///
+    /// Nil for a title-only match — the title is already the row's headline,
+    /// so repeating it underneath says nothing.
+    private func snippet(for row: IndexRow) -> AttributedString? {
+        guard let snippet = hits.first(where: { $0.row.path == row.path })?.snippet
+        else { return nil }
+        return snippet.attributed { run in
+            run.inlinePresentationIntent = .stronglyEmphasized
+            run.foregroundColor = theme.tokens.accentPrimary
+        }
+    }
+
+    /// The path of the focused row, held so a re-ranked list can be reconciled
+    /// by IDENTITY rather than by position.
+    private var focusedPath: URL? {
+        guard let focusedIndex, visible.indices.contains(focusedIndex) else { return nil }
+        return visible[focusedIndex].path
+    }
+
+    private func moveFocus(_ direction: LoreListNavigation.Direction) {
+        focusedIndex = LoreListNavigation.move(direction, from: focusedIndex,
+                                               count: visible.count)
     }
 }

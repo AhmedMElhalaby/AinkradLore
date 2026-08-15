@@ -39,20 +39,32 @@ final class RootViewSmokeTests: XCTestCase {
         XCTAssertEqual(store.tabs.count, 2)
         for session in store.tabs {
             _ = DocumentPane(store: store, session: session,
-                             theme: HostTheme(TestTokens.make()))
+                             theme: HostTheme(TestTokens.make()),
+                             ops: SidebarOperations(store: store),
+                             onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                             mentionsRequest: .constant(false))
         }
-        _ = TabBarView(store: store, theme: HostTheme(TestTokens.make()))
+        // The tab strip is gone; the header is the chrome row that replaced
+        // it. Built here for BOTH states — with a document and without —
+        // because it now renders in the empty state too, where it carries the
+        // sidebar toggle and the history chevrons.
+        _ = DocumentHeaderBar(session: store.selectedTab, store: store,
+                              theme: HostTheme(TestTokens.make()),
+                              row: nil, ops: SidebarOperations(store: store))
+        _ = DocumentHeaderBar(session: nil, store: store,
+                              theme: HostTheme(TestTokens.make()),
+                              row: nil, ops: SidebarOperations(store: store))
     }
 
-    /// Regression for the whole-branch review finding: `BacklinksPanel` was
-    /// gated on `session.engine is MarkdownEngine`, so opening a non-markdown
-    /// document (a PDF, here) never showed its "Linked mentions" list even
-    /// though attachments are resolvable link targets. `DocumentPane` must
-    /// build for a non-markdown tab with the panel present regardless of
-    /// engine type — this only guards against the gate being reintroduced;
-    /// `M3AcceptanceTests.test_criterion3_…` covers the underlying
-    /// `store.backlinks(to:)` data the panel renders.
-    func test_documentPane_buildsForNonMarkdownTabWithBacklinksPanel() throws {
+    /// Regression for the whole-branch review finding: linked mentions were
+    /// once gated on `session.engine is MarkdownEngine`, so opening a
+    /// non-markdown document (a PDF, here) never showed them even though
+    /// attachments are resolvable link targets. The list now lives in
+    /// `DocumentMentionsList`, shown on request rather than in a panel, and the
+    /// rule is unchanged: it must build for a non-markdown tab. This guards
+    /// against the gate being reintroduced; `M3AcceptanceTests
+    /// .test_criterion3_…` covers the underlying `store.backlinks(to:)` data.
+    func test_documentPane_buildsForNonMarkdownTabWithMentions() throws {
         let root = try tempVault()
         try Data().write(to: root.appendingPathComponent("a.pdf"))
         let store = LoreStore(documents: FakeDocs(),
@@ -65,16 +77,27 @@ final class RootViewSmokeTests: XCTestCase {
         XCTAssertFalse(session.engine is MarkdownEngine,
                        "this test must exercise a non-markdown engine")
         _ = DocumentPane(store: store, session: session,
-                         theme: HostTheme(TestTokens.make()))
+                         theme: HostTheme(TestTokens.make()),
+                         ops: SidebarOperations(store: store),
+                         onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                         mentionsRequest: .constant(false))
     }
 
-    func test_backlinksPanelBuilds() throws {
-        let root = try tempVault()
-        let store = LoreStore(documents: FakeDocs(),
-                              indexPath: root.appendingPathComponent(".idx.sqlite"))
-        try store.setVaultRootForTesting(root)
-        _ = BacklinksPanel(store: store, url: root.appendingPathComponent("x.md"),
-                           theme: HostTheme(TestTokens.make()))
+    /// The mentions list, now shown in a slideover on request rather than as a
+    /// band under the document. Built in BOTH states: with content, and empty
+    /// — the empty case draws nothing at all, and a view that renders nothing
+    /// is exactly the one a smoke test is most likely to stop covering.
+    func test_mentionsListBuilds() throws {
+        let theme = HostTheme(TestTokens.make())
+        _ = DocumentMentionsList(backlinks: [], unresolved: [], theme: theme,
+                                 onOpen: { _ in }, onCreate: { _ in })
+        let row = IndexRow(path: URL(fileURLWithPath: "/v/a.md"), id: "a", title: "A",
+                           tags: [], aliases: [], updated: Date(),
+                           type: MarkdownEngine.identifier, properties: [])
+        _ = DocumentMentionsList(
+            backlinks: [LoreStore.Backlink(id: row.path, row: row, context: "see [[B]]")],
+            unresolved: [UnresolvedLink(rawTarget: "Ghost", syntax: .wikilink)],
+            theme: theme, onOpen: { _ in }, onCreate: { _ in })
     }
 
     func test_folderTreeGroupsDocumentsByFolder() throws {
@@ -198,7 +221,7 @@ final class RootViewSmokeTests: XCTestCase {
         _ = NoteListView(store: store, query: .constant(""), selected: .constant(nil),
                          theme: HostTheme(TestTokens.make()), onSelect: { _ in },
                          onNew: {}, ops: SidebarOperations(store: store),
-                         activeTag: .constant(nil))
+                         activeTag: .constant(nil), focusRequest: .constant(nil))
     }
 
     func test_documentErrorCard_builds() {

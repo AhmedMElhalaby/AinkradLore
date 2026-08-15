@@ -23,7 +23,7 @@ extension MarkdownEditor.Coordinator {
     /// (`containerInset`/`containerWidth`), so they cannot drift apart again.
     func applyContainerGeometry(forWidth width: CGFloat) {
         guard let tv = textView else { return }
-        let theme = MarkdownTheme(tokens: tokens)
+        let theme = MarkdownTheme(tokens: tokens, settings: settings)
         let inset = MarkdownEditorLayout.containerInset(forViewWidth: width, theme: theme)
         let containerWidth = MarkdownEditorLayout.containerWidth(forViewWidth: width, theme: theme)
         let insetChanged = tv.textContainerInset != inset

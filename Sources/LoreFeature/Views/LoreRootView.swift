@@ -19,12 +19,65 @@ struct LoreRootView: View {
     /// finished import cannot leave its report showing the next time the sheet
     /// opens — the coordinator's whole lifetime is one import.
     @State private var importing: ImportCoordinator?
+    /// Non-nil while the command palette is up, carrying which list it shows.
+    @State private var palette: LorePaletteMode?
+    /// The open document's headings and its scroll handler, published upward by
+    /// `DocumentPane` so ⌘⇧O can jump without this view re-parsing the
+    /// document — `MarkdownEngine.outline` is a full AST parse.
+    @State private var outline: [OutlineEntry] = []
+    @State private var jumpToOffset: ((Int) -> Void)?
+    /// Set when ↓ is pressed in the search field, handing the keyboard to the
+    /// results list. `NoteListView` consumes and clears it.
+    @State private var listFocusRequest: Bool?
+    /// A request to show the linked-mentions slideover, raised by the document
+    /// actions menu or ⌘⇧B. `DocumentPane` consumes it.
+    @State private var mentionsRequest = false
     @Environment(\.ainkradReduceMotion) private var reduceMotion
+    @Environment(\.ainkradTypography) private var typo
 
     init(store: LoreStore, theme: HostTheme) {
         self.store = store
         self.theme = theme
         _ops = State(initialValue: SidebarOperations(store: store))
+    }
+
+    /// Everything a command needs in order to run, assembled once.
+    ///
+    /// Rebuilt per render rather than stored: it is a bundle of references and
+    /// closures over this view's own state, so a cached copy would capture a
+    /// stale `importing`/`palette` binding — and its `context` must be read at
+    /// the moment a command runs, not at the moment it was drawn.
+    private var runner: LoreCommandRunner {
+        LoreCommandRunner(
+            store: store,
+            ops: ops,
+            beginImport: {
+                if let root = store.vaultRoot {
+                    importing = ImportCoordinator(vaultRoot: root)
+                }
+            },
+            // Linked mentions are summoned, not resident — see
+            // `DocumentMentionsList`. ⌘⇧B and the document's actions menu
+            // raise the same request.
+            showMentions: { mentionsRequest = true },
+            openPalette: { palette = $0 },
+            dismissPalette: { palette = nil })
+    }
+
+    /// The open document's index row, matched CANONICALLY.
+    ///
+    /// Canonical on both sides for the reason `LoreStore.trash` documents at
+    /// length: a session opened via `open(url:)` keeps the caller's spelling,
+    /// so a raw `==` silently finds nothing for a document opened with a
+    /// non-canonical URL — and the header would then drop its actions menu on
+    /// exactly the documents that look most ordinary.
+    ///
+    /// Nil with no document open, and for one outside the vault, where
+    /// rename / move / trash have nothing to act on.
+    private var headerRow: IndexRow? {
+        guard let session = store.selectedTab else { return nil }
+        let path = VaultIndexCoordinator.canonical(session.url)
+        return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
     }
 
     /// A filtered tree of mostly-empty branches is worse than a list, so an
@@ -38,26 +91,28 @@ struct LoreRootView: View {
         HStack(spacing: 0) {
             if !store.sidebarCollapsed {
                 sidebar
-                    .frame(width: 280)
+                    .frame(width: store.sidebarWidth)
+                    // Surface hierarchy: the sidebar is CHROME and sits on
+                    // `surface`, the editor is CONTENT and stays on
+                    // `background`. Every one of these was `background`
+                    // before, which is why the window read as one
+                    // undifferentiated field with a list floating in it —
+                    // `surface` went entirely unused in the app.
+                    .background(theme.tokens.surface)
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                SidebarResizeHandle(width: store.sidebarWidth, theme: theme) { width in
+                    store.setSidebarWidth(width)
+                }
             }
             VStack(spacing: 0) {
-                HStack(spacing: AinkradSpacing.sm) {
-                    AinkradIconButton(
-                        systemName: store.sidebarCollapsed
-                            ? "sidebar.left" : "sidebar.leading",
-                        tooltip: store.sidebarCollapsed ? "Show sidebar" : "Hide sidebar") {
-                            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                                store.setSidebarCollapsed(!store.sidebarCollapsed)
-                            }
-                        }
-                        .keyboardShortcut("\\", modifiers: .command)
-                    if !store.tabs.isEmpty {
-                        TabBarView(store: store, theme: theme,
-                                   onSelect: { _ in attempted = nil })
-                    }
-                    Spacer(minLength: 0)
-                }
+                // The header renders in EVERY state, including the empty one:
+                // it carries the sidebar toggle and the history chevrons, and
+                // hiding those with no document open would make a collapsed
+                // sidebar unrecoverable except by a shortcut nobody has been
+                // told about.
+                DocumentHeaderBar(session: store.selectedTab, store: store, theme: theme,
+                                  row: headerRow, ops: ops,
+                                  onShowMentions: { mentionsRequest = true })
                 content
             }
             // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
@@ -72,6 +127,34 @@ struct LoreRootView: View {
         }
         .background(theme.tokens.background)
         .environment(\.ainkradTheme, theme.tokens)
+        // Mounted ONCE, at the surface root, so every toast in Lore stacks in
+        // the same corner regardless of which view raised it. Must sit ABOVE
+        // `loreSidebarOperations` below, whose `LoreNoticeBridge` reads the
+        // center this injects.
+        .ainkradToastHost()
+        // Every shortcut in the app, bound from ONE list. Replaces the
+        // hand-placed overlays that used to sit at each command's point of
+        // use — see `LoreCommandShortcuts`, including why availability gates
+        // the binding itself rather than just the action.
+        .loreCommandShortcuts(runner)
+        // An OVERLAY, not a `.sheet`. Two reasons, and the first is a hard
+        // constraint: `loreSidebarOperations` below already owns a `.sheet` on
+        // this same view, and two `.sheet` modifiers on one view are
+        // unreliable on macOS — the failure mode being a dialog that silently
+        // never appears (see `SidebarOperationsPresentation`). The second is
+        // that a command palette is not a document-modal question; it is a
+        // transient surface over the work, which is what an overlay reads as.
+        .overlay {
+            if let mode = palette {
+                LorePalette(mode: mode, store: store, runner: runner, theme: theme,
+                            outline: outline,
+                            onDismiss: { palette = nil },
+                            onJumpToOffset: { jumpToOffset?($0) })
+                    .transition(reduceMotion ? .opacity
+                                : .opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(reduceMotion ? nil : AinkradMotion.materialize, value: palette)
         // Attached at the surface ROOT: `ainkradConfirmDialog` dims and centers
         // within the view it modifies, so attaching it to the 280pt sidebar
         // would scope a destructive confirmation to a narrow column.
@@ -101,6 +184,18 @@ struct LoreRootView: View {
             // type into either way.
             HStack(spacing: AinkradSpacing.sm) {
                 AinkradSearchField(text: $query, placeholder: "Search notes")
+                    // ↓ hands the keyboard to the results. Without this, the
+                    // only way from a typed query to the note it found was the
+                    // mouse — which is the whole reason a search field that
+                    // filters a list is not a search surface.
+                    .onMoveCommand { direction in
+                        if direction == .down { listFocusRequest = true }
+                    }
+                    // Esc clears the query rather than dismissing anything:
+                    // `onExitCommand` is scoped to the focused view, so this
+                    // only fires while the caret is in the field, and clearing
+                    // is what Esc means in a search box.
+                    .onExitCommand { query = "" }
                 // Folder creation belongs to Folders mode only — "All
                 // notes" (`NoteListView`) has no folder affordances at
                 // all, by design. Gated on `effectiveSidebarMode` rather
@@ -114,25 +209,54 @@ struct LoreRootView: View {
                                      tooltip: "New Folder") {
                         ops.beginNewFolder(in: root)
                     }
+                    // A tooltip is not a label: it needs a pointer to hover,
+                    // so VoiceOver got nothing but the SF Symbol name for all
+                    // three of these buttons.
+                    .accessibilityLabel("New folder")
                 }
                 if let root = store.vaultRoot {
                     AinkradIconButton(systemName: "square.and.arrow.down",
                                      tooltip: "Import…") {
                         importing = ImportCoordinator(vaultRoot: root)
                     }
+                    .accessibilityLabel("Import notes")
                 }
                 AinkradIconButton(systemName: "plus", action: quickCapture)
-                    .keyboardShortcut("n", modifiers: .command)
+                    .accessibilityLabel("New note")
             }
             .padding(.horizontal, AinkradSpacing.md)
             .padding(.top, AinkradSpacing.md)
 
+            // Bound to the EFFECTIVE mode, not the persisted preference.
+            //
+            // An active search or tag filter silently forces the flat list
+            // (see `effectiveSidebarMode`), and the picker used to go on
+            // showing "Folders" as selected the whole time — a control
+            // reporting a state the app is visibly not in. Now it reports what
+            // is on screen, and choosing "Folders" while filtering CLEARS the
+            // filter rather than doing nothing, because that is the only way
+            // the tree could actually appear.
             AinkradSegmentedPicker(
                 items: [LoreStore.SidebarMode.tree, .all],
-                selection: Binding(get: { store.sidebarMode },
-                                   set: { store.setSidebarMode($0) })
+                selection: Binding(
+                    get: { effectiveSidebarMode },
+                    set: { mode in
+                        if mode == .tree { query = ""; activeTag = nil }
+                        store.setSidebarMode(mode)
+                    })
             ) { mode in mode == .tree ? "Folders" : "All notes" }
             .padding(.horizontal, AinkradSpacing.md)
+            // Says WHY the tree is unavailable, rather than leaving the user
+            // to infer it from a picker that moved on its own.
+            if store.sidebarMode == .tree && effectiveSidebarMode == .all {
+                Text("Showing matches across all folders.")
+                    .font(AinkradFontResolver.font(.caption, typography: typo))
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
+                    .padding(.horizontal, AinkradSpacing.md)
+            }
+
+            SidebarShortcutsSection(store: store, theme: theme, selected: $selected,
+                                    onSelect: openRow, ops: ops)
 
             if effectiveSidebarMode == .tree {
                 FolderTreeView(store: store, theme: theme, selected: $selected,
@@ -140,7 +264,7 @@ struct LoreRootView: View {
             } else {
                 NoteListView(store: store, query: $query, selected: $selected, theme: theme,
                             onSelect: openRow, onNew: quickCapture, ops: ops,
-                            activeTag: $activeTag)
+                            activeTag: $activeTag, focusRequest: $listFocusRequest)
             }
         }
     }
@@ -153,7 +277,10 @@ struct LoreRootView: View {
         } else if let session = store.selectedTab {
             // Identity is the session's stable id — NOT its url, which changes
             // when the session adopts a "save a copy" resolution.
-            DocumentPane(store: store, session: session, theme: theme)
+            DocumentPane(store: store, session: session, theme: theme, ops: ops,
+                         onOutlineChange: { outline = $0 },
+                         onScrollHandler: { jumpToOffset = $0 },
+                         mentionsRequest: $mentionsRequest)
                 .id(session.id)
         } else {
             switch Self.emptyState(for: store) {

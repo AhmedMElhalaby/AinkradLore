@@ -273,4 +273,90 @@ final class SidebarOperationsTests: XCTestCase {
         let attachmentItems = loreRowMenuItems(row: attachment, ops: ops)
         XCTAssertFalse(attachmentItems.contains { $0.title == "Move to Trash" })
     }
+
+    // MARK: - Successes are not failures
+
+    /// The bug this split exists to kill: `message` is rendered by
+    /// `MessageSheet`, whose heading is the literal words "Not done". Creating
+    /// a folder set `message`, so a SUCCESSFUL create told the user
+    /// "Not done: Created “Projects”." — the opposite of what happened.
+    func test_creatingAFolderReportsASuccessNotAFailure() async throws {
+        let (root, s) = try vault("notice-folder")
+        await s.settleForTesting()
+        let ops = SidebarOperations(store: s)
+
+        ops.beginNewFolder(in: root)
+        ops.nameText = "Projects"
+        ops.commitName()
+
+        XCTAssertNil(ops.message, "a successful create must not raise the “Not done” sheet")
+        XCTAssertEqual(ops.notice?.kind, .success)
+        XCTAssertEqual(ops.notice?.text.contains("Projects"), true)
+    }
+
+    /// A create that genuinely FAILS still goes to the modal channel — the
+    /// split is by weight, and an invalid name is something the user must fix.
+    func test_aFailedFolderCreateStillRaisesTheSheet() async throws {
+        let (root, s) = try vault("notice-folder-bad")
+        await s.settleForTesting()
+        let ops = SidebarOperations(store: s)
+
+        ops.beginNewFolder(in: root)
+        ops.nameText = "bad/name"
+        ops.commitName()
+
+        XCTAssertNotNil(ops.message)
+        XCTAssertNil(ops.notice, "a failure must not be downgraded to a toast")
+    }
+
+    /// A confirmed delete reports success as a toast AND advertises the undo,
+    /// which is the only place the ⌘Z affordance is discoverable.
+    func test_aConfirmedTrashReportsSuccessAndOffersUndo() async throws {
+        let (root, s) = try vault("notice-trash")
+        try "---\nid: g\ntitle: G\n---\nx".write(
+            to: root.appendingPathComponent("g.md"), atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+
+        ops.requestTrash(try row(s, "g.md"))
+        ops.confirmTrash()
+
+        XCTAssertNil(ops.message, "a successful delete is not a refusal")
+        XCTAssertEqual(ops.notice?.kind, .success)
+        XCTAssertEqual(ops.notice?.text.contains("⌘Z"), true,
+                       "the undo is unreachable if nothing mentions it")
+        XCTAssertTrue(ops.canUndoTrash)
+    }
+
+    /// And the undo runs through the same channel, restoring the file.
+    func test_undoLastTrashRestoresAndReportsIt() async throws {
+        let (root, s) = try vault("notice-undo")
+        let url = root.appendingPathComponent("back.md")
+        try "---\nid: b\ntitle: B\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        let ops = SidebarOperations(store: s)
+
+        ops.requestTrash(try row(s, "back.md"))
+        ops.confirmTrash()
+        ops.undoLastTrash()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertNil(ops.message)
+        XCTAssertEqual(ops.notice?.kind, .success)
+        XCTAssertEqual(ops.notice?.text.contains("Restored"), true)
+        XCTAssertFalse(ops.canUndoTrash, "the record must be consumed")
+    }
+
+    /// ⌘Z with nothing to undo is silent — not an error, and not a toast. An
+    /// idle keystroke must not become an interruption.
+    func test_undoWithNothingToUndoIsSilent() async throws {
+        let (_, s) = try vault("notice-undo-empty")
+        await s.settleForTesting()
+        let ops = SidebarOperations(store: s)
+
+        ops.undoLastTrash()
+
+        XCTAssertNil(ops.message)
+        XCTAssertNil(ops.notice)
+    }
 }

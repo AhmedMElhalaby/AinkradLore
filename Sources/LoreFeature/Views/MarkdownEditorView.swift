@@ -38,6 +38,18 @@ extension MarkdownEditor {
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
+        // The system find bar. `usesFindBar` puts it inside the scroll view
+        // rather than in a floating panel, which is what keeps it attached to
+        // the document it is searching when several are open.
+        //
+        // Safe alongside the markdown styling passes: find highlighting is
+        // drawn with the layout manager's TEMPORARY attributes, while
+        // `MarkdownStyleRendering` writes real attributes into the text
+        // storage. The two never touch the same storage, so a restyle on the
+        // next keystroke cannot erase the highlights — which is precisely the
+        // collision that would have made this unusable.
+        tv.usesFindBar = true
+        tv.isIncrementalSearchingEnabled = true
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
@@ -47,7 +59,7 @@ extension MarkdownEditor {
         // initial size, then kept in sync by `onWidthChange` via
         // `applyContainerGeometry`, which owns both together so they cannot
         // drift apart on resize.
-        let initialTheme = MarkdownTheme(tokens: tokens)
+        let initialTheme = MarkdownTheme(tokens: tokens, settings: settings)
         tv.textContainerInset = MarkdownEditorLayout.containerInset(
             forViewWidth: tv.bounds.width, theme: initialTheme)
         tv.textContainer?.widthTracksTextView = false
@@ -72,6 +84,9 @@ extension MarkdownEditor {
         // or to a control that does not end editing).
         tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.completionPanel.hide()
+            // Same rule the completion panel follows: a floating window that
+            // outlives its reason to exist is the failure mode here.
+            coordinator?.hoverChanged(to: nil)
             // `false`, not a live read: at this point `NSWindow` has not yet
             // reassigned first responder away from `tv` (see
             // `revealForSelectionChange`'s doc comment), so a live read would
@@ -87,6 +102,9 @@ extension MarkdownEditor {
         tv.onDropFileURLs = { [weak coordinator = context.coordinator] urls in
             coordinator?.insertAttachments(fromDroppedFiles: urls) ?? false
         }
+        tv.onHoverIndex = { [weak coordinator = context.coordinator] index in
+            coordinator?.hoverChanged(to: index)
+        }
         // See `LinkTextView`'s doc comment on why this is registered here,
         // post-construction, rather than in an overridden initializer.
         tv.registerForDraggedTypes([.fileURL])
@@ -100,6 +118,10 @@ extension MarkdownEditor {
         context.coordinator.textView = tv
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
+        // The SAME resolver embeds use, so a hover and an embed cannot
+        // disagree about what a name points at.
+        context.coordinator.resolveHoverTarget = resolveEmbedTarget
+        context.coordinator.createLinkedNote = createLinkedNote
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
@@ -147,6 +169,7 @@ extension MarkdownEditor {
         context.coordinator.onOpenLink = onOpenLink
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
+        context.coordinator.createLinkedNote = createLinkedNote
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
@@ -155,6 +178,17 @@ extension MarkdownEditor {
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
         context.coordinator.tokens = tokens
+        // Display settings changing must re-lay out the document the reader is
+        // ALREADY looking at — a font size that only applies to the next
+        // document opened reads as a broken setting. The geometry is
+        // re-applied explicitly because container inset and width are a
+        // function of the theme AND the view width, and `applyStyles` alone
+        // does not touch them (see `applyContainerGeometry`, which owns both
+        // together so they cannot drift apart).
+        if context.coordinator.settings != settings {
+            context.coordinator.settings = settings
+            context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
+        }
         context.coordinator.applyStyles()
         if let offset = scrollTarget.wrappedValue {
             context.coordinator.scrollToOffset(offset)

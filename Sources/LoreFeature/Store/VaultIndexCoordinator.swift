@@ -98,7 +98,19 @@ public final class VaultIndexCoordinator {
     /// ignored — see `save(_:overwritingExternalChanges:)`.
     private var suppressWatcherUntil: Date = .distantPast
     /// A background rescan is in flight.
-    private var isRebuilding = false
+    ///
+    /// `public private(set)` rather than `private`: this is the ONLY signal the
+    /// UI has that a vault is still being read. Kept private, a first-run user
+    /// opening a large vault saw an empty sidebar — indistinguishable from an
+    /// empty vault — for as long as the scan took.
+    public private(set) var isRebuilding = false
+    /// Why the last background rescan failed, or nil if it succeeded.
+    ///
+    /// `performBackgroundRebuild` used to `return nil` on a throw and tell
+    /// nobody: a vault that could not be indexed looked exactly like a vault
+    /// with nothing in it. Cleared at the START of each attempt, so it only
+    /// ever describes the most recent one.
+    public private(set) var lastRebuildError: String?
     /// A vault change arrived while a rescan was running — run once more after.
     private var rebuildRequestedAgain = false
 
@@ -174,6 +186,7 @@ public final class VaultIndexCoordinator {
         while isRebuilding { await Task.yield() }
     }
 
+
     /// Kicks off an off-actor rescan, coalescing with one already in flight.
     ///
     /// FSEvents delivers bursts (a `git checkout` in the vault is hundreds of
@@ -197,6 +210,7 @@ public final class VaultIndexCoordinator {
             }
         }
         guard let root = vaultRoot, let index else { return }
+        lastRebuildError = nil
         // Walk, read and parse every note off the main actor, then apply the
         // whole result in one transaction. `LoreIndex` is Sendable (it holds
         // only a GRDB `DatabaseQueue`, which serializes its own access).
@@ -207,18 +221,29 @@ public final class VaultIndexCoordinator {
         // is what keeps a post-save rescan from turning the next folder-tree
         // redraw into a synchronous stall — see `directoryPaths`'s own
         // doc comment for the measured before/after.
-        let refreshed: (rows: [IndexRow], directories: [String])?
-            = await Task.detached(priority: .utility) {
-                () -> (rows: [IndexRow], directories: [String])? in
+        let outcome: RebuildOutcome = await Task.detached(priority: .utility) {
+                () -> RebuildOutcome in
             let notes = Self.scanVault(at: root)
             let directories = Self.scanDirectories(under: root)
             do {
                 try index.replaceAll(with: notes)
-                return (rows: try index.all(), directories: directories)
+                return .done(rows: try index.all(), directories: directories)
             } catch {
-                return nil
+                // Carried back rather than collapsed to `nil`. The reason a
+                // vault fails to index (a corrupt index file, a full disk, a
+                // permissions refusal) is the single most useful thing we can
+                // tell someone staring at an empty sidebar.
+                return .failed(error.localizedDescription)
             }
         }.value
+        let refreshed: (rows: [IndexRow], directories: [String])?
+        switch outcome {
+        case .done(let rows, let directories):
+            refreshed = (rows: rows, directories: directories)
+        case .failed(let reason):
+            lastRebuildError = reason
+            refreshed = nil
+        }
         // KNOWN, UNFIXED RACE (recorded, not fixed — rated theoretical/low):
         // `directories` above is a snapshot of disk taken when THIS task's
         // `scanDirectories` ran, at the START of this detached task. If a
@@ -238,6 +263,14 @@ public final class VaultIndexCoordinator {
         // `directoryPaths` from `rows` plus the targeted deltas instead of a
         // flat overwrite — both are more than a one-line guard.
         if let refreshed { rows = refreshed.rows; directoryPaths = refreshed.directories }
+    }
+
+    /// What one background rescan produced — the refreshed vault, or why it
+    /// could not be read. A two-case result rather than an optional, so the
+    /// failure carries its reason instead of being erased to "nothing".
+    private enum RebuildOutcome: Sendable {
+        case done(rows: [IndexRow], directories: [String])
+        case failed(String)
     }
 
     /// Pure, off-actor: every engine-openable file under `root`, loaded and
@@ -398,6 +431,11 @@ public final class VaultIndexCoordinator {
 
     public func search(_ query: String) -> [IndexRow] {
         (try? index?.search(query)) ?? []
+    }
+
+    /// Search with an excerpt per hit — see `LoreIndex.searchHits`.
+    public func searchHits(_ query: String) -> [SearchHit] {
+        (try? index?.searchHits(query)) ?? []
     }
 
     /// `FileManager`'s enumerator (in `scanVault`) hands back paths resolved

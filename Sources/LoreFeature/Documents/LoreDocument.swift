@@ -62,6 +62,26 @@ public struct IndexPayload: Sendable {
 /// What an engine's editor view needs from the shell.
 public struct EditorContext {
     public let theme: HostTheme
+    /// Creates a note for a name typed into a `[[` completion, reporting
+    /// whether it worked. Defaulted to "cannot create", which is what
+    /// suppresses the popup's create row for an engine with no vault behind
+    /// it.
+    public let createLinkedNote: @MainActor (String) -> Bool
+    /// Reports the caret's BODY-relative UTF-16 offset as it moves.
+    ///
+    /// Body-relative, matching `OutlineEntry.utf16Offset` and the offset
+    /// `registerScrollHandler`'s function accepts — the markdown engine splits
+    /// frontmatter and title off the body, and mixing the two spaces would put
+    /// every answer out by the length of the frontmatter.
+    ///
+    /// Defaulted like every other field added since this struct was written,
+    /// so an engine with no caret (PDF, attachment) is unaffected.
+    public let reportCaretOffset: @MainActor (Int) -> Void
+    /// The reader's display preferences for the writing surface. DEFAULTED,
+    /// like every other field added to this struct since it was written, so
+    /// widening it cannot break an engine that has no text of its own to
+    /// scale — the PDF and attachment engines ignore it entirely.
+    public let editorSettings: EditorSettings
     /// Called by the editor after every user mutation. The session debounces
     /// and saves; the editor never writes files itself.
     public let onChange: @MainActor () -> Void
@@ -120,7 +140,11 @@ public struct EditorContext {
     /// title-field story, or a test that does not care, needs no changes.
     public let commitTitle: @MainActor (String) -> LoreStore.TitleCommitOutcome
 
-    public init(theme: HostTheme, onChange: @escaping @MainActor () -> Void,
+    public init(theme: HostTheme,
+                editorSettings: EditorSettings = .default,
+                createLinkedNote: @escaping @MainActor (String) -> Bool = { _ in false },
+                reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
+                onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
@@ -133,7 +157,10 @@ public struct EditorContext {
                 writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil },
                 commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
                     = { _ in .refused("Renaming is unavailable here.") }) {
-        self.theme = theme; self.onChange = onChange
+        self.theme = theme; self.editorSettings = editorSettings
+        self.createLinkedNote = createLinkedNote
+        self.reportCaretOffset = reportCaretOffset
+        self.onChange = onChange
         self.completions = completions; self.openLink = openLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget

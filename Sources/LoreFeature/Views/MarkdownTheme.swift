@@ -22,20 +22,37 @@ struct MarkdownTheme: Equatable {
     /// window.
     let maxMeasure: CGFloat?
 
-    init(tokens: HostThemeTokens) {
-        bodySize = 15
-        lineHeightMultiple = 1.5
-        paragraphSpacing = 12
-        listIndentStep = 22
-        contentInset = 28
-        maxMeasure = 760
+    /// `settings` defaults to `.default`, whose values are exactly the numbers
+    /// this initializer used to hard-code — so every call site that has no
+    /// settings to offer (a preview, a test, an engine with no editor chrome)
+    /// renders precisely what it rendered before.
+    ///
+    /// `tokens` is still accepted and still unused. It stays because colour
+    /// genuinely belongs to the host theme and a future scale that depends on
+    /// it (a host-wide type ramp) would arrive through this parameter — but it
+    /// is worth being explicit that TODAY it decides nothing here, which the
+    /// old signature actively obscured.
+    init(tokens: HostThemeTokens, settings: EditorSettings = .default) {
+        bodySize = settings.bodySize
+        lineHeightMultiple = settings.density.lineHeightMultiple
+        paragraphSpacing = settings.density.paragraphSpacing * settings.zoomFactor
+        listIndentStep = 22 * settings.zoomFactor
+        contentInset = 28 * settings.zoomFactor
+        maxMeasure = settings.maxMeasure
     }
 
     /// h1…h6. Clamped so an out-of-range level from a malformed document
     /// cannot produce a negative or absurd size.
+    ///
+    /// Derived from `bodySize` rather than fixed, so zoom and density move the
+    /// whole ramp together. The multipliers are the original absolute sizes
+    /// divided by the original body size of 15 — at default settings this
+    /// returns [30, 24, 20, 17.5, 16, 15.5] to the point, which is what keeps
+    /// `MarkdownThemeTests`' existing assertions honest rather than merely
+    /// passing.
     func headingSize(_ level: Int) -> CGFloat {
-        let steps: [CGFloat] = [30, 24, 20, 17.5, 16, 15.5]
-        return steps[min(max(level, 1), 6) - 1]
+        let ratios: [CGFloat] = [2, 1.6, 4.0 / 3.0, 7.0 / 6.0, 16.0 / 15.0, 31.0 / 30.0]
+        return bodySize * ratios[min(max(level, 1), 6) - 1]
     }
 
     func headingSpacingBefore(_ level: Int) -> CGFloat {

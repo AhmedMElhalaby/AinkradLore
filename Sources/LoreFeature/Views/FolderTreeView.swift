@@ -59,6 +59,27 @@ struct FolderNode: Identifiable {
     }
 }
 
+/// Applies a drop target only where there is a real folder to drop into.
+///
+/// The synthetic root node has no URL (see `folderURL`), and `ViewModifier`
+/// has no "do nothing" form that keeps the same view type — hence a modifier
+/// that branches internally rather than an `if` at each use site.
+private struct OptionalDropTarget: ViewModifier {
+    let folder: URL?
+    let store: LoreStore
+    let ops: SidebarOperations
+    let theme: HostTheme
+
+    func body(content: Content) -> some View {
+        if let folder {
+            content.loreDocumentDropTarget(folder: folder, store: store,
+                                           ops: ops, theme: theme)
+        } else {
+            content
+        }
+    }
+}
+
 /// Folder tree rendering of `store.rows`, an alternative to `NoteListView`'s
 /// flat list. Expansion state and the choice between the two views persist
 /// via `LoreStore`; see `LoreStore.sidebarMode` / `setExpandedFolders`.
@@ -109,6 +130,12 @@ struct FolderTreeView: View {
                         .frame(maxWidth: .infinity, minHeight: 120)
                         .contentShape(Rectangle())
                         .ainkradContextMenu(loreRootMenuItems(root: root, ops: ops))
+                        // The empty space below the tree IS the vault root as a
+                        // drop target — otherwise moving a note back out to the
+                        // root would have no gesture at all, since the root has
+                        // no row of its own to drop onto.
+                        .loreDocumentDropTarget(folder: root, store: store,
+                                                ops: ops, theme: theme)
                 }
             }
         }
@@ -137,6 +164,11 @@ struct FolderTreeView: View {
                 .ainkradContextMenu(folderURL(node).map {
                     loreFolderMenuItems(folder: $0, ops: ops)
                 } ?? [])
+                // Dropping a note on a folder moves it there — through the
+                // SAME `ops.move` the context menu uses, so the link-rewrite
+                // preview still appears. See `SidebarDragDrop`.
+                .modifier(OptionalDropTarget(folder: folderURL(node), store: store,
+                                             ops: ops, theme: theme))
         }
         if depth == 0 || expanded.contains(node.id) {
             ForEach(node.documents, id: \.path) { row in
@@ -144,7 +176,8 @@ struct FolderTreeView: View {
                     row: row, depth: depth,
                     isSelected: selected?.path == row.path,
                     onTap: { selected = row; onSelect(row) })
-                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                    .loreDraggableDocument(row)
+                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops, store: store))
             }
             ForEach(node.children) { child in outline(child, depth: depth + 1) }
         }

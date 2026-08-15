@@ -5,6 +5,13 @@ import AinkradAppKit
 public struct MarkdownEditor: NSViewRepresentable {
     @Binding var text: String
     let tokens: HostThemeTokens
+    /// Display preferences. Threaded down from `EditorContext` so the five
+    /// places that build a `MarkdownTheme` all build the SAME one — the
+    /// alternative was a process-wide current-settings global, which would
+    /// have made two Lore instances in one host share a font size.
+    let settings: EditorSettings
+    /// See `EditorContext.createLinkedNote`.
+    let createLinkedNote: (@MainActor (String) -> Bool)?
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
     /// entirely — which is how plain-text documents get no link affordances.
     let completions: (@MainActor (String) -> [IndexRow])?
@@ -47,6 +54,8 @@ public struct MarkdownEditor: NSViewRepresentable {
     let registerMenuActions: (@MainActor (EditorMenuActions) -> Void)?
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
+                settings: EditorSettings = .default,
+                createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
@@ -58,7 +67,8 @@ public struct MarkdownEditor: NSViewRepresentable {
                 writeDroppedFile: (@MainActor (URL) -> String?)? = nil,
                 onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
-        self._text = text; self.tokens = tokens
+        self._text = text; self.tokens = tokens; self.settings = settings
+        self.createLinkedNote = createLinkedNote
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
@@ -70,7 +80,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.registerMenuActions = registerMenuActions
     }
 
-    public func makeCoordinator() -> Coordinator { Coordinator(text: $text, tokens: tokens) }
+    public func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, tokens: tokens, settings: settings)
+    }
 
     // `makeNSView`, `updateNSView`, `dismantleNSView` and `addStylingNotice`
     // — the AppKit-object lifecycle — live in `MarkdownEditorView.swift`.
@@ -82,6 +94,25 @@ public struct MarkdownEditor: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var tokens: HostThemeTokens
+        /// Floats a document's opening text beside a hovered `[[link]]`.
+        let previewPanel = LinkPreviewPanel()
+        /// Cancels a pending hover when the pointer moves on before the delay
+        /// elapses. Held so each move REPLACES the last intent rather than
+        /// queueing another one.
+        var hoverTask: Task<Void, Never>?
+        /// Resolves a link target to a file. Supplied by the shell; the same
+        /// closure embeds already use, so a hover and an embed can never
+        /// disagree about what a name points at.
+        var resolveHoverTarget: (@MainActor (String) -> URL?)?
+        /// Creates a note for the typed text, reporting whether it worked.
+        /// Nil when the shell offers no create path, which suppresses the
+        /// popup's "Create …" row entirely.
+        var createLinkedNote: (@MainActor (String) -> Bool)?
+
+        /// Kept in sync by `updateNSView`, so changing a setting restyles the
+        /// document the user is already looking at rather than only the next
+        /// one they open.
+        var settings: EditorSettings
         var completions: (@MainActor (String) -> [IndexRow])?
         var onOpenLink: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
@@ -226,10 +257,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// `dismantleNSView` would leak one observer per document opened.
         nonisolated(unsafe) private var scrollObserver: (any NSObjectProtocol)?
 
-        init(text: Binding<String>, tokens: HostThemeTokens) {
-            self.text = text; self.tokens = tokens
+        init(text: Binding<String>, tokens: HostThemeTokens,
+             settings: EditorSettings = .default) {
+            self.text = text; self.tokens = tokens; self.settings = settings
             super.init()
-            completionPanel.onPick = { [weak self] row in self?.insert(row) }
+            completionPanel.onPick = { [weak self] item in self?.accept(item) }
         }
 
         deinit { if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) } }
@@ -247,6 +279,13 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         func tearDown() {
             completionPanel.hide()
+            // The hover preview is a child window of the same host window, so
+            // it must go with the editor — and its pending task must be
+            // cancelled, or a preview appears half a second after the document
+            // it belonged to has been torn down.
+            hoverTask?.cancel()
+            hoverTask = nil
+            previewPanel.hide()
             parseTimer?.invalidate()
             parseTimer = nil
             // Any in-flight off-actor parse now belongs to a torn-down editor;
@@ -345,14 +384,26 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completionPanel.hide(); return
             }
             let rows = completions(prefix)
-            guard !rows.isEmpty else { completionPanel.hide(); return }
-            completionPanel.show(matches: rows, tokens: tokens,
+            let items = Self.completionItems(for: prefix, matches: rows,
+                                             canCreate: createLinkedNote != nil)
+            guard !items.isEmpty else { completionPanel.hide(); return }
+            completionPanel.show(matches: items, tokens: tokens,
                                  caretRect: caretRect(in: tv), over: tv)
         }
 
         /// Scrolling moves the caret on screen but changes nothing about what
         /// is being completed — so this re-places the panel and never re-queries.
         private func repositionCompletions() {
+            // Scrolling slides the text out from under a STATIONARY pointer,
+            // so whatever the preview is describing is no longer what the
+            // pointer is over. The completion panel repositions because it
+            // tracks the CARET, which moved with the text; this tracks the
+            // pointer, which did not.
+            if previewPanel.isVisible {
+                hoverTask?.cancel()
+                hoverTask = nil
+                previewPanel.hide()
+            }
             guard completionPanel.isVisible, let tv = textView else { return }
             completionPanel.reposition(caretRect: caretRect(in: tv), over: tv)
         }
@@ -364,11 +415,51 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// Replaces the typed prefix with a target that resolves back to `row`,
         /// closes the link, and leaves the caret AFTER the `]]` so typing
         /// continues in prose.
-        private func insert(_ row: IndexRow) {
+        /// The rows the popup offers for a typed prefix.
+        ///
+        /// Pure and `static` so the one rule worth stating — WHEN a create row
+        /// appears — is asserted directly. It appears only when the typed text
+        /// is not already the name of something offered: a "Create «Design»"
+        /// row underneath an existing `Design` invites making a second
+        /// document with the same name, which is the one outcome a vault
+        /// cannot easily undo.
+        static func completionItems(for prefix: String, matches: [IndexRow],
+                                    canCreate: Bool) -> [LinkCompletionItem] {
+            let trimmed = prefix.trimmingCharacters(in: .whitespaces)
+            var items = matches.map { LinkCompletionItem.document($0) }
+            guard canCreate, !trimmed.isEmpty else { return items }
+            let exists = matches.contains { row in
+                let name = row.title.isEmpty ? row.path.lastPathComponent : row.title
+                return name.compare(trimmed, options: .caseInsensitive) == .orderedSame
+            }
+            // LAST, never first: the common case is picking a note that
+            // exists, and a create row at the top is one stray Return away
+            // from a duplicate.
+            if !exists { items.append(.create(trimmed)) }
+            return items
+        }
+
+        /// Handles a picked row.
+        private func accept(_ item: LinkCompletionItem) {
+            switch item {
+            case .document(let row):
+                insert(linkText: linkTarget(row))
+            case .create(let name):
+                // Created BEFORE the text is inserted, so a refused create
+                // (no vault, an invalid name) leaves the document untouched
+                // rather than writing a link to a note that was never made.
+                guard createLinkedNote?(name) == true else {
+                    completionPanel.hide(); return
+                }
+                insert(linkText: name)
+            }
+        }
+
+        private func insert(linkText: String) {
             guard let tv = textView, let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
             }
-            let insertion = linkTarget(row) + "]]"
+            let insertion = linkText + "]]"
             // The `]]` may ALREADY be there: `[` auto-pairs, so typing `[[`
             // leaves `[[]]` with the caret in the middle. `linkInsertionRange`
             // absorbs an existing closer into the replaced range, which is what

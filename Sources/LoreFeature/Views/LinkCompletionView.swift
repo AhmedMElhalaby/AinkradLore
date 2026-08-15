@@ -205,24 +205,54 @@ public enum LinkCompletionContext {
     }
 }
 
+/// One row in the completion list.
+///
+/// The list used to be `[IndexRow]` end to end, which made "offer to create the
+/// note you are typing" unrepresentable: there is no `IndexRow` for a document
+/// that does not exist yet. Modelling the row rather than the document is what
+/// lets the list carry an action alongside its matches.
+@MainActor
+enum LinkCompletionItem: Equatable {
+    case document(IndexRow)
+    /// Create a note with this name. Carries the typed text, not a row.
+    case create(String)
+
+    /// What the row reads as.
+    var label: String {
+        switch self {
+        case .document(let row):
+            return row.title.isEmpty ? row.path.lastPathComponent : row.title
+        case .create(let name):
+            return "Create “\(name)”"
+        }
+    }
+
+    var systemName: String {
+        switch self {
+        case .document(let row): return LoreSidebarRow.icon(for: row)
+        case .create: return "plus.circle"
+        }
+    }
+}
+
 /// Which rows the completion list is offering, and which one is highlighted.
 ///
 /// A value type with no AppKit in it, so the two rules that are easy to get
 /// wrong — the highlight resets when the matches change, and the arrow keys
 /// clamp at the ends rather than wrapping — are unit-testable without a window.
 struct LinkCompletionSelection: Equatable {
-    private(set) var matches: [IndexRow] = []
+    private(set) var matches: [LinkCompletionItem] = []
     private(set) var index = 0
 
     /// Rows the list can actually show. The highlight may never point past them.
     var visibleCount: Int { min(matches.count, LinkCompletionView.maxRows) }
 
-    var current: IndexRow? { index < matches.count ? matches[index] : nil }
+    var current: LinkCompletionItem? { index < matches.count ? matches[index] : nil }
 
     /// A changed match set resets the highlight to the top: after another
     /// keystroke the row at the old index is a different document, and silently
     /// leaving the highlight there is how a user accepts the wrong note.
-    mutating func update(to rows: [IndexRow]) {
+    mutating func update(to rows: [LinkCompletionItem]) {
         if rows != matches { matches = rows; index = 0 }
         index = min(index, max(0, visibleCount - 1))
     }
@@ -239,19 +269,20 @@ struct LinkCompletionSelection: Equatable {
 /// picks. Which rows, where it floats and which keys reach it are the text
 /// view's business — see `LinkCompletionPanel`.
 struct LinkCompletionView: View {
-    let matches: [IndexRow]
+    let matches: [LinkCompletionItem]
     let selected: Int
     let tokens: HostThemeTokens
-    let onPick: (IndexRow) -> Void
+    let onPick: (LinkCompletionItem) -> Void
 
     static let maxRows = 8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(matches.prefix(Self.maxRows).enumerated()), id: \.element.path) { pair in
+            ForEach(Array(matches.prefix(Self.maxRows).enumerated()), id: \.offset) { pair in
                 Button { onPick(pair.element) } label: {
-                    HStack {
-                        Text(label(for: pair.element)).lineLimit(1)
+                    HStack(spacing: AinkradSpacing.xs) {
+                        AinkradIconGlyph(systemName: pair.element.systemName, size: 10)
+                        Text(pair.element.label).lineLimit(1)
                             .foregroundStyle(tokens.foreground)
                         Spacer(minLength: 0)
                     }
@@ -271,7 +302,4 @@ struct LinkCompletionView: View {
             .stroke(tokens.foreground.opacity(0.2)))
     }
 
-    private func label(for row: IndexRow) -> String {
-        row.title.isEmpty ? row.path.lastPathComponent : row.title
-    }
 }

@@ -90,10 +90,15 @@ final class LinkCompletionTests: XCTestCase {
 
     // MARK: - Selection state
 
-    private func rows(_ n: Int) -> [IndexRow] {
+    /// The list is typed on `LinkCompletionItem` rather than `IndexRow` since
+    /// the popup gained a "Create …" row — there is no `IndexRow` for a
+    /// document that does not exist yet. These selection rules are unchanged;
+    /// only the element type is.
+    private func rows(_ n: Int) -> [LinkCompletionItem] {
         (0..<n).map { i in
-            IndexRow(path: URL(fileURLWithPath: "/v/\(i).md"), id: "\(i)", title: "T\(i)",
-                     tags: [], aliases: [], updated: Date(), type: "markdown", properties: [])
+            .document(IndexRow(path: URL(fileURLWithPath: "/v/\(i).md"), id: "\(i)",
+                               title: "T\(i)", tags: [], aliases: [], updated: Date(),
+                               type: "markdown", properties: []))
         }
     }
 

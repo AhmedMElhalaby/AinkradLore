@@ -412,7 +412,7 @@ final class MarkdownEditFastPathTests: XCTestCase {
         let (coordinator, tv) = makeEditor(Self.fixture())
         withExtendedLifetime(coordinator) {
             tv.setSelectedRange(NSRange(location: 200, length: 0))
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             for character in "the quick brown fox" {
                 tv.insertText(String(character), replacementRange: tv.selectedRange())
             }

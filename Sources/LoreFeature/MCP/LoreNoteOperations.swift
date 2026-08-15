@@ -348,6 +348,16 @@ struct LoreNoteOperations {
         case .notARegularFile(let url):
             return "\(relative(url)) is not a regular file, so it was not copied as an "
                 + "attachment."
+        // Both restore failures are raised only by `undoTrash()`, which is a UI
+        // affordance (the action on a delete's toast) with no MCP tool behind
+        // it. Spelled out rather than folded into a `default` so that adding a
+        // future error still breaks this switch, which is how every case above
+        // came to have a sentence written for it.
+        case .restoreBlocked(let url):
+            return "\(relative(url)) could not be restored because a file of that name "
+                + "exists again."
+        case .restoreFailed(let url, let reason):
+            return "\(relative(url)) could not be restored from the Trash: \(reason)"
         }
     }
 

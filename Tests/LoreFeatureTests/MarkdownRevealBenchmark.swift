@@ -22,7 +22,7 @@ final class MarkdownRevealBenchmark: XCTestCase {
         let model = MarkdownDocumentModel(body: body)
         let spans = model.styleSpans
         let blocks = MarkdownReveal.blocks(in: body)
-        MarkdownParseCounter.reset()
+        resetParseCounter()
 
         for location in stride(from: 0, to: 20_000, by: 500) {
             _ = MarkdownReveal.hiddenMarkers(spans: spans,
@@ -77,7 +77,7 @@ final class EditorPerformanceBenchmark: XCTestCase {
     func test_typingCostsZeroParses() {
         let (coordinator, tv) = makeEditor("# Title\n\nSome **bold** here.\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
             for character in "the quick brown fox" {
                 tv.insertText(String(character), replacementRange: tv.selectedRange())
@@ -101,7 +101,7 @@ final class EditorPerformanceBenchmark: XCTestCase {
         let (coordinator, tv) = makeEditor(body)
         withExtendedLifetime(coordinator) {
             let blockCount = coordinator.revealIndexBuilds
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             coordinator.restyledBlockCount = 0
 
             var crossings = 0
@@ -149,7 +149,7 @@ final class EditorPerformanceBenchmark: XCTestCase {
         }.joined()
         let (coordinator, tv) = makeEditor(body)
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             let length = (tv.string as NSString).length
 
             measure {
@@ -217,7 +217,7 @@ final class EditorPerformanceBenchmark: XCTestCase {
     func test_pressingEnterCostsZeroParsesAndKeepsTheCacheCurrent() {
         let (coordinator, tv) = makeEditor(String(repeating: "- item\n", count: 200))
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: 6, length: 0))
             _ = MarkdownEditorTyping.handle(#selector(NSResponder.insertNewline(_:)), in: tv)
             XCTAssertEqual(MarkdownParseCounter.count, 0, "Enter must not parse")
@@ -235,7 +235,7 @@ final class EditorPerformanceBenchmark: XCTestCase {
         let body = MarkdownRevealBenchmark.largeBody()
         let (coordinator, _) = makeEditorWithoutStyling(body)
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             let started = Date()
             coordinator.applyStyles()
             let elapsed = Date().timeIntervalSince(started)
@@ -307,7 +307,7 @@ final class RenameParseCountBenchmark: XCTestCase {
             + (0..<200).map { "see [[Design]] and [[Other \($0)]]\n" }.joined()
         let edits = [LinkEdit(file: URL(fileURLWithPath: "/tmp/a.md"),
                               oldTarget: "Design", newTarget: "Architecture")]
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         let out = LinkRewriter.replacingLinkTargets(in: body, edits: edits)
         XCTAssertEqual(MarkdownParseCounter.count, 1,
                        "200 rewritten links must cost one parse, not 200")
@@ -333,7 +333,7 @@ final class RenameParseCountBenchmark: XCTestCase {
         }
         let baseline = Date().addingTimeInterval(60)
 
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         for file in files {
             let edit = LinkEdit(file: file, oldTarget: "Design",
                                 newTarget: "Architecture")

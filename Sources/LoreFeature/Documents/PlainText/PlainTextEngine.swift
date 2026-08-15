@@ -88,7 +88,9 @@ private struct PlainTextDocumentEditor: View {
     @State private var text: String = ""
 
     var body: some View {
-        MarkdownEditor(text: $text, tokens: ctx.theme.tokens)
+        MarkdownEditor(text: $text, tokens: ctx.theme.tokens,
+                       settings: ctx.editorSettings,
+                       createLinkedNote: ctx.createLinkedNote)
             .onChange(of: text) { engine.text = text; ctx.onChange() }
             .onAppear { text = engine.text }
             .background(ctx.theme.tokens.background)

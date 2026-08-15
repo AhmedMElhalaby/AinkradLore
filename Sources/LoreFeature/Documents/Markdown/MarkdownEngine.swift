@@ -178,6 +178,8 @@ private struct MarkdownDocumentEditor: View {
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
+                           settings: ctx.editorSettings,
+                           createLinkedNote: ctx.createLinkedNote,
                            completions: ctx.completions, onOpenLink: ctx.openLink,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
@@ -191,6 +193,10 @@ private struct MarkdownDocumentEditor: View {
                                // Cheap — a struct copy, no XPC — so this part
                                // stays synchronous with the caret.
                                menuSelection = selection
+                               // The spine rail's active-heading tracking rides
+                               // this same callback rather than adding a second
+                               // observer of the caret.
+                               ctx.reportCaretOffset(selection.location)
                                // The XPC-backed part is debounced: see
                                // `MenuSuggestionDebouncer`'s doc comment.
                                menuSuggestionDebouncer.schedule(

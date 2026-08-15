@@ -13,6 +13,7 @@ import AinkradAppKit
 extension View {
     func loreSidebarOperations(_ ops: SidebarOperations, theme: HostTheme) -> some View {
         self
+            .overlay { LoreNoticeBridge(ops: ops) }
             .sheet(isPresented: Binding(
                 get: { ops.activeSheet != nil },
                 set: { if !$0 { ops.dismissAll() } })) {
@@ -25,6 +26,48 @@ extension View {
                 message: ops.pendingTrash.map { ops.trashMessage(for: $0) } ?? "",
                 confirmTitle: "Move to Trash",
                 isDestructive: true) { ops.confirmTrash() }
+            // A SECOND confirm dialog on the same view is safe where a second
+            // `.sheet` would not be: `ainkradConfirmDialog` is an `.overlay`,
+            // not a presentation, so the two cannot race the way the stacked
+            // sheets documented above do. Only one can be armed at a time in
+            // practice — a close refusal and a trash confirmation come from
+            // different gestures.
+            .ainkradConfirmDialog(
+                isPresented: Binding(get: { ops.refusedClose != nil },
+                                     set: { if !$0 { ops.refusedClose = nil } }),
+                title: "Unsaved changes",
+                message: ops.refusedCloseMessage,
+                confirmTitle: "Close anyway",
+                isDestructive: true) { ops.confirmForcedClose() }
+    }
+}
+
+/// Carries `SidebarOperations.notice` into the toast host.
+///
+/// A zero-sized view rather than a modifier on `LoreRootView` because
+/// `.ainkradToastHost()` injects its center into the subtree BELOW itself:
+/// `LoreRootView`'s own `@Environment` is read above that injection and would
+/// see a different, unrendered center — the exact trap the kit's own
+/// `AinkradToastHostModifier` documents. Living inside the hosted subtree is
+/// what makes `show` reach the center that is actually on screen.
+///
+/// Drains on change and CLEARS the notice, so the same message cannot be
+/// re-shown by an unrelated redraw.
+private struct LoreNoticeBridge: View {
+    @Bindable var ops: SidebarOperations
+    @Environment(\.ainkradToastCenter) private var toasts
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onChange(of: ops.notice) { _, notice in
+                guard let notice else { return }
+                ops.notice = nil
+                toasts.show(notice.text,
+                            status: notice.kind == .success ? .success : .danger)
+            }
     }
 }
 
@@ -32,6 +75,7 @@ extension View {
 struct SidebarOperationSheet: View {
     @Bindable var ops: SidebarOperations
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
 
     var body: some View {
         switch ops.activeSheet {
@@ -59,12 +103,13 @@ struct NameSheet: View {
     let title: String
     @Binding var text: String
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onConfirm: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
-            Text(title).font(.headline).foregroundStyle(theme.tokens.foreground)
+            Text(title).font(AinkradFontResolver.font(.headline, typography: typo)).foregroundStyle(theme.tokens.foreground)
             TextField("New name", text: $text)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(onConfirm)
@@ -88,11 +133,12 @@ struct NameSheet: View {
 struct MessageSheet: View {
     let text: String
     let theme: HostTheme
+    @Environment(\.ainkradTypography) private var typo
     let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: AinkradSpacing.md) {
-            Text("Not done").font(.headline).foregroundStyle(theme.tokens.foreground)
+            Text("Not done").font(AinkradFontResolver.font(.headline, typography: typo)).foregroundStyle(theme.tokens.foreground)
             Text(text).foregroundStyle(theme.tokens.foreground.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
             HStack { Spacer(); AinkradButton(title: "OK", style: .primary, action: onDismiss) }
@@ -121,9 +167,23 @@ struct MessageSheet: View {
 /// `Divider()` gave the destructive row is expressed instead by
 /// `AinkradMenuItem.isDestructive`'s own tint, which is what the row-hover
 /// design already leans on to separate "safe" actions from the trash one.
+/// - Parameter store: Supplied only so the menu can offer Pin / Unpin, which
+///   needs to know the CURRENT state to name itself. Optional so the existing
+///   call sites that have no store to hand keep working unchanged — the item
+///   is simply absent there, which is correct: a menu that cannot read the pin
+///   state cannot label itself honestly either.
 @MainActor
-func loreRowMenuItems(row: IndexRow, ops: SidebarOperations) -> [AinkradMenuItem] {
-    var items = [
+func loreRowMenuItems(row: IndexRow, ops: SidebarOperations,
+                      store: LoreStore? = nil) -> [AinkradMenuItem] {
+    var items: [AinkradMenuItem] = []
+    if let store {
+        let pinned = store.isPinned(row.path)
+        items.append(AinkradMenuItem(title: pinned ? "Unpin" : "Pin",
+                                     systemName: pinned ? "pin.slash" : "pin") {
+            store.togglePinned(row.path)
+        })
+    }
+    items += [
         AinkradMenuItem(title: "Rename…", systemName: "pencil") { ops.beginRename(row) },
         AinkradMenuItem(title: "Move to…", systemName: "folder") { ops.beginMove(row) },
     ]
