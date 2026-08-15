@@ -320,11 +320,11 @@ public final class LoreStore {
             tab.cancelPendingSave()
         }
         tabs = []
-        selectedTab = nil
         openError = nil
-        // History outlives no vault: its URLs point into the one being closed.
-        history = []
-        historyIndex = nil
+        // The pane goes with the vault: its session and its history both point
+        // into the one being closed. `reset()` keeps that teardown in one
+        // place rather than split across three assignments here.
+        pane.reset()
     }
     func settleForTesting() async { await coordinator.settleForTesting() }
     func handleVaultChange() { coordinator.handleVaultChange() }
@@ -333,7 +333,18 @@ public final class LoreStore {
     // MARK: - Tabs
 
     public internal(set) var tabs: [DocumentSession] = []
-    public internal(set) var selectedTab: DocumentSession?
+
+    /// The single pane Lore shows today — see `PaneState` for why the
+    /// document and its history live in a value rather than as loose
+    /// properties on the store.
+    internal var pane = PaneState()
+
+    /// The document on screen. Forwards to `pane`, so every existing caller
+    /// and every test is untouched by the extraction.
+    public var selectedTab: DocumentSession? {
+        get { pane.session }
+        set { pane.session = newValue }
+    }
     /// Set when the last open attempt failed. The UI renders the fallback
     /// viewer from this rather than silently doing nothing — a file the list
     /// shows must always produce a visible response when clicked.
@@ -388,9 +399,9 @@ public final class LoreStore {
     /// looking at". In a vault, that is almost always a LINEAR trail (follow a
     /// link, read, come back), which a stack models exactly and a strip models
     /// only by accident of ordering.
-    public internal(set) var history: [URL] = []
+    public var history: [URL] { pane.history }
     /// Where in `history` the open document sits. Nil before anything opens.
-    public internal(set) var historyIndex: Int?
+    public var historyIndex: Int? { pane.historyIndex }
 
     /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
     /// 500ms debounce, so a tab closed immediately after a keystroke could
