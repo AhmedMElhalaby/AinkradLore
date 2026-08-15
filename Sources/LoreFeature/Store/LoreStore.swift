@@ -339,11 +339,47 @@ public final class LoreStore {
     /// properties on the store.
     internal var pane = PaneState()
 
-    /// The document on screen. Forwards to `pane`, so every existing caller
-    /// and every test is untouched by the extraction.
+    /// The second pane, when the view is split. Nil is the ordinary state.
+    ///
+    /// Optional rather than a second always-present `PaneState`: "no split" has
+    /// to be representable, and an empty pane that exists but shows nothing is
+    /// a state every reader downstream would have to keep checking for.
+    internal var secondaryPane: PaneState?
+
+    /// Which pane commands act on.
+    ///
+    /// Never `true` while `secondaryPane` is nil — `closeSecondaryPane` moves
+    /// focus back rather than leaving it pointed at a pane that is gone, which
+    /// is the one way this could quietly send ⌘W to nothing.
+    internal var focusIsSecondary = false
+
+    /// The pane commands act on. Reading is total; writing goes to whichever
+    /// pane has focus.
+    internal var focusedPane: PaneState {
+        get { (focusIsSecondary ? secondaryPane : nil) ?? pane }
+        set {
+            if focusIsSecondary, secondaryPane != nil { secondaryPane = newValue }
+            else { pane = newValue }
+        }
+    }
+
+    /// Every document currently ON SCREEN — one, or two when split.
+    ///
+    /// Used by eviction, which must never reclaim a session a pane is
+    /// showing. A single `selectedTab` check was correct while there was one
+    /// pane and becomes a data-loss shape the moment there are two.
+    internal var visibleSessions: [DocumentSession] {
+        [pane.session, secondaryPane?.session].compactMap { $0 }
+    }
+
+    /// The document on screen in the FOCUSED pane.
+    ///
+    /// Forwards, so every existing caller and every test is untouched: with no
+    /// split, the focused pane is the only pane and this means exactly what it
+    /// always did.
     public var selectedTab: DocumentSession? {
-        get { pane.session }
-        set { pane.session = newValue }
+        get { focusedPane.session }
+        set { focusedPane.session = newValue }
     }
     /// Set when the last open attempt failed. The UI renders the fallback
     /// viewer from this rather than silently doing nothing — a file the list

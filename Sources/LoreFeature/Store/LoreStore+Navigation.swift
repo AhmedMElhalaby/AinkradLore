@@ -59,7 +59,11 @@ extension LoreStore {
         guard tabs.count > Self.warmSessionLimit else { return }
         var overflow = tabs.count - Self.warmSessionLimit
         for session in tabs where overflow > 0 {
-            guard session !== selectedTab,
+            // BOTH panes, not just the focused one. Checking `selectedTab`
+            // alone was correct with one pane and becomes a data-loss shape
+            // with two: it would reclaim the session the other pane is
+            // displaying, out from under a document the user is reading.
+            guard !visibleSessions.contains(where: { $0 === session }),
                   !session.isDirty, !session.conflict, session.lastSaveError == nil
             else { continue }
             session.cancelPendingSave()
@@ -70,30 +74,32 @@ extension LoreStore {
     /// Whether the pane has somewhere to go. Forwarded from `PaneState`,
     /// which owns the arithmetic — see that type for why the history moved off
     /// the store ahead of split view.
-    public var canGoBack: Bool { pane.canGoBack }
-    public var canGoForward: Bool { pane.canGoForward }
+    public var canGoBack: Bool { focusedPane.canGoBack }
+    public var canGoForward: Bool { focusedPane.canGoForward }
 
     /// Records a visit in the pane. The key function is passed in rather than
     /// reached for, so `PaneState` stays free of the store's canonicalisation
     /// and can be reasoned about — and tested — on its own.
     func recordVisit(_ url: URL) {
-        pane.recordVisit(url, key: Self.pathKey)
+        focusedPane.recordVisit(url, key: Self.pathKey)
     }
 
     /// Opens the previously visited document.
     @discardableResult
     public func goBack() -> Bool {
-        guard pane.canGoBack, let index = pane.historyIndex else { return false }
-        pane.historyIndex = index - 1
-        open(url: pane.history[index - 1], recordingHistory: false)
+        guard focusedPane.canGoBack, let index = focusedPane.historyIndex
+        else { return false }
+        focusedPane.historyIndex = index - 1
+        open(url: focusedPane.history[index - 1], recordingHistory: false)
         return true
     }
 
     @discardableResult
     public func goForward() -> Bool {
-        guard pane.canGoForward, let index = pane.historyIndex else { return false }
-        pane.historyIndex = index + 1
-        open(url: pane.history[index + 1], recordingHistory: false)
+        guard focusedPane.canGoForward, let index = focusedPane.historyIndex
+        else { return false }
+        focusedPane.historyIndex = index + 1
+        open(url: focusedPane.history[index + 1], recordingHistory: false)
         return true
     }
 }

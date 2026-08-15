@@ -11,6 +11,20 @@ import Foundation
 /// comments explaining why it is that sequence.
 extension LoreStore {
 
+    /// Loads `url` into the warm cache WITHOUT showing it in any pane.
+    ///
+    /// Test-only, and deliberately has no production caller: every real path
+    /// that warms a session also displays it, which is precisely why
+    /// `evictColdSessions`' "never reclaim a visible session" guard cannot be
+    /// exercised without one. Filling the cache by opening documents navigates
+    /// the focused pane away from the document under test, at which point
+    /// evicting it is correct and the test proves nothing.
+    func warmForTesting(_ url: URL) {
+        guard let session = try? DocumentSession.open(url: url, coordinator: coordinator)
+        else { return }
+        tabs.append(session)
+    }
+
     public func open(_ row: IndexRow) { open(url: row.path) }
 
     public func open(url: URL) {
@@ -94,6 +108,14 @@ extension LoreStore {
         // about to unlink.
         session.cancelPendingSave()
         tabs.remove(at: idx)
+        // A second pane whose document just closed has nothing left to show,
+        // so the split collapses — ⌘W closes a DOCUMENT (decision 2.3), and
+        // the layout following it is the consequence rather than a second
+        // meaning for the key.
+        if focusIsSecondary, secondaryPane?.session === session {
+            closeSecondaryPane()
+            return true
+        }
         if selectedTab === session {
             // The most recently used document, which `tabs`' LRU ordering puts
             // last. This used to pick the closed tab's NEIGHBOUR, which was
