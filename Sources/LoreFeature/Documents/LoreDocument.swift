@@ -65,7 +65,7 @@ public struct EditorContext {
     /// Headings of the document named before a `#` in a `[[…]]`, filtered by
     /// what follows it. Defaulted to none, which is what suppresses heading
     /// completion for an engine with no vault behind it.
-    public let headingCompletions: @MainActor (String, String) -> [String]
+    public let headingCompletions: @MainActor (String, String) -> HeadingCompletions?
     /// Creates a note for a name typed into a `[[` completion, reporting
     /// whether it worked. Defaulted to "cannot create", which is what
     /// suppresses the popup's create row for an engine with no vault behind
@@ -146,8 +146,8 @@ public struct EditorContext {
 
     public init(theme: HostTheme,
                 editorSettings: EditorSettings = .default,
-                headingCompletions: @escaping @MainActor (String, String) -> [String]
-                    = { _, _ in [] },
+                headingCompletions: @escaping @MainActor (String, String) -> HeadingCompletions?
+                    = { _, _ in nil },
                 createLinkedNote: @escaping @MainActor (String) -> Bool = { _ in false },
                 reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
                 onChange: @escaping @MainActor () -> Void,

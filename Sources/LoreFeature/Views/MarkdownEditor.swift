@@ -11,7 +11,7 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// have made two Lore instances in one host share a font size.
     let settings: EditorSettings
     /// See `EditorContext.headingCompletions`.
-    let headingCompletions: (@MainActor (String, String) -> [String])?
+    let headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
     /// See `EditorContext.createLinkedNote`.
     let createLinkedNote: (@MainActor (String) -> Bool)?
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
@@ -57,7 +57,7 @@ public struct MarkdownEditor: NSViewRepresentable {
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 settings: EditorSettings = .default,
-                headingCompletions: (@MainActor (String, String) -> [String])? = nil,
+                headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)? = nil,
                 createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
@@ -113,7 +113,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// popup's "Create …" row entirely.
         var createLinkedNote: (@MainActor (String) -> Bool)?
         /// See `EditorContext.headingCompletions`.
-        var headingCompletions: (@MainActor (String, String) -> [String])?
+        var headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
 
         /// Kept in sync by `updateNSView`, so changing a setting restyles the
         /// document the user is already looking at rather than only the next
@@ -396,8 +396,11 @@ public struct MarkdownEditor: NSViewRepresentable {
             let items: [LinkCompletionItem]
             if let query = LinkCompletionContext.headingQuery(inPrefix: prefix),
                let headingCompletions {
-                items = headingCompletions(query.document, query.heading).map {
-                    .heading(document: query.document, text: $0)
+                // The row carries the VERIFIED target, not what was typed —
+                // see `HeadingCompletions.insertTarget`.
+                let found = headingCompletions(query.document, query.heading)
+                items = (found?.headings ?? []).map {
+                    .heading(document: found?.insertTarget ?? query.document, text: $0)
                 }
             } else {
                 let rows = completions(prefix)

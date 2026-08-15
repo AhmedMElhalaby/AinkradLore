@@ -66,8 +66,9 @@ final class HeadingCompletionTests: XCTestCase {
         try write(root, "Design", "# Overview\n\ntext\n\n## Deployment and rollback\n\nmore")
         await store.settleForTesting(); try store.rebuild()
 
-        let all = store.headingCompletions(inDocumentNamed: "Design", matching: "")
-        XCTAssertEqual(all, ["Overview", "Deployment and rollback"])
+        let found = try XCTUnwrap(store.headingCompletions(inDocumentNamed: "Design",
+                                                          matching: ""))
+        XCTAssertEqual(found.headings, ["Overview", "Deployment and rollback"])
     }
 
     /// Substring, not prefix: headings are sentences, and the word worth
@@ -78,11 +79,11 @@ final class HeadingCompletionTests: XCTestCase {
         await store.settleForTesting(); try store.rebuild()
 
         XCTAssertEqual(store.headingCompletions(inDocumentNamed: "Design",
-                                                matching: "rollback"),
+                                                matching: "rollback")?.headings,
                        ["Deployment and rollback"])
-        XCTAssertTrue(store.headingCompletions(inDocumentNamed: "Design",
-                                               matching: "ROLL").count == 1,
-                      "matching must ignore case")
+        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "Design",
+                                                matching: "ROLL")?.headings.count, 1,
+                       "matching must ignore case")
     }
 
     /// A name still being typed resolves to nothing, which is ordinary rather
@@ -90,14 +91,15 @@ final class HeadingCompletionTests: XCTestCase {
     func test_anUnresolvableNameYieldsNothing() async throws {
         let (_, store) = try vault("headings-missing")
         await store.settleForTesting()
-        XCTAssertTrue(store.headingCompletions(inDocumentNamed: "Nope", matching: "").isEmpty)
+        XCTAssertNil(store.headingCompletions(inDocumentNamed: "Nope", matching: ""))
     }
 
     func test_adocumentWithNoHeadingsYieldsNothing() async throws {
         let (root, store) = try vault("headings-none")
         try write(root, "Flat", "just prose, no headings at all")
         await store.settleForTesting(); try store.rebuild()
-        XCTAssertTrue(store.headingCompletions(inDocumentNamed: "Flat", matching: "").isEmpty)
+        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "Flat", matching: "")?.headings,
+                       [])
     }
 
     /// The cache is per DOCUMENT: switching the named document must not keep
@@ -108,12 +110,41 @@ final class HeadingCompletionTests: XCTestCase {
         try write(root, "Second", "# Beta")
         await store.settleForTesting(); try store.rebuild()
 
-        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "First", matching: ""),
+        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "First", matching: "")?.headings,
                        ["Alpha"])
-        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "Second", matching: ""),
+        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "Second", matching: "")?.headings,
                        ["Beta"])
-        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "First", matching: ""),
+        XCTAssertEqual(store.headingCompletions(inDocumentNamed: "First", matching: "")?.headings,
                        ["Alpha"], "switching back must not serve the other document")
+    }
+
+    /// The link written must reach the document whose headings were OFFERED.
+    ///
+    /// Two notes can share a title in different folders: `resolveLink` picks
+    /// one by preference and the popup lists its headings, so writing the
+    /// TYPED name would produce a link that may later resolve to the namesake
+    /// — which does not have that heading. The document-completion path has
+    /// always inserted a resolver-verified target; this is the same guarantee
+    /// for the fragment path.
+    func test_theInsertTargetDistinguishesNamesakes() async throws {
+        let (root, store) = try vault("headings-namesake")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("Archive"), withIntermediateDirectories: true)
+        try write(root, "Design", "# Current overview")
+        try "---\nid: old\ntitle: Design\n---\n# Old overview"
+            .write(to: root.appendingPathComponent("Archive/Design.md"),
+                   atomically: true, encoding: .utf8)
+        await store.settleForTesting(); try store.rebuild()
+
+        let found = try XCTUnwrap(store.headingCompletions(inDocumentNamed: "Design",
+                                                           matching: ""))
+        // Whichever the resolver preferred, the target must resolve back to
+        // THAT file — not merely repeat what was typed and hope.
+        let resolved = try XCTUnwrap(store.resolveLink(found.insertTarget))
+        let offeringOverview = found.headings.first
+        let contents = try String(contentsOf: resolved, encoding: .utf8)
+        XCTAssertTrue(contents.contains(try XCTUnwrap(offeringOverview)),
+                      "the inserted target reaches a document without the heading offered")
     }
 
     // MARK: - The rows it produces
