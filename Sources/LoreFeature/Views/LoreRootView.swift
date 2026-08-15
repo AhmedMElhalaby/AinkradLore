@@ -26,14 +26,6 @@ struct LoreRootView: View {
     /// document — `MarkdownEngine.outline` is a full AST parse.
     @State private var outline: [OutlineEntry] = []
     @State private var jumpToOffset: ((Int) -> Void)?
-    /// A request to open one of the document panels, raised by a command.
-    ///
-    /// A one-shot REQUEST rather than the panel state itself: `DocumentPane`
-    /// owns which panel is open (`DocumentPanelState`), and moving that
-    /// ownership up here just so a command could reach it would put the
-    /// pane's own bottom-bar toggles on a round trip through the root view
-    /// for no benefit. `DocumentPane` consumes and clears this.
-    @State private var openPanel: DocumentPanel?
     /// Set when ↓ is pressed in the search field, handing the keyboard to the
     /// results list. `NoteListView` consumes and clears it.
     @State private var listFocusRequest: Bool?
@@ -60,7 +52,12 @@ struct LoreRootView: View {
                     importing = ImportCoordinator(vaultRoot: root)
                 }
             },
-            togglePanel: { panel in openPanel = panel },
+            // "Linked Mentions" is no longer a panel to toggle — it is the
+            // footer at the END of the document, so the command SCROLLS there.
+            // `Int.max` rather than the document's length because the shell
+            // does not track that: `scrollToOffset` clamps to `[0, length]`,
+            // which makes "past the end" mean "the end" exactly.
+            scrollToMentions: { jumpToOffset?(Int.max) },
             openPalette: { palette = $0 },
             dismissPalette: { palette = nil })
     }
@@ -245,7 +242,6 @@ struct LoreRootView: View {
             // Identity is the session's stable id — NOT its url, which changes
             // when the session adopts a "save a copy" resolution.
             DocumentPane(store: store, session: session, theme: theme, ops: ops,
-                         panelRequest: $openPanel,
                          onOutlineChange: { outline = $0 },
                          onScrollHandler: { jumpToOffset = $0 })
                 .id(session.id)

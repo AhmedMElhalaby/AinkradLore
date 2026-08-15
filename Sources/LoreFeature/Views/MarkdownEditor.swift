@@ -10,6 +10,20 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// alternative was a process-wide current-settings global, which would
     /// have made two Lore instances in one host share a font size.
     let settings: EditorSettings
+    /// An accessory the SHELL supplies, hosted below the document body inside
+    /// the same scroll view — the linked-mentions footer. `AnyView` because
+    /// this type must not know what the shell puts there; nil for editors with
+    /// no accessory.
+    let footer: AnyView?
+    /// Bumped by the shell when `footer`'s CONTENT changes.
+    ///
+    /// `updateNSView` runs on every ancestor redraw — a theme change, a banner
+    /// appearing, a keystroke — and pushing a new `rootView` into the hosting
+    /// view each time would re-render the footer's SwiftUI tree on the typing
+    /// hot path for content that changes only when the link graph does. The
+    /// revision is what makes "did this actually change" answerable without
+    /// diffing an `AnyView`, which is not `Equatable` and never will be.
+    let footerRevision: Int
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
     /// entirely — which is how plain-text documents get no link affordances.
     let completions: (@MainActor (String) -> [IndexRow])?
@@ -53,6 +67,8 @@ public struct MarkdownEditor: NSViewRepresentable {
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 settings: EditorSettings = .default,
+                footer: AnyView? = nil,
+                footerRevision: Int = 0,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
@@ -65,6 +81,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens; self.settings = settings
+        self.footer = footer; self.footerRevision = footerRevision
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
@@ -90,6 +107,14 @@ public struct MarkdownEditor: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var tokens: HostThemeTokens
+        /// The scroll view's document view — see `MarkdownEditorContainerView`.
+        weak var container: MarkdownEditorContainerView?
+        /// Hosts the shell's footer. Held so its `rootView` can be REPLACED
+        /// rather than the whole hosting view rebuilt, which would drop the
+        /// footer's own scroll position and animation state on every update.
+        var footerHost: NSHostingView<AnyView>?
+        /// The revision currently rendered, so an unchanged footer is skipped.
+        var renderedFooterRevision: Int = -1
         /// Kept in sync by `updateNSView`, so changing a setting restyles the
         /// document the user is already looking at rather than only the next
         /// one they open.

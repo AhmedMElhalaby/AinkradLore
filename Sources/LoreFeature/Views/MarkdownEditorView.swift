@@ -102,7 +102,21 @@ extension MarkdownEditor {
         // See `LinkTextView`'s doc comment on why this is registered here,
         // post-construction, rather than in an overridden initializer.
         tv.registerForDraggedTypes([.fileURL])
-        scroll.documentView = tv
+        // The document view is a CONTAINER, not the text view itself — see
+        // `MarkdownEditorContainerView` for why (there is no bottom-only inset
+        // on NSTextView to host the linked-mentions footer in). The text view
+        // keeps sizing itself to its content exactly as before; the container
+        // only follows it.
+        let container = MarkdownEditorContainerView(
+            frame: NSRect(x: 0, y: 0, width: tv.bounds.width, height: tv.bounds.height))
+        container.autoresizingMask = [.width]
+        container.install(textView: tv)
+        scroll.documentView = container
+        context.coordinator.container = container
+        // The text view resizes itself as the document grows; the container has
+        // to follow so the footer stays directly beneath the last line.
+        tv.onHeightChange = { [weak container] in container?.layoutContents() }
+        installFooterIfNeeded(context.coordinator, container: container)
 
         // The caret moves under the list when the document scrolls, so the list
         // has to follow it.
@@ -166,6 +180,7 @@ extension MarkdownEditor {
         if tv.string != text { tv.string = text; context.coordinator.applyStyles() }
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
+        installFooterIfNeeded(context.coordinator, container: context.coordinator.container)
         context.coordinator.tokens = tokens
         // Display settings changing must re-lay out the document the reader is
         // ALREADY looking at — a font size that only applies to the next
@@ -190,6 +205,32 @@ extension MarkdownEditor {
         // every ancestor redraw (theme change, banner appearing, window
         // resize), and querying the index on a redraw is both wasted work and
         // a way to make a popup appear when the user did not type.
+    }
+
+    /// Creates or refreshes the footer hosting view.
+    ///
+    /// Gated on `footerRevision` so an ancestor redraw does not re-render the
+    /// footer's SwiftUI tree — see `MarkdownEditor.footerRevision`.
+    private func installFooterIfNeeded(_ coordinator: Coordinator,
+                                       container: MarkdownEditorContainerView?) {
+        guard let container else { return }
+        guard let footer else {
+            coordinator.footerHost = nil
+            coordinator.renderedFooterRevision = -1
+            container.setAccessory(nil)
+            return
+        }
+        if let host = coordinator.footerHost {
+            guard coordinator.renderedFooterRevision != footerRevision else { return }
+            host.rootView = footer
+            coordinator.renderedFooterRevision = footerRevision
+            container.layoutContents()
+            return
+        }
+        let host = NSHostingView(rootView: footer)
+        coordinator.footerHost = host
+        coordinator.renderedFooterRevision = footerRevision
+        container.setAccessory(host)
     }
 
     /// Tearing the editor down must take the floating panel with it — this is

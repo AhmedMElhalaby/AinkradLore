@@ -48,10 +48,6 @@ struct DocumentPane: View {
     /// sidebars — so the header's document menu drives the SAME confirmations
     /// and refusals the sidebar's context menu does.
     let ops: SidebarOperations
-    /// A command's request to open a panel. Consumed and cleared here — see
-    /// `LoreRootView.openPanel` for why the request travels down rather than
-    /// the state travelling up.
-    @Binding var panelRequest: DocumentPanel?
     /// Publishes this document's headings upward, so the ⌘⇧O palette can list
     /// them without re-parsing the document (`MarkdownEngine.outline` is a
     /// full AST parse, and this view already caches it).
@@ -98,6 +94,14 @@ struct DocumentPane: View {
     /// plus `reloadGeneration`, matching `outline`'s triggers, so the badge
     /// never falls behind the panel's own count once it's opened.
     @State private var backlinksCount: Int = 0
+    /// The footer's data, cached exactly as `backlinksCount` is and refreshed
+    /// on the same triggers — `backlinks(to:)`/`unresolvedLinks(from:)` hit
+    /// SQLite, so they must never be read from `body`.
+    @State private var backlinks: [LoreStore.Backlink] = []
+    @State private var unresolvedLinks: [UnresolvedLink] = []
+    /// Bumped whenever the two above change, so the hosted footer re-renders
+    /// only then — see `MarkdownEditor.footerRevision`.
+    @State private var footerRevision = 0
     /// The caret's body-relative offset, reported by the editor, for the spine
     /// rail's active tick. `0` before the editor has appeared, which places
     /// the active heading at "none" rather than at a wrong one.
@@ -105,9 +109,6 @@ struct DocumentPane: View {
     /// Body length, for the rail's proportional placement.
     @State private var documentLength: Int = 0
 
-    /// Which of Outline / Linked mentions the right-edge slideover is
-    /// showing, if either.
-    @State private var panels = DocumentPanelState()
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradToastCenter) private var toasts
 
@@ -129,18 +130,6 @@ struct DocumentPane: View {
             editor
 
 
-            // Only backlinks now: the outline's count moved to the spine rail,
-            // which shows the headings themselves rather than how many there
-            // are. Receiving backlinks stays a panel and stays ungated by
-            // engine — any document type can be a link TARGET (Task 7 made
-            // attachments resolvable targets), the asymmetry `BacklinksPanel`
-            // already encoded.
-            DocumentPanelBar(counts: [.backlinks: backlinksCount],
-                             open: panels.open, theme: theme) { panel in
-                withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                    panels.toggle(panel)
-                }
-            }
         }
         .background(theme.tokens.background)
         // A banner appearing used to SNAP the editor down by its full height
@@ -151,13 +140,6 @@ struct DocumentPane: View {
         .animation(reduceMotion ? nil : AinkradMotion.materialize,
                    value: bannerSignature)
         .onAppear { refreshOutline(); refreshBacklinksCount() }
-        .onChange(of: panelRequest) { _, requested in
-            guard let requested else { return }
-            panelRequest = nil
-            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                panels.toggle(requested)
-            }
-        }
         // Same two triggers `BacklinksPanel` uses for the reasons it already
         // documents (a rename changes `url` without changing `session.id`),
         // plus `reloadGeneration`: "Reload from disk" replaces the engine's
@@ -170,34 +152,6 @@ struct DocumentPane: View {
 
     var body: some View {
         pane
-        .overlay(alignment: .topTrailing) {
-            if let panel = panels.open {
-                DocumentSlideover(panel: panel, theme: theme,
-                                  onClose: { panels.dismiss() }) {
-                    switch panel {
-                    case .backlinks:
-                        BacklinksPanel(store: store, url: session.url, theme: theme)
-                    }
-                }
-            }
-        }
-        // Esc closes the slideover. Zero-sized and hidden, the same pattern
-        // `TabBarView.closeShortcut` already uses for ⌘W. Gated on a panel
-        // actually being open: `.keyboardShortcut(.cancelAction)` is
-        // dispatched at `performKeyEquivalent` time, BEFORE `keyDown` reaches
-        // the first responder, so an unconditionally-mounted claim on Esc
-        // would steal it from `MarkdownEditor`'s own `cancelOperation`
-        // handling (dismissing the `[[`-completion popup) even when there is
-        // no panel to close.
-        .overlay {
-            if panels.open != nil {
-                Button("Close panel") { panels.dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .opacity(0)
-                    .frame(width: 0, height: 0)
-                    .accessibilityHidden(true)
-            }
-        }
         .alert("Create this note?",
                isPresented: Binding(get: { unresolved != nil },
                                     set: { if !$0 { unresolved = nil } })) {
@@ -238,6 +192,8 @@ struct DocumentPane: View {
             session.engine.makeEditor(
                 EditorContext(theme: theme,
                               editorSettings: store.editorSettings,
+                              footer: mentionsFooter,
+                              footerRevision: footerRevision,
                               reportCaretOffset: { caretOffset = $0 },
                               onChange: {
                                   session.markChanged()
@@ -379,7 +335,39 @@ struct DocumentPane: View {
     /// second time from a separate path, so the bottom bar's badge and the
     /// panel's own count can never disagree.
     private func refreshBacklinksCount() {
-        backlinksCount = store.backlinks(to: session.url).count
+        backlinks = store.backlinks(to: session.url)
+        unresolvedLinks = store.unresolvedLinks(from: session.url)
+        backlinksCount = backlinks.count
+        // One bump per refresh, which is the only moment the footer's content
+        // can have changed.
+        footerRevision += 1
+    }
+
+    /// The linked-mentions footer, hosted below the document body.
+    ///
+    /// Built here rather than inside the editor because it needs the store —
+    /// and erased to `AnyView` at exactly one place, the boundary where the
+    /// markdown editor stops knowing what the shell puts under its text.
+    private var mentionsFooter: AnyView {
+        AnyView(
+            DocumentMentionsFooter(
+                backlinks: backlinks,
+                unresolved: unresolvedLinks,
+                theme: theme,
+                onOpen: { store.open(url: $0) },
+                onCreate: { link in
+                    do {
+                        try store.createAndOpenNote(forLinkTarget: link.rawTarget,
+                                                    syntax: link.syntax)
+                        // The target just created is no longer unresolved:
+                        // re-querying is what keeps the list honest.
+                        refreshBacklinksCount()
+                    } catch {
+                        createFailure = "Couldn't create “\(link.rawTarget)”: "
+                            + error.localizedDescription
+                    }
+                })
+        )
     }
 
     /// Creates the note this dead link names, via the store's single
