@@ -78,6 +78,19 @@ final class LinkTextView: NSTextView {
     /// Cannot recurse: the handler sets `textContainerInset`, never the frame,
     /// and any frame change that follows carries the same width — which this
     /// guard drops.
+    /// The responder-chain entry point for formatting shortcuts.
+    ///
+    /// `@objc` and tag-driven because `NSApp.sendAction(_:to:from:)` with a
+    /// nil target is the only way the shell can reach "whichever text view is
+    /// focused" without holding a reference to it — see `LoreFormatting`.
+    /// Reads the action off the sender's tag, exactly as
+    /// `performFindPanelAction(_:)` does.
+    @objc func loreApplyFormat(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let action = LoreFormatAction(rawValue: item.tag) else { return }
+        LoreFormatting.apply(action, to: self)
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         if abs(newSize.height - lastNotifiedHeight) > 0.5 {

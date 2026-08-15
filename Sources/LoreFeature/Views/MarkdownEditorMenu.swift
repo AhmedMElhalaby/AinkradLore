@@ -150,7 +150,10 @@ enum MarkdownEditorMenuActions {
     /// `[[…]]`, the same wiki-link syntax `MarkdownEditing.linkInsertion`
     /// produces when a completion is accepted — `toggleWrap` cannot make this
     /// edit itself, since its open and close delimiters are always identical.
-    private static func wrapAsWikiLink(in tv: NSTextView) {
+    /// Internal, not private: the ⌘⇧K shortcut reaches it through
+    /// `LoreFormatting`, so the menu item and the key press make the SAME
+    /// edit rather than two implementations of "insert a link".
+    static func wrapAsWikiLink(in tv: NSTextView) {
         let selection = tv.selectedRange()
         let ns = tv.string as NSString
         let inner = ns.substring(with: selection)

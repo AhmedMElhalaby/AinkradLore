@@ -111,6 +111,19 @@ struct LoreCommandRunner {
             LoreFind.perform(.previousMatch)
         case .replaceInDocument:
             LoreFind.perform(.showReplaceInterface)
+        // Same responder-chain dispatch as find, and a no-op when focus is
+        // outside a text view — see `LoreFormatting`.
+        case .formatBold: LoreFormatting.perform(.bold)
+        case .formatItalic: LoreFormatting.perform(.italic)
+        case .formatCode: LoreFormatting.perform(.inlineCode)
+        case .formatLink: LoreFormatting.perform(.link)
+        case .formatBulletList: LoreFormatting.perform(.bulletList)
+        case .formatTaskList: LoreFormatting.perform(.taskList)
+        case .formatQuote: LoreFormatting.perform(.quote)
+        case .headingLevel1: LoreFormatting.perform(.heading1)
+        case .headingLevel2: LoreFormatting.perform(.heading2)
+        case .headingLevel3: LoreFormatting.perform(.heading3)
+        case .headingBody: LoreFormatting.perform(.body)
         }
     }
 

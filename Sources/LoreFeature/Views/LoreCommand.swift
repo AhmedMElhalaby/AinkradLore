@@ -32,6 +32,9 @@ struct LoreCommand: Identifiable, Hashable {
         case rebuildIndex, toggleShowAllFiles
         case toggleOutline, toggleBacklinks
         case commandPalette, quickOpen
+        case formatBold, formatItalic, formatCode, formatLink
+        case formatBulletList, formatTaskList, formatQuote
+        case headingLevel1, headingLevel2, headingLevel3, headingBody
     }
 
     /// What a command needs in order to make sense.
@@ -67,6 +70,7 @@ struct LoreCommand: Identifiable, Hashable {
 
     enum Group: String, Hashable, CaseIterable {
         case document = "Document"
+        case format = "Format"
         case vault = "Vault"
         case view = "View"
     }
@@ -136,6 +140,42 @@ enum LoreCommands {
               systemName: "arrow.left.arrow.right",
               shortcut: LoreShortcut("f", option: true), requires: .document,
               group: .document),
+        // Format. All `.document`, since there is nothing to format without
+        // one — and the binding being absent is what keeps ⌘B out of the
+        // sidebar's way.
+        .init(id: .formatBold, title: "Bold", systemName: "bold",
+              shortcut: LoreShortcut("b"), requires: .document, group: .format),
+        .init(id: .formatItalic, title: "Italic", systemName: "italic",
+              shortcut: LoreShortcut("i"), requires: .document, group: .format),
+        .init(id: .formatCode, title: "Inline Code",
+              systemName: "chevron.left.forwardslash.chevron.right",
+              shortcut: LoreShortcut("c", shift: true), requires: .document,
+              group: .format),
+        // ⌘K belongs to the command palette, so the link key is ⇧⌘K. The
+        // registry's collision test is what made that a decision rather than a
+        // surprise discovered by pressing it.
+        .init(id: .formatLink, title: "Link", systemName: "link",
+              shortcut: LoreShortcut("k", shift: true), requires: .document,
+              group: .format),
+        .init(id: .formatBulletList, title: "Bullet List", systemName: "list.bullet",
+              shortcut: LoreShortcut("l", shift: true), requires: .document,
+              group: .format),
+        .init(id: .formatTaskList, title: "Task List", systemName: "checklist",
+              shortcut: LoreShortcut("t", shift: true), requires: .document,
+              group: .format),
+        .init(id: .formatQuote, title: "Blockquote", systemName: "text.quote",
+              shortcut: nil, requires: .document, group: .format),
+        // ⌘1–3 were free only because the tab bar is gone; they used to be the
+        // obvious home for "switch to tab N".
+        .init(id: .headingLevel1, title: "Heading 1", systemName: "textformat.size.larger",
+              shortcut: LoreShortcut("1"), requires: .document, group: .format),
+        .init(id: .headingLevel2, title: "Heading 2", systemName: "textformat.size",
+              shortcut: LoreShortcut("2"), requires: .document, group: .format),
+        .init(id: .headingLevel3, title: "Heading 3", systemName: "textformat.size.smaller",
+              shortcut: LoreShortcut("3"), requires: .document, group: .format),
+        .init(id: .headingBody, title: "Body Text", systemName: "text.alignleft",
+              shortcut: LoreShortcut("0", shift: true), requires: .document,
+              group: .format),
         // Vault
         .init(id: .newFolder, title: "New Folder…", systemName: "folder.badge.plus",
               shortcut: nil, requires: .vault, group: .vault),
