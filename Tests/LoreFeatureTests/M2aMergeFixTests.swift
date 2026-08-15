@@ -50,7 +50,7 @@ final class M2aIndexPayloadParseCountTests: XCTestCase {
 
     func test_indexPayloadCostsExactlyOneParse() throws {
         let engine = try engine()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         _ = engine.indexPayload
         XCTAssertEqual(MarkdownParseCounter.count, 1,
                        "the outline and the link scan must share one parse")
@@ -84,7 +84,7 @@ final class M2aIndexPayloadParseCountTests: XCTestCase {
     /// plus a link scan to get one.
     func test_indexTitleCostsNoParseAndAgreesWithThePayload() throws {
         let engine = try engine()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         let title = engine.indexTitle
         XCTAssertEqual(MarkdownParseCounter.count, 0)
         XCTAssertEqual(title, engine.indexPayload.title)
@@ -113,7 +113,7 @@ final class M2aSavePathParseCountTests: XCTestCase {
         let engine = try XCTUnwrap(session.engine as? MarkdownEngine)
         engine.note.body += "more text\n"
 
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         try session.saveNow()
         XCTAssertEqual(MarkdownParseCounter.count, 1,
                        "one save, one parse — it used to be four")
@@ -132,7 +132,7 @@ final class M2aSavePathParseCountTests: XCTestCase {
         let url = root.appendingPathComponent("a.md")
         try "---\nid: a\ntitle: T\n---\n# H\n".write(to: url, atomically: true, encoding: .utf8)
 
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         let session = try DocumentSession.open(url: url, coordinator: coordinator)
         XCTAssertEqual(MarkdownParseCounter.count, 0)
         XCTAssertEqual(session.title, "T")
