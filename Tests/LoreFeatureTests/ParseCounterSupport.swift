@@ -27,13 +27,36 @@ extension XCTestCase {
     /// counter has to stay global, so the fix is to make the reset mean "from
     /// here", which requires no work to still be outstanding.
     ///
+    /// Waits for QUIESCENCE rather than a fixed interval.
+    ///
+    /// The first version drained for a flat 350ms, which fixed the common case
+    /// and left a rarer one: the benchmarks parse deliberately LARGE documents,
+    /// and a parse that takes longer than the drain still lands after the
+    /// reset. Watching until the count stops moving covers both, because it
+    /// measures the thing that actually matters — is anything still arriving —
+    /// rather than guessing how long that takes.
+    ///
     /// Spins the run loop rather than sleeping: the pending work is dispatched
     /// back to the main queue, so a `sleep` would block the very thread that
     /// has to run it and drain nothing at all.
-    func resetParseCounter(drainFor interval: TimeInterval = 0.35) {
-        let deadline = Date().addingTimeInterval(interval)
+    ///
+    /// The cap is a backstop, not a timeout to rely on. Reaching it means work
+    /// is still arriving after two seconds, which is a real problem worth
+    /// seeing as a failure rather than papering over with a longer wait.
+    func resetParseCounter(quietFor quiet: TimeInterval = 0.15,
+                           cap: TimeInterval = 2.0) {
+        let deadline = Date().addingTimeInterval(cap)
+        var lastCount = MarkdownParseCounter.count
+        var quietSince = Date()
         while Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            let now = MarkdownParseCounter.count
+            if now != lastCount {
+                lastCount = now
+                quietSince = Date()
+            } else if Date().timeIntervalSince(quietSince) >= quiet {
+                break
+            }
         }
         MarkdownParseCounter.reset()
     }

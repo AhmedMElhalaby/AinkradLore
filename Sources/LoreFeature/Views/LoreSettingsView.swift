@@ -49,6 +49,31 @@ struct LoreSettingsView: View {
                 }
             }
 
+            AinkradFormRow(title: "Focus mode",
+                           help: "Dim everything except the paragraph you're "
+                               + "writing.") {
+                AinkradToggle(isOn: Binding(
+                    get: { store.editorSettings.focusMode },
+                    set: { on in
+                        var next = store.editorSettings
+                        next.focusMode = on
+                        store.setEditorSettings(next)
+                    }))
+            }
+
+            AinkradFormRow(title: "Typewriter scrolling",
+                           help: "Keep the line you're writing at a fixed "
+                               + "height instead of letting it walk to the "
+                               + "bottom of the window.") {
+                AinkradToggle(isOn: Binding(
+                    get: { store.editorSettings.typewriterMode },
+                    set: { on in
+                        var next = store.editorSettings
+                        next.typewriterMode = on
+                        store.setEditorSettings(next)
+                    }))
+            }
+
             AinkradSectionHeader(title: "Display")
 
             // The help text was seven lines inside a form row — longer than

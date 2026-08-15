@@ -102,6 +102,11 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// because a zoom that silently resets on relaunch reads as a bug to
     /// anyone who used it to make the app usable at all.
     public var zoomStep: Int
+    /// Dim everything but the paragraph being written.
+    public var focusMode: Bool
+    /// Keep the caret at a fixed height rather than letting it walk to the
+    /// bottom edge.
+    public var typewriterMode: Bool
 
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
     /// line-height 1.5, paragraph spacing 12, measure 760). That is not
@@ -111,10 +116,16 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     public static let `default` = EditorSettings(density: .standard, measure: .standard,
                                                  zoomStep: 0)
 
-    public init(density: Density, measure: Measure, zoomStep: Int) {
+    /// Both writing modes default OFF. They are strong opinions about how a
+    /// page should behave, and an editor that dims most of the document the
+    /// first time it is opened reads as broken rather than as focused.
+    public init(density: Density, measure: Measure, zoomStep: Int,
+                focusMode: Bool = false, typewriterMode: Bool = false) {
         self.density = density
         self.measure = measure
         self.zoomStep = Self.clampZoom(zoomStep)
+        self.focusMode = focusMode
+        self.typewriterMode = typewriterMode
     }
 
     /// Font FAMILY is deliberately not modelled here.
@@ -151,12 +162,14 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// Zoom applied to `step`, clamped.
     public func zoomed(by step: Int) -> EditorSettings {
         EditorSettings(density: density, measure: measure,
-                       zoomStep: Self.clampZoom(zoomStep + step))
+                       zoomStep: Self.clampZoom(zoomStep + step),
+                       focusMode: focusMode, typewriterMode: typewriterMode)
     }
 
     /// Zoom reset to the density's own size (⌘0).
     public func zoomReset() -> EditorSettings {
-        EditorSettings(density: density, measure: measure, zoomStep: 0)
+        EditorSettings(density: density, measure: measure, zoomStep: 0,
+                       focusMode: focusMode, typewriterMode: typewriterMode)
     }
 }
 
