@@ -69,7 +69,7 @@ struct ImportEntryView: View {
                 title: "Obsidian vault",
                 subtitle: "Copies the vault in and keeps your [[wikilinks]] working.",
                 trailing: { Image(systemName: "chevron.right")
-                    .foregroundStyle(theme.tokens.foreground.opacity(0.4)) })
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.indicatorGlyph)) })
             AinkradListRow(
                 onTap: coordinator.importAppleNotes,
                 leading: { AinkradIconGlyph(systemName: "note.text") },
@@ -77,7 +77,7 @@ struct ImportEntryView: View {
                 subtitle: "Asks Notes for every note in every account. Locked notes and "
                     + "the Recently Deleted folder are left alone.",
                 trailing: { Image(systemName: "chevron.right")
-                    .foregroundStyle(theme.tokens.foreground.opacity(0.4)) })
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.indicatorGlyph)) })
             Spacer()
         }
         .padding(AinkradSpacing.lg)

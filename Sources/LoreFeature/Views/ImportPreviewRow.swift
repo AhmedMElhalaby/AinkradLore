@@ -36,8 +36,9 @@ struct ImportPreviewRow: View {
     @ViewBuilder private var checkbox: some View {
         Image(systemName: isAlreadyImported || isSelected ? "checkmark.circle.fill" : "circle")
             .foregroundStyle(isAlreadyImported
-                ? theme.foreground.opacity(0.4)
-                : (isSelected ? theme.accentPrimary : theme.foreground.opacity(0.35)))
+                ? theme.foreground.opacity(LoreMetrics.indicatorGlyph)
+                : (isSelected ? theme.accentPrimary
+                              : theme.foreground.opacity(LoreMetrics.indicatorGlyph)))
             .accessibilityLabel(isAlreadyImported ? "Already imported"
                 : (isSelected ? "Selected for import" : "Not selected"))
     }

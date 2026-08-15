@@ -28,6 +28,11 @@ enum LoreSidebarRow {
             subtitle: nil,
             trailing: { EmptyView() })
             .padding(.leading, LoreSidebarMetrics.indent(depth: depth))
+            .accessibilityElement(children: .combine)
+            // The chevron is the only thing that says expanded or collapsed,
+            // and a glyph name is not something VoiceOver can read as state.
+            .accessibilityLabel("\(name), folder, \(isExpanded ? "expanded" : "collapsed")")
+            .accessibilityAddTraits(.isButton)
     }
 
     /// - Parameters:
@@ -79,10 +84,60 @@ enum LoreSidebarRow {
         // of the click target is a strip of dead space in the middle of a list.
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
+        // A NON-COLOUR selection cue, alongside the fill.
+        //
+        // `AinkradListRow`'s selected state is an accent-tinted background and
+        // nothing else, so "which document is open" was carried by colour
+        // alone — unreadable for anyone who cannot distinguish the tint from
+        // the surface, and marginal for everyone in bright light. The bar is a
+        // second, redundant channel for the same fact.
+        .overlay(alignment: .leading) {
+            if isSelected { SelectionBar() }
+        }
         .padding(.leading, LoreSidebarMetrics.indent(depth: depth))
+        // ONE element per row, not four (icon, title, subtitle, excerpt).
+        // Without this VoiceOver walks the pieces separately and a row reads
+        // as a stream of fragments rather than as a document.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel(for: row, subtitle: subtitle,
+                                               emptyTitleFallback: emptyTitleFallback))
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// What VoiceOver reads for a document row.
+    ///
+    /// The tag line is folded in rather than left as a separate element, and
+    /// an attachment is named as one: "Q1, attachment" tells a screen-reader
+    /// user why the row has no Delete in its menu, which the icon conveys
+    /// visually and nothing conveyed otherwise.
+    static func accessibilityLabel(for row: IndexRow, subtitle: String?,
+                                   emptyTitleFallback: String?) -> String {
+        let name = row.title.isEmpty
+            ? (emptyTitleFallback ?? row.path.lastPathComponent) : row.title
+        var parts = [name]
+        if row.type == AttachmentEngine.identifier { parts.append("attachment") }
+        if let subtitle, !subtitle.isEmpty { parts.append(subtitle) }
+        return parts.joined(separator: ", ")
     }
 
     static func icon(for row: IndexRow) -> String {
         row.type == AttachmentEngine.identifier ? "doc" : "doc.text"
+    }
+}
+
+/// The leading accent bar on a selected row.
+///
+/// A view rather than an inline `Rectangle` because these row builders are
+/// `static` functions with no `self` to hold an `@Environment` on — and the
+/// bar has to read the live theme, since a hard-coded colour would be the one
+/// part of the row that ignores the host's palette.
+private struct SelectionBar: View {
+    @Environment(\.ainkradTheme) private var theme
+
+    var body: some View {
+        Rectangle()
+            .fill(theme.accentPrimary)
+            .frame(width: 2)
+            .accessibilityHidden(true)
     }
 }

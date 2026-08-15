@@ -68,6 +68,17 @@ struct LoreSpineRail: View {
                 let fraction = LoreSpineRail.fraction(of: entry.utf16Offset,
                                                       in: documentLength)
                 Capsule()
+                    // EXEMPT from `LoreMetrics.indicatorGlyph`, deliberately.
+                    //
+                    // The floors exist for elements that carry meaning no other
+                    // channel carries. These ticks do not: the ACTIVE one is
+                    // drawn in the accent (and is the only one that reports
+                    // anything), the headings themselves are reachable via ⌘⇧O
+                    // and by hovering the rail, and the whole rail is
+                    // `accessibilityHidden` because it is a visual summary of
+                    // information the document already contains. Raising these
+                    // to 0.55 was tried and makes the rail read as loud chrome
+                    // beside the text rather than as the texture it is for.
                     .fill(index == activeIndex
                           ? theme.tokens.accentPrimary
                           : theme.tokens.foreground.opacity(0.28))

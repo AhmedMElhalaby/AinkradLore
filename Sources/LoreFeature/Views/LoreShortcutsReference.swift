@@ -60,7 +60,7 @@ struct LoreShortcutsReference: View {
                 // has to interpret.
                 Text("⌘K")
                     .font(AinkradFontResolver.font(.caption, typography: typo))
-                    .foregroundStyle(theme.tokens.foreground.opacity(0.45))
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.tertiaryText))
             }
         }
         .accessibilityElement(children: .combine)

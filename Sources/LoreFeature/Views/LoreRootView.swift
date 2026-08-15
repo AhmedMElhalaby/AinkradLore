@@ -203,14 +203,20 @@ struct LoreRootView: View {
                                      tooltip: "New Folder") {
                         ops.beginNewFolder(in: root)
                     }
+                    // A tooltip is not a label: it needs a pointer to hover,
+                    // so VoiceOver got nothing but the SF Symbol name for all
+                    // three of these buttons.
+                    .accessibilityLabel("New folder")
                 }
                 if let root = store.vaultRoot {
                     AinkradIconButton(systemName: "square.and.arrow.down",
                                      tooltip: "Import…") {
                         importing = ImportCoordinator(vaultRoot: root)
                     }
+                    .accessibilityLabel("Import notes")
                 }
                 AinkradIconButton(systemName: "plus", action: quickCapture)
+                    .accessibilityLabel("New note")
             }
             .padding(.horizontal, AinkradSpacing.md)
             .padding(.top, AinkradSpacing.md)

@@ -132,7 +132,7 @@ struct DocumentHeaderBar: View {
                 // ignore the one reading that matters.
                 .foregroundStyle(saveState.isAlarming
                                  ? theme.tokens.accentPrimary
-                                 : theme.tokens.foreground.opacity(0.6))
+                                 : theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
                 .accessibilityLabel(label)
             }
         }

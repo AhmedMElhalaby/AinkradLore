@@ -100,6 +100,14 @@ struct NoteListView: View {
                                               isOn: activeTag == tag) {
                                 activeTag = (activeTag == tag) ? nil : tag
                             }
+                            // The chip's ON state is a fill and nothing else,
+                            // so whether a tag filter is active was carried by
+                            // colour alone.
+                            .accessibilityLabel(activeTag == tag
+                                                ? "Tag \(tag), filtering"
+                                                : "Filter by tag \(tag)")
+                            .accessibilityAddTraits(activeTag == tag
+                                                    ? [.isButton, .isSelected] : .isButton)
                         }
                     }
                     .padding(.vertical, 2)
@@ -147,7 +155,7 @@ struct NoteListView: View {
                                 Text(visible.count == 1 ? "1 result"
                                                         : "\(visible.count) results")
                                     .font(.caption)
-                                    .foregroundStyle(theme.tokens.foreground.opacity(0.6))
+                                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.bottom, 2)
                                     .accessibilityLabel(

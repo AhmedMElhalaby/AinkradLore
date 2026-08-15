@@ -33,6 +33,26 @@ enum LoreMetrics {
     /// mistake rather than a hierarchy, so there is now one.
     static let chamfer: CGFloat = 6
 
+    // MARK: - Contrast floors
+    //
+    // Lore draws de-emphasised text and glyphs by fading the theme's
+    // foreground, which is a contrast decision dressed up as a style one: at
+    // 0.4 on a mid-tone surface, "secondary" text stops meeting the 4.5:1 that
+    // makes it readable, and a faded indicator glyph stops meeting the 3:1
+    // non-text minimum. These are the floors, named so a future `.opacity(0.4)`
+    // on a label reads as the mistake it is.
+    //
+    // Deliberately NOT a single value: text and non-text have different
+    // minimums in the guidance, and collapsing them would either wash out the
+    // glyphs or over-darken the captions.
+
+    /// Supporting text — captions, hints, the save-state label.
+    static let secondaryText: Double = 0.75
+    /// The faintest text should ever go: shortcut hints, placeholder detail.
+    static let tertiaryText: Double = 0.6
+    /// Icons and indicators that are not text but do carry meaning.
+    static let indicatorGlyph: Double = 0.55
+
     /// Height of the tab strip. Tall enough that a `.sm`-padded tab plus its
     /// chamfer sits fully INSIDE the bar — at the old 32 the chamfer was
     /// clipped by the bar's own edge.
