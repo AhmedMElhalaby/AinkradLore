@@ -258,22 +258,15 @@ final class SidebarOperations {
     /// links have no vault-relative path to be rewritten to, so every
     /// explicit-path link to it breaks and the file leaves the index.
     func move(_ row: IndexRow, toFolder folder: URL) {
-        guard let root = store.vaultRoot else {
-            message = "No vault is open."
+        // Through `SidebarDrop`, which is also what decides whether a drag
+        // HIGHLIGHTS this folder — so a target that lit up cannot then refuse
+        // the drop, which would read as the app changing its mind.
+        if let rejection = SidebarDrop.rejection(moving: row.path, into: folder,
+                                                 root: store.vaultRoot) {
+            message = SidebarDrop.describe(rejection, source: row.path, folder: folder)
             return
         }
-        let rootComponents = VaultIndexCoordinator.canonical(root).pathComponents
         let destination = VaultIndexCoordinator.canonical(folder)
-        guard Array(destination.pathComponents.prefix(rootComponents.count)) == rootComponents else {
-            message = "“\(folder.lastPathComponent)” is outside the vault. "
-                + "Lore can only move documents to folders inside it."
-            return
-        }
-        guard destination.path != VaultIndexCoordinator.canonical(row.path)
-                .deletingLastPathComponent().path else {
-            message = "“\(row.path.lastPathComponent)” is already in that folder."
-            return
-        }
         let plan = store.plan(move: row.path, toFolder: destination)
         pending = .document(plan, isMove: true)
         preview = RenamePreview(document: plan, isMove: true)

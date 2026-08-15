@@ -161,6 +161,7 @@ struct NoteListView: View {
                                     attributedSubtitle: snippet(for: row),
                                     emptyTitleFallback: "Untitled",
                                     onTap: { selected = row; onSelect(row) })
+                                    .loreDraggableDocument(row)
                                     // A focus ring DISTINCT from selection.
                                     // They mean different things — "the
                                     // keyboard is here" versus "this is the
