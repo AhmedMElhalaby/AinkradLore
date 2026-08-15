@@ -160,6 +160,10 @@ public final class LoreStore {
     /// reads this (not a filesystem walk of its own) to show empty folders.
     var directoryPaths: [String] { coordinator.directoryPaths }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
+
+    /// Search results carrying the matched excerpt — what the sidebar renders
+    /// when a query is active. See `SearchSnippet` for why this exists at all.
+    public func searchHits(_ query: String) -> [SearchHit] { coordinator.searchHits(query) }
     /// Whether `undoTrash()` currently has a delete to reverse.
     public var canUndoTrash: Bool { lastTrash != nil }
 

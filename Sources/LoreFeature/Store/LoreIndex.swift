@@ -392,6 +392,49 @@ public final class LoreIndex: @unchecked Sendable {
         (try? search(query)) ?? []
     }
 
+    /// Search, with a matched excerpt per hit.
+    ///
+    /// The excerpt comes from FTS5's own `snippet()` rather than from reading
+    /// the file again: the index already holds the tokenized plaintext, and
+    /// re-reading N files to draw one list is exactly the main-actor cost this
+    /// codebase spends its comments avoiding.
+    ///
+    /// Column 1 is `plaintext` — the FTS table is `fts5(title, plaintext)`, so
+    /// 0 would excerpt the TITLE, which is already the row's headline and
+    /// would produce a snippet that merely repeats it.
+    ///
+    /// `-1` as the column argument would let FTS pick the best-matching
+    /// column, which sounds better and is not: a title-only match would then
+    /// return the title as its own excerpt.
+    public func searchHits(_ query: String) throws -> [SearchHit] {
+        guard let expression = Self.ftsExpression(for: query) else {
+            return try all().map { SearchHit(row: $0, snippet: nil) }
+        }
+        return try dbQueue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT n.*, snippet(documents_fts, 1, ?, ?, '…', 12) AS excerpt
+                FROM documents n
+                JOIN documents_fts f ON f.rowid = n.rowid
+                WHERE documents_fts MATCH ? ORDER BY rank;
+            """, arguments: [SearchSnippet.open, SearchSnippet.close, expression])
+            .map { row in
+                let marked: String = row["excerpt"] ?? ""
+                let parsed = SearchSnippet.parse(marked: marked)
+                // No excerpt for a title-only or empty-body match — see
+                // `SearchHit.snippet`. `matches.isEmpty` is the test that
+                // distinguishes them: FTS still returns a leading fragment of
+                // the body when the match was in the title, and showing that
+                // as "why this matched" would be a small lie.
+                let snippet = parsed.matches.isEmpty || parsed.text.isEmpty ? nil : parsed
+                return SearchHit(row: Self.row(row), snippet: snippet)
+            }
+        }
+    }
+
+    public func searchHitsOrEmpty(_ query: String) -> [SearchHit] {
+        (try? searchHits(query)) ?? []
+    }
+
     /// Turns raw user input into a safe FTS5 MATCH expression, or `nil` when
     /// there is nothing to search for.
     ///

@@ -27,6 +27,17 @@ struct NoteListView: View {
     @State private var focusedIndex: Int?
     @FocusState private var listFocused: Bool
 
+    /// Search results with their excerpts, when a query is active.
+    ///
+    /// Empty while browsing: `snippet()` is only meaningful against a MATCH,
+    /// and asking for hits with no query would return the whole vault with a
+    /// leading fragment of each document as its "excerpt" — noise dressed up
+    /// as relevance.
+    private var hits: [SearchHit] {
+        guard !query.isEmpty else { return [] }
+        return store.searchHits(query)
+    }
+
     private var visible: [IndexRow] {
         // The default-hidden filter applies to BROWSING (`store.rows`) only,
         // never to `store.search(query)`. A search result is something the
@@ -128,12 +139,26 @@ struct NoteListView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 2) {
+                            // The result COUNT. Without it, "did my search
+                            // find three things or thirty" needs scrolling to
+                            // answer — and a count is also the only signal
+                            // that a query narrowed anything at all.
+                            if !query.isEmpty {
+                                Text(visible.count == 1 ? "1 result"
+                                                        : "\(visible.count) results")
+                                    .font(.caption)
+                                    .foregroundStyle(theme.tokens.foreground.opacity(0.6))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.bottom, 2)
+                                    .accessibilityLabel(
+                                        "\(visible.count) results for \(query)")
+                            }
                             ForEach(Array(visible.enumerated()), id: \.element.path) { index, row in
                                 LoreSidebarRow.document(
                                     row: row, depth: 0,
                                     isSelected: selected?.path == row.path,
-                                    subtitle: row.tags.isEmpty
-                                        ? nil : row.tags.map { "#\($0)" }.joined(separator: " "),
+                                    subtitle: subtitle(for: row),
+                                    attributedSubtitle: snippet(for: row),
                                     emptyTitleFallback: "Untitled",
                                     onTap: { selected = row; onSelect(row) })
                                     // A focus ring DISTINCT from selection.
@@ -201,6 +226,27 @@ struct NoteListView: View {
             focusRequest = nil
             listFocused = true
             focusedIndex = LoreListNavigation.move(.down, from: nil, count: visible.count)
+        }
+    }
+
+    /// The tag line, shown while BROWSING. Replaced by the matched excerpt
+    /// once a query is active: with both, a result row would carry two
+    /// subtitles and the more useful one would be second.
+    private func subtitle(for row: IndexRow) -> String? {
+        guard query.isEmpty, !row.tags.isEmpty else { return nil }
+        return row.tags.map { "#\($0)" }.joined(separator: " ")
+    }
+
+    /// The matched excerpt for a row, with the matches emphasised.
+    ///
+    /// Nil for a title-only match — the title is already the row's headline,
+    /// so repeating it underneath says nothing.
+    private func snippet(for row: IndexRow) -> AttributedString? {
+        guard let snippet = hits.first(where: { $0.row.path == row.path })?.snippet
+        else { return nil }
+        return snippet.attributed { run in
+            run.inlinePresentationIntent = .stronglyEmphasized
+            run.foregroundColor = theme.tokens.accentPrimary
         }
     }
 

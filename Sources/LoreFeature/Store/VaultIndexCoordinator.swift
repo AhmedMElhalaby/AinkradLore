@@ -433,6 +433,11 @@ public final class VaultIndexCoordinator {
         (try? index?.search(query)) ?? []
     }
 
+    /// Search with an excerpt per hit — see `LoreIndex.searchHits`.
+    public func searchHits(_ query: String) -> [SearchHit] {
+        (try? index?.searchHits(query)) ?? []
+    }
+
     /// `FileManager`'s enumerator (in `scanVault`) hands back paths resolved
     /// via `realpath(3)` — on macOS `/tmp` and `/var` are themselves symlinks
     /// into `/private`, and `URL.resolvingSymlinksInPath()` deliberately

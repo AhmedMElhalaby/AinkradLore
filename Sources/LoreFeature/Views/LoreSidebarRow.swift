@@ -41,20 +41,45 @@ enum LoreSidebarRow {
     ///     disagreed on this before the row types were unified, and unifying
     ///     the component is not an excuse to also unify a choice neither view
     ///     asked to change.
+    /// - Parameter attributedSubtitle: A search excerpt with its matches
+    ///   emphasised. Rendered BENEATH the row rather than inside it, because
+    ///   `AinkradListRow.subtitle` is a plain `String` and the kit has no
+    ///   attributed variant — and widening the kit would move the SDK
+    ///   revision this plugin is pinned to, which is a far larger change than
+    ///   a highlighted excerpt is worth. Takes precedence over `subtitle`:
+    ///   two subtitles on one row would bury the more useful one.
     @ViewBuilder
     static func document(row: IndexRow, depth: Int, isSelected: Bool,
                          subtitle: String? = nil,
+                         attributedSubtitle: AttributedString? = nil,
                          emptyTitleFallback: String? = nil,
                          onTap: @escaping () -> Void) -> some View {
-        AinkradListRow(
-            isSelected: isSelected,
-            onTap: onTap,
-            leading: { AinkradIconGlyph(systemName: icon(for: row)) },
-            title: row.title.isEmpty
-                ? (emptyTitleFallback ?? row.path.lastPathComponent) : row.title,
-            subtitle: subtitle,
-            trailing: { EmptyView() })
-            .padding(.leading, LoreSidebarMetrics.indent(depth: depth))
+        VStack(alignment: .leading, spacing: 0) {
+            AinkradListRow(
+                isSelected: isSelected,
+                onTap: onTap,
+                leading: { AinkradIconGlyph(systemName: icon(for: row)) },
+                title: row.title.isEmpty
+                    ? (emptyTitleFallback ?? row.path.lastPathComponent) : row.title,
+                subtitle: attributedSubtitle == nil ? subtitle : nil,
+                trailing: { EmptyView() })
+            if let attributedSubtitle {
+                Text(attributedSubtitle)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Indented to the row's TITLE column, not its icon, so the
+                    // excerpt reads as belonging to the title above it.
+                    .padding(.leading, AinkradSpacing.lg + AinkradSpacing.md)
+                    .padding(.trailing, AinkradSpacing.md)
+                    .padding(.bottom, AinkradSpacing.xs)
+            }
+        }
+        // The whole cell taps, excerpt included — an excerpt that is not part
+        // of the click target is a strip of dead space in the middle of a list.
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .padding(.leading, LoreSidebarMetrics.indent(depth: depth))
     }
 
     static func icon(for row: IndexRow) -> String {
