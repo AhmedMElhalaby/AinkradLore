@@ -62,13 +62,11 @@ public struct IndexPayload: Sendable {
 /// What an engine's editor view needs from the shell.
 public struct EditorContext {
     public let theme: HostTheme
-    /// An accessory the shell hosts BELOW the document body, inside the same
-    /// scroll view — the linked-mentions footer. Defaulted to nothing, so an
-    /// engine with no body to sit under (PDF, attachment) is unaffected.
-    public let footer: AnyView?
-    /// Bumped when `footer`'s content changes — see
-    /// `MarkdownEditor.footerRevision` for why an `AnyView` needs one.
-    public let footerRevision: Int
+    /// Creates a note for a name typed into a `[[` completion, reporting
+    /// whether it worked. Defaulted to "cannot create", which is what
+    /// suppresses the popup's create row for an engine with no vault behind
+    /// it.
+    public let createLinkedNote: @MainActor (String) -> Bool
     /// Reports the caret's BODY-relative UTF-16 offset as it moves.
     ///
     /// Body-relative, matching `OutlineEntry.utf16Offset` and the offset
@@ -144,8 +142,7 @@ public struct EditorContext {
 
     public init(theme: HostTheme,
                 editorSettings: EditorSettings = .default,
-                footer: AnyView? = nil,
-                footerRevision: Int = 0,
+                createLinkedNote: @escaping @MainActor (String) -> Bool = { _ in false },
                 reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
                 onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
@@ -161,7 +158,7 @@ public struct EditorContext {
                 commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
                     = { _ in .refused("Renaming is unavailable here.") }) {
         self.theme = theme; self.editorSettings = editorSettings
-        self.footer = footer; self.footerRevision = footerRevision
+        self.createLinkedNote = createLinkedNote
         self.reportCaretOffset = reportCaretOffset
         self.onChange = onChange
         self.completions = completions; self.openLink = openLink

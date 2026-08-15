@@ -90,7 +90,7 @@ private struct PlainTextDocumentEditor: View {
     var body: some View {
         MarkdownEditor(text: $text, tokens: ctx.theme.tokens,
                        settings: ctx.editorSettings,
-                       footer: ctx.footer, footerRevision: ctx.footerRevision)
+                       createLinkedNote: ctx.createLinkedNote)
             .onChange(of: text) { engine.text = text; ctx.onChange() }
             .onAppear { text = engine.text }
             .background(ctx.theme.tokens.background)

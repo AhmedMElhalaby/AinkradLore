@@ -45,13 +45,6 @@ final class LinkTextView: NSTextView {
     /// view grows as the document does.
     var onWidthChange: (@MainActor (CGFloat) -> Void)?
     private var lastNotifiedWidth: CGFloat = -1
-    /// Fires when the view's HEIGHT changes — i.e. when the document grew or
-    /// shrank. The container beneath uses it to keep the accessory band
-    /// directly below the last line. Separate from `onWidthChange` because the
-    /// two have different consumers and different costs: width re-computes the
-    /// text column's geometry, height only moves one subview.
-    var onHeightChange: (@MainActor () -> Void)?
-    private var lastNotifiedHeight: CGFloat = -1
     /// Receives pasted image bytes and a generated filename, and reports
     /// whether it was handled (written as an attachment and inserted).
     /// `false` — or no handler — falls through to AppKit's own `paste(_:)`,
@@ -127,10 +120,6 @@ final class LinkTextView: NSTextView {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if abs(newSize.height - lastNotifiedHeight) > 0.5 {
-            lastNotifiedHeight = newSize.height
-            onHeightChange?()
-        }
         guard abs(newSize.width - lastNotifiedWidth) > 0.5 else { return }
         lastNotifiedWidth = newSize.width
         onWidthChange?(newSize.width)

@@ -24,13 +24,13 @@ final class LinkCompletionPanel {
     private var tokens: HostThemeTokens?
 
     /// Called when the user picks a row, by click or by return.
-    var onPick: ((IndexRow) -> Void)?
+    var onPick: ((LinkCompletionItem) -> Void)?
 
     var isVisible: Bool { panel != nil }
 
     /// - Parameter caretRect: the caret rect in SCREEN coordinates, as returned
     ///   by `NSTextView.firstRect(forCharacterRange:actualRange:)`.
-    func show(matches: [IndexRow], tokens: HostThemeTokens,
+    func show(matches: [LinkCompletionItem], tokens: HostThemeTokens,
               caretRect: NSRect, over view: NSView) {
         guard !matches.isEmpty, let window = view.window else { hide(); return }
         selection.update(to: matches)

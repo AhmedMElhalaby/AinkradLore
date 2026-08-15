@@ -29,6 +29,9 @@ struct LoreRootView: View {
     /// Set when ↓ is pressed in the search field, handing the keyboard to the
     /// results list. `NoteListView` consumes and clears it.
     @State private var listFocusRequest: Bool?
+    /// A request to show the linked-mentions slideover, raised by the document
+    /// actions menu or ⌘⇧B. `DocumentPane` consumes it.
+    @State private var mentionsRequest = false
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradTypography) private var typo
 
@@ -53,12 +56,10 @@ struct LoreRootView: View {
                     importing = ImportCoordinator(vaultRoot: root)
                 }
             },
-            // "Linked Mentions" is no longer a panel to toggle — it is the
-            // footer at the END of the document, so the command SCROLLS there.
-            // `Int.max` rather than the document's length because the shell
-            // does not track that: `scrollToOffset` clamps to `[0, length]`,
-            // which makes "past the end" mean "the end" exactly.
-            scrollToMentions: { jumpToOffset?(Int.max) },
+            // Linked mentions are summoned, not resident — see
+            // `DocumentMentionsList`. ⌘⇧B and the document's actions menu
+            // raise the same request.
+            showMentions: { mentionsRequest = true },
             openPalette: { palette = $0 },
             dismissPalette: { palette = nil })
     }
@@ -110,7 +111,8 @@ struct LoreRootView: View {
                 // sidebar unrecoverable except by a shortcut nobody has been
                 // told about.
                 DocumentHeaderBar(session: store.selectedTab, store: store, theme: theme,
-                                  row: headerRow, ops: ops)
+                                  row: headerRow, ops: ops,
+                                  onShowMentions: { mentionsRequest = true })
                 content
             }
             // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
@@ -277,7 +279,8 @@ struct LoreRootView: View {
             // when the session adopts a "save a copy" resolution.
             DocumentPane(store: store, session: session, theme: theme, ops: ops,
                          onOutlineChange: { outline = $0 },
-                         onScrollHandler: { jumpToOffset = $0 })
+                         onScrollHandler: { jumpToOffset = $0 },
+                         mentionsRequest: $mentionsRequest)
                 .id(session.id)
         } else {
             switch Self.emptyState(for: store) {

@@ -35,6 +35,8 @@ struct DocumentHeaderBar: View {
     /// therefore no rename/move/trash — the menu is absent rather than dead.
     let row: IndexRow?
     let ops: SidebarOperations
+    /// Opens the linked-mentions slideover from the actions menu.
+    var onShowMentions: () -> Void = {}
 
     @Environment(\.ainkradTypography) private var typo
     @Environment(\.ainkradReduceMotion) private var reduceMotion
@@ -68,7 +70,14 @@ struct DocumentHeaderBar: View {
             saveLabel
             if let row {
                 AinkradIconButton(systemName: "ellipsis", tooltip: "Document actions") {}
-                    .ainkradContextMenu(loreRowMenuItems(row: row, ops: ops))
+                    // "Linked mentions" leads: it is the one item here that
+                    // INSPECTS the document rather than changing it, and the
+                    // rest are rename/move/trash.
+                    .ainkradContextMenu(
+                        [AinkradMenuItem(title: "Linked mentions", systemName: "link",
+                                         shortcut: "\u{21E7}\u{2318}B",
+                                         action: onShowMentions)]
+                        + loreRowMenuItems(row: row, ops: ops, store: store))
                     .accessibilityLabel("Document actions")
             }
         }

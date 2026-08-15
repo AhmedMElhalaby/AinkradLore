@@ -41,7 +41,8 @@ final class RootViewSmokeTests: XCTestCase {
             _ = DocumentPane(store: store, session: session,
                              theme: HostTheme(TestTokens.make()),
                              ops: SidebarOperations(store: store),
-                             onOutlineChange: { _ in }, onScrollHandler: { _ in })
+                             onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                             mentionsRequest: .constant(false))
         }
         // The tab strip is gone; the header is the chrome row that replaced
         // it. Built here for BOTH states — with a document and without —
@@ -59,7 +60,7 @@ final class RootViewSmokeTests: XCTestCase {
     /// once gated on `session.engine is MarkdownEngine`, so opening a
     /// non-markdown document (a PDF, here) never showed them even though
     /// attachments are resolvable link targets. The list now lives in
-    /// `DocumentMentionsFooter` below the body rather than in a panel, and the
+    /// `DocumentMentionsList`, shown on request rather than in a panel, and the
     /// rule is unchanged: it must build for a non-markdown tab. This guards
     /// against the gate being reintroduced; `M3AcceptanceTests
     /// .test_criterion3_…` covers the underlying `store.backlinks(to:)` data.
@@ -78,21 +79,22 @@ final class RootViewSmokeTests: XCTestCase {
         _ = DocumentPane(store: store, session: session,
                          theme: HostTheme(TestTokens.make()),
                          ops: SidebarOperations(store: store),
-                         onOutlineChange: { _ in }, onScrollHandler: { _ in })
+                         onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                         mentionsRequest: .constant(false))
     }
 
-    /// The footer replaces `BacklinksPanel`. Built in BOTH states: with
-    /// content, and empty — the empty case draws nothing at all, and a view
-    /// that renders nothing is exactly the one a smoke test is most likely to
-    /// stop covering by accident.
-    func test_mentionsFooterBuilds() throws {
+    /// The mentions list, now shown in a slideover on request rather than as a
+    /// band under the document. Built in BOTH states: with content, and empty
+    /// — the empty case draws nothing at all, and a view that renders nothing
+    /// is exactly the one a smoke test is most likely to stop covering.
+    func test_mentionsListBuilds() throws {
         let theme = HostTheme(TestTokens.make())
-        _ = DocumentMentionsFooter(backlinks: [], unresolved: [], theme: theme,
-                                   onOpen: { _ in }, onCreate: { _ in })
+        _ = DocumentMentionsList(backlinks: [], unresolved: [], theme: theme,
+                                 onOpen: { _ in }, onCreate: { _ in })
         let row = IndexRow(path: URL(fileURLWithPath: "/v/a.md"), id: "a", title: "A",
                            tags: [], aliases: [], updated: Date(),
                            type: MarkdownEngine.identifier, properties: [])
-        _ = DocumentMentionsFooter(
+        _ = DocumentMentionsList(
             backlinks: [LoreStore.Backlink(id: row.path, row: row, context: "see [[B]]")],
             unresolved: [UnresolvedLink(rawTarget: "Ghost", syntax: .wikilink)],
             theme: theme, onOpen: { _ in }, onCreate: { _ in })

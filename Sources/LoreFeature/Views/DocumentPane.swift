@@ -99,9 +99,19 @@ struct DocumentPane: View {
     /// SQLite, so they must never be read from `body`.
     @State private var backlinks: [LoreStore.Backlink] = []
     @State private var unresolvedLinks: [UnresolvedLink] = []
-    /// Bumped whenever the two above change, so the hosted footer re-renders
-    /// only then — see `MarkdownEditor.footerRevision`.
-    @State private var footerRevision = 0
+    /// Whether the linked-mentions slideover is up.
+    ///
+    /// ON DEMAND, and closed by default. It began as a band below the document
+    /// and that was wrong: on a short note — most of a vault — it landed
+    /// directly under the title and competed with the writing area, which is
+    /// the opposite of the "costs nothing while you write" it was meant to be.
+    /// Reaching for it deliberately is the only presentation that holds for
+    /// both a one-line note and a long one.
+    @State private var showingMentions = false
+    /// A request from the actions menu or ⌘⇧B, consumed here — the same
+    /// one-shot shape the panel request used, and for the same reason: the
+    /// state belongs to the pane, the trigger does not.
+    @Binding var mentionsRequest: Bool
     /// The caret's body-relative offset, reported by the editor, for the spine
     /// rail's active tick. `0` before the editor has appeared, which places
     /// the active heading at "none" rather than at a wrong one.
@@ -192,8 +202,23 @@ struct DocumentPane: View {
             session.engine.makeEditor(
                 EditorContext(theme: theme,
                               editorSettings: store.editorSettings,
-                              footer: mentionsFooter,
-                              footerRevision: footerRevision,
+                              createLinkedNote: { name in
+                                  // Creates WITHOUT opening: this fires
+                                  // mid-sentence, and navigating to the note
+                                  // just referenced is the opposite of what
+                                  // the writer asked for.
+                                  guard !session.isReadOnly else { return false }
+                                  do {
+                                      try store.createNote(forLinkTarget: name,
+                                                           syntax: .wikilink)
+                                      refreshBacklinksCount()
+                                      return true
+                                  } catch {
+                                      createFailure = "Couldn't create “\(name)”: "
+                                          + error.localizedDescription
+                                      return false
+                                  }
+                              },
                               reportCaretOffset: { caretOffset = $0 },
                               onChange: {
                                   session.markChanged()
@@ -338,36 +363,27 @@ struct DocumentPane: View {
         backlinks = store.backlinks(to: session.url)
         unresolvedLinks = store.unresolvedLinks(from: session.url)
         backlinksCount = backlinks.count
-        // One bump per refresh, which is the only moment the footer's content
-        // can have changed.
-        footerRevision += 1
     }
 
-    /// The linked-mentions footer, hosted below the document body.
-    ///
-    /// Built here rather than inside the editor because it needs the store —
-    /// and erased to `AnyView` at exactly one place, the boundary where the
-    /// markdown editor stops knowing what the shell puts under its text.
-    private var mentionsFooter: AnyView {
-        AnyView(
-            DocumentMentionsFooter(
+    /// The linked-mentions list, shown in a slideover on request.
+    private var mentionsList: some View {
+        DocumentMentionsList(
                 backlinks: backlinks,
                 unresolved: unresolvedLinks,
                 theme: theme,
                 onOpen: { store.open(url: $0) },
-                onCreate: { link in
-                    do {
-                        try store.createAndOpenNote(forLinkTarget: link.rawTarget,
-                                                    syntax: link.syntax)
-                        // The target just created is no longer unresolved:
-                        // re-querying is what keeps the list honest.
-                        refreshBacklinksCount()
-                    } catch {
-                        createFailure = "Couldn't create “\(link.rawTarget)”: "
-                            + error.localizedDescription
-                    }
-                })
-        )
+            onCreate: { link in
+                do {
+                    try store.createAndOpenNote(forLinkTarget: link.rawTarget,
+                                                syntax: link.syntax)
+                    // The target just created is no longer unresolved:
+                    // re-querying is what keeps the list honest.
+                    refreshBacklinksCount()
+                } catch {
+                    createFailure = "Couldn't create “\(link.rawTarget)”: "
+                        + error.localizedDescription
+                }
+            })
     }
 
     /// Creates the note this dead link names, via the store's single

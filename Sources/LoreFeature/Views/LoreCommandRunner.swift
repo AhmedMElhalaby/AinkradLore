@@ -23,9 +23,9 @@ struct LoreCommandRunner {
     /// Opens the import sheet. Held as a closure because the sheet's state
     /// lives in `LoreRootView`, not here.
     let beginImport: () -> Void
-    /// Scrolls to the linked-mentions footer at the end of the document.
-    /// Same reasoning as `beginImport`: the scroll handler lives in the view.
-    let scrollToMentions: () -> Void
+    /// Opens the linked-mentions slideover. Same reasoning as `beginImport`:
+    /// the presentation state lives in the view.
+    let showMentions: () -> Void
     /// Opens the palette in the given mode.
     let openPalette: (LorePaletteMode) -> Void
     /// Called after a command that should move focus back to the document.
@@ -84,7 +84,7 @@ struct LoreCommandRunner {
         case .toggleOutline:
             openPalette(.headings)
         case .toggleBacklinks:
-            scrollToMentions()
+            showMentions()
         case .commandPalette:
             openPalette(.commands)
         case .quickOpen:
