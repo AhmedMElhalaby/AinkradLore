@@ -84,6 +84,9 @@ extension MarkdownEditor {
         // or to a control that does not end editing).
         tv.onResignFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.completionPanel.hide()
+            // Same rule the completion panel follows: a floating window that
+            // outlives its reason to exist is the failure mode here.
+            coordinator?.hoverChanged(to: nil)
             // `false`, not a live read: at this point `NSWindow` has not yet
             // reassigned first responder away from `tv` (see
             // `revealForSelectionChange`'s doc comment), so a live read would
@@ -98,6 +101,9 @@ extension MarkdownEditor {
         }
         tv.onDropFileURLs = { [weak coordinator = context.coordinator] urls in
             coordinator?.insertAttachments(fromDroppedFiles: urls) ?? false
+        }
+        tv.onHoverIndex = { [weak coordinator = context.coordinator] index in
+            coordinator?.hoverChanged(to: index)
         }
         // See `LinkTextView`'s doc comment on why this is registered here,
         // post-construction, rather than in an overridden initializer.
@@ -126,6 +132,9 @@ extension MarkdownEditor {
         context.coordinator.textView = tv
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
+        // The SAME resolver embeds use, so a hover and an embed cannot
+        // disagree about what a name points at.
+        context.coordinator.resolveHoverTarget = resolveEmbedTarget
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)

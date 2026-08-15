@@ -60,6 +60,40 @@ final class LinkTextView: NSTextView {
     /// Receives the file URLs from a Finder drop and reports whether they
     /// were handled (copied in and inserted). Same fall-through contract.
     var onDropFileURLs: (@MainActor ([URL]) -> Bool)?
+    /// Reports the UTF-16 index under the pointer as it moves, and nil when it
+    /// leaves. Drives the link hover preview.
+    ///
+    /// Reported RAW, on every move: deciding whether the index is inside a
+    /// link, and whether the pointer has rested long enough to mean it, are
+    /// both the coordinator's job — this view knows nothing about links.
+    var onHoverIndex: (@MainActor (Int?) -> Void)?
+
+    /// The tracking area that makes `mouseMoved` fire at all.
+    ///
+    /// Rebuilt on every bounds change: a tracking area holds a fixed rect, so
+    /// a stale one after a resize covers the wrong part of a text view that
+    /// grows with its document — which is most of the time here.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        onHoverIndex?(characterIndexForInsertion(at: point))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onHoverIndex?(nil)
+    }
 
     /// File URLs are registered by `MarkdownEditor.makeNSView` right after
     /// construction, not here: `NSTextView` is an Objective-C class, and

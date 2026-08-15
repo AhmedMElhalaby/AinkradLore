@@ -107,6 +107,17 @@ public struct MarkdownEditor: NSViewRepresentable {
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var tokens: HostThemeTokens
+        /// Floats a document's opening text beside a hovered `[[link]]`.
+        let previewPanel = LinkPreviewPanel()
+        /// Cancels a pending hover when the pointer moves on before the delay
+        /// elapses. Held so each move REPLACES the last intent rather than
+        /// queueing another one.
+        var hoverTask: Task<Void, Never>?
+        /// Resolves a link target to a file. Supplied by the shell; the same
+        /// closure embeds already use, so a hover and an embed can never
+        /// disagree about what a name points at.
+        var resolveHoverTarget: (@MainActor (String) -> URL?)?
+
         /// The scroll view's document view — see `MarkdownEditorContainerView`.
         weak var container: MarkdownEditorContainerView?
         /// Hosts the shell's footer. Held so its `rootView` can be REPLACED
@@ -285,6 +296,13 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         func tearDown() {
             completionPanel.hide()
+            // The hover preview is a child window of the same host window, so
+            // it must go with the editor — and its pending task must be
+            // cancelled, or a preview appears half a second after the document
+            // it belonged to has been torn down.
+            hoverTask?.cancel()
+            hoverTask = nil
+            previewPanel.hide()
             parseTimer?.invalidate()
             parseTimer = nil
             // Any in-flight off-actor parse now belongs to a torn-down editor;
@@ -391,6 +409,16 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// Scrolling moves the caret on screen but changes nothing about what
         /// is being completed — so this re-places the panel and never re-queries.
         private func repositionCompletions() {
+            // Scrolling slides the text out from under a STATIONARY pointer,
+            // so whatever the preview is describing is no longer what the
+            // pointer is over. The completion panel repositions because it
+            // tracks the CARET, which moved with the text; this tracks the
+            // pointer, which did not.
+            if previewPanel.isVisible {
+                hoverTask?.cancel()
+                hoverTask = nil
+                previewPanel.hide()
+            }
             guard completionPanel.isVisible, let tv = textView else { return }
             completionPanel.reposition(caretRect: caretRect(in: tv), over: tv)
         }
