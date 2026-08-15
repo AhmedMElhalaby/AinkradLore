@@ -105,7 +105,6 @@ public final class LoreStore {
     /// and Swift has no cross-file `private`.
     var openMTimes: [String: Date] = [:]
 
-
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
         self.coordinator = VaultIndexCoordinator(indexPath: indexPath)
@@ -150,7 +149,6 @@ public final class LoreStore {
         }
     }
 
-
     // MARK: - Index facade
 
     public var rows: [IndexRow] { coordinator.rows }
@@ -161,31 +159,28 @@ public final class LoreStore {
     var directoryPaths: [String] { coordinator.directoryPaths }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
 
-    /// Search results carrying the matched excerpt — what the sidebar renders
-    /// when a query is active. See `SearchSnippet` for why this exists at all.
+    /// Search results carrying the matched excerpt — see `SearchSnippet`.
     public func searchHits(_ query: String) -> [SearchHit] { coordinator.searchHits(query) }
     /// Whether `undoTrash()` currently has a delete to reverse.
     public var canUndoTrash: Bool { lastTrash != nil }
 
     public func rebuild() throws { try coordinator.rebuild() }
 
-    /// True while a vault rescan is running. Drives the sidebar's "Indexing…"
-    /// state and the Settings button's spinner.
+    /// True while a vault rescan is running — drives the sidebar's "Indexing…"
+    /// state and the Settings spinner.
     public var isIndexing: Bool { coordinator.isRebuilding }
 
-    /// Why the last rescan failed, or nil. See `VaultIndexCoordinator
-    /// .lastRebuildError` — this used to be discarded entirely.
+    /// Why the last rescan failed, or nil. Used to be discarded entirely.
     public var indexError: String? { coordinator.lastRebuildError }
 
     /// Rescan the vault WITHOUT blocking the main actor.
     ///
     /// The Settings button used to call `try? rebuild()` — the synchronous
-    /// path — which walks, reads and parses every file in the vault on the
-    /// main actor. On a large vault that is a multi-second freeze with no
-    /// spinner, no progress and (thanks to the `try?`) no report of a failure.
-    /// This is the same background path a vault change already takes; the
-    /// synchronous `rebuild()` stays for tests and for callers that must
-    /// observe the result immediately.
+    /// path — which walks, reads and parses every file on the main actor: a
+    /// multi-second freeze with no spinner and, thanks to the `try?`, no
+    /// report of a failure. Same background path a vault change already takes;
+    /// synchronous `rebuild()` stays for tests and callers that must observe
+    /// the result immediately.
     public func rebuildInBackground() { coordinator.startBackgroundRebuild() }
 
     // MARK: - Links
@@ -363,7 +358,6 @@ public final class LoreStore {
         recordVisit(session.url)
     }
 
-
     // MARK: - History
 
     /// Documents visited, oldest first — the back/forward stack.
@@ -375,7 +369,6 @@ public final class LoreStore {
     public internal(set) var history: [URL] = []
     /// Where in `history` the open document sits. Nil before anything opens.
     public internal(set) var historyIndex: Int?
-
 
     /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
     /// 500ms debounce, so a tab closed immediately after a keystroke could
@@ -435,7 +428,6 @@ public final class LoreStore {
             .filter { !$0.hasPrefix(".") }
             .sorted()
     }
-
 
     /// Switching vaults is a teardown of the old one, not just a new root:
     /// tabs, selection and `openError` all point INTO the previous vault, and

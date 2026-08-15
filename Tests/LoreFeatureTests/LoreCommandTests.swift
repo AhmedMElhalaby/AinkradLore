@@ -98,9 +98,14 @@ final class LoreCommandTests: XCTestCase {
     /// A prefix match outranks a mid-string one, so Return does the obvious
     /// thing rather than whatever was declared first.
     func test_prefixMatchesRankAboveSubstringMatches() {
-        let matches = LoreCommands.matching("out", in: everything)
-        XCTAssertEqual(matches.first?.id, .toggleOutline,
+        // "re" prefixes "Rebuild Index" and appears mid-string in "Find and
+        // Replace…", which is declared EARLIER in the catalog — so this only
+        // passes if match position outranks declaration order.
+        let matches = LoreCommands.matching("re", in: everything)
+        XCTAssertEqual(matches.first?.id, .rebuildIndex,
                        "a prefix match must beat a mid-string one")
+        XCTAssertTrue(matches.contains { $0.id == .replaceInDocument },
+                      "the substring match must still be offered, just lower")
     }
 
     /// Ties break on CATALOG order, not alphabetically. "New Note" and "New

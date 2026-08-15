@@ -1,6 +1,15 @@
 import XCTest
 @testable import LoreFeature
 
+/// The slideover's selector.
+///
+/// `DocumentPanel` has ONE case now: the outline left to become
+/// `LoreSpineRail`, which is always present and costs no layout. That removed
+/// this suite's `test_askingForTheOtherPanelSwapsRatherThanStacks` — with a
+/// single panel there is no "other" to ask for, so the swap-versus-stack rule
+/// is currently unobservable rather than broken. `DocumentPanelState.toggle`
+/// still implements it, and the test comes back the moment a second panel
+/// does; deleting it silently would have hidden that.
 final class DocumentPanelStateTests: XCTestCase {
 
     /// Nothing is open until asked for. The panels used to be permanently
@@ -11,16 +20,6 @@ final class DocumentPanelStateTests: XCTestCase {
 
     func test_togglingOpensThatPanel() {
         var state = DocumentPanelState()
-        state.toggle(.outline)
-        XCTAssertEqual(state.open, .outline)
-    }
-
-    /// The buttons are a SEGMENTED selector, not two independent panels:
-    /// asking for Linked mentions while the outline is showing SWAPS the
-    /// content rather than stacking a second panel over the editor.
-    func test_askingForTheOtherPanelSwapsRatherThanStacks() {
-        var state = DocumentPanelState()
-        state.toggle(.outline)
         state.toggle(.backlinks)
         XCTAssertEqual(state.open, .backlinks)
     }
@@ -28,8 +27,8 @@ final class DocumentPanelStateTests: XCTestCase {
     /// A second click on the ACTIVE button closes it.
     func test_togglingTheOpenPanelClosesIt() {
         var state = DocumentPanelState()
-        state.toggle(.outline)
-        state.toggle(.outline)
+        state.toggle(.backlinks)
+        state.toggle(.backlinks)
         XCTAssertNil(state.open)
     }
 

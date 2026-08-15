@@ -98,6 +98,12 @@ struct DocumentPane: View {
     /// plus `reloadGeneration`, matching `outline`'s triggers, so the badge
     /// never falls behind the panel's own count once it's opened.
     @State private var backlinksCount: Int = 0
+    /// The caret's body-relative offset, reported by the editor, for the spine
+    /// rail's active tick. `0` before the editor has appeared, which places
+    /// the active heading at "none" rather than at a wrong one.
+    @State private var caretOffset: Int = 0
+    /// Body length, for the rail's proportional placement.
+    @State private var documentLength: Int = 0
 
     /// Which of Outline / Linked mentions the right-edge slideover is
     /// showing, if either.
@@ -105,7 +111,13 @@ struct DocumentPane: View {
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradToastCenter) private var toasts
 
-    var body: some View {
+    /// The document stack and the modifiers that belong to it.
+    ///
+    /// `body` is split in two because the combined chain — the stack, six
+    /// modifiers, three overlays, an alert and a change handler — exceeded
+    /// what the type-checker will attempt in one expression. The split point
+    /// is arbitrary; the need for one is not.
+    @ViewBuilder private var pane: some View {
         VStack(spacing: 0) {
             if session.isReadOnly { readOnlyBanner }
             if session.conflict { conflictBanner }
@@ -114,9 +126,119 @@ struct DocumentPane: View {
             // true at once only transiently; showing both is still honest.
             if let error = session.lastSaveError, !session.conflict { saveErrorBanner(error) }
 
+            editor
+
+
+            // Only backlinks now: the outline's count moved to the spine rail,
+            // which shows the headings themselves rather than how many there
+            // are. Receiving backlinks stays a panel and stays ungated by
+            // engine — any document type can be a link TARGET (Task 7 made
+            // attachments resolvable targets), the asymmetry `BacklinksPanel`
+            // already encoded.
+            DocumentPanelBar(counts: [.backlinks: backlinksCount],
+                             open: panels.open, theme: theme) { panel in
+                withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
+                    panels.toggle(panel)
+                }
+            }
+        }
+        .background(theme.tokens.background)
+        // A banner appearing used to SNAP the editor down by its full height
+        // mid-typing — the most jarring motion in the app, and it fired on the
+        // save-failure path, i.e. exactly when the user was least in the mood
+        // for a surprise. Animating the insertion keeps the text's movement
+        // legible as "something arrived above you" rather than a jump cut.
+        .animation(reduceMotion ? nil : AinkradMotion.materialize,
+                   value: bannerSignature)
+        .onAppear { refreshOutline(); refreshBacklinksCount() }
+        .onChange(of: panelRequest) { _, requested in
+            guard let requested else { return }
+            panelRequest = nil
+            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
+                panels.toggle(requested)
+            }
+        }
+        // Same two triggers `BacklinksPanel` uses for the reasons it already
+        // documents (a rename changes `url` without changing `session.id`),
+        // plus `reloadGeneration`: "Reload from disk" replaces the engine's
+        // note in place without either of those changing, and the outline
+        // must not keep showing headings from the text that was just
+        // discarded.
+        .onChange(of: session.url) { refreshOutline(); refreshBacklinksCount() }
+        .onChange(of: session.reloadGeneration) { refreshOutline(); refreshBacklinksCount() }
+    }
+
+    var body: some View {
+        pane
+        .overlay(alignment: .topTrailing) {
+            if let panel = panels.open {
+                DocumentSlideover(panel: panel, theme: theme,
+                                  onClose: { panels.dismiss() }) {
+                    switch panel {
+                    case .backlinks:
+                        BacklinksPanel(store: store, url: session.url, theme: theme)
+                    }
+                }
+            }
+        }
+        // Esc closes the slideover. Zero-sized and hidden, the same pattern
+        // `TabBarView.closeShortcut` already uses for ⌘W. Gated on a panel
+        // actually being open: `.keyboardShortcut(.cancelAction)` is
+        // dispatched at `performKeyEquivalent` time, BEFORE `keyDown` reaches
+        // the first responder, so an unconditionally-mounted claim on Esc
+        // would steal it from `MarkdownEditor`'s own `cancelOperation`
+        // handling (dismissing the `[[`-completion popup) even when there is
+        // no panel to close.
+        .overlay {
+            if panels.open != nil {
+                Button("Close panel") { panels.dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+        }
+        .alert("Create this note?",
+               isPresented: Binding(get: { unresolved != nil },
+                                    set: { if !$0 { unresolved = nil } })) {
+            Button("Cancel", role: .cancel) { unresolved = nil }
+            Button("Create") {
+                if let target = unresolved { createUnresolved(target) }
+                unresolved = nil
+            }
+        } message: {
+            Text("\"\(unresolved ?? "")\" doesn't exist in this vault yet.")
+        }
+        // A TOAST, not the "Not done" sheet this used to raise.
+        //
+        // The sentences are unchanged and still shown — the point of the
+        // original fix (a failed write that silently did nothing is worse than
+        // no affordance) is intact. What changed is the weight: a refused
+        // paste or drop leaves the document exactly as it was and asks nothing
+        // of the user, so a modal that must be dismissed before typing can
+        // continue is out of proportion to it. The sidebar's refused TRASH
+        // keeps the sheet, because that one names a condition the user has to
+        // resolve before the delete can happen at all.
+        .onChange(of: createFailure) { _, failure in
+            guard let failure else { return }
+            createFailure = nil
+            toasts.show(failure, status: .danger)
+        }
+    }
+
+
+    /// The engine's editor, plus the rail drawn over its margin.
+    ///
+    /// A separate property, not inline in `body`: `EditorContext` carries
+    /// fourteen closures, and building it inside a `VStack` alongside the
+    /// banners and the panel bar pushed the whole chain past what the
+    /// type-checker will attempt in reasonable time. Splitting it is not
+    /// cosmetic — without it the file does not compile.
+    @ViewBuilder private var editor: some View {
             session.engine.makeEditor(
                 EditorContext(theme: theme,
                               editorSettings: store.editorSettings,
+                              reportCaretOffset: { caretOffset = $0 },
                               onChange: {
                                   session.markChanged()
                                   // Debounced — see `outlineDebouncer`'s doc
@@ -196,103 +318,25 @@ struct DocumentPane: View {
                 // tears the editor down and builds a fresh one, which re-runs
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
+                // Drawn in the margin the editor's own measure already leaves
+                // empty, so it costs the text column nothing — see
+                // `LoreSpineRail`. An overlay rather than an HStack sibling for
+                // the same reason: a rail that took layout width would narrow
+                // the measure every time a document happened to have headings.
+                .overlay(alignment: .topLeading) { spineRail }
+    }
 
-            // The outline is markdown-only — `counts[.outline]` reads `0` for
-            // any other engine because `refreshOutline` already returns `[]`
-            // there, so no gate is needed here. Receiving backlinks is a
-            // different question: any document type can be a link TARGET
-            // (Task 7 made attachments resolvable targets), so the Linked
-            // mentions button and its count apply to every document type,
-            // same asymmetry `BacklinksPanel` already encoded.
-            DocumentPanelBar(counts: [.outline: outline.count,
-                                      .backlinks: backlinksCount],
-                             open: panels.open, theme: theme) { panel in
-                withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                    panels.toggle(panel)
-                }
-            }
-        }
-        .background(theme.tokens.background)
-        // A banner appearing used to SNAP the editor down by its full height
-        // mid-typing — the most jarring motion in the app, and it fired on the
-        // save-failure path, i.e. exactly when the user was least in the mood
-        // for a surprise. Animating the insertion keeps the text's movement
-        // legible as "something arrived above you" rather than a jump cut.
-        .animation(reduceMotion ? nil : AinkradMotion.materialize,
-                   value: bannerSignature)
-        .onAppear { refreshOutline(); refreshBacklinksCount() }
-        .onChange(of: panelRequest) { _, requested in
-            guard let requested else { return }
-            panelRequest = nil
-            withAnimation(reduceMotion ? nil : AinkradMotion.hover) {
-                panels.toggle(requested)
-            }
-        }
-        // Same two triggers `BacklinksPanel` uses for the reasons it already
-        // documents (a rename changes `url` without changing `session.id`),
-        // plus `reloadGeneration`: "Reload from disk" replaces the engine's
-        // note in place without either of those changing, and the outline
-        // must not keep showing headings from the text that was just
-        // discarded.
-        .onChange(of: session.url) { refreshOutline(); refreshBacklinksCount() }
-        .onChange(of: session.reloadGeneration) { refreshOutline(); refreshBacklinksCount() }
-        .overlay(alignment: .topTrailing) {
-            if let panel = panels.open {
-                DocumentSlideover(panel: panel, theme: theme,
-                                  onClose: { panels.dismiss() }) {
-                    switch panel {
-                    case .outline:
-                        OutlineSection(store: store, outline: outline,
-                                       theme: theme) { offset in scrollHandler?(offset) }
-                    case .backlinks:
-                        BacklinksPanel(store: store, url: session.url, theme: theme)
-                    }
-                }
-            }
-        }
-        // Esc closes the slideover. Zero-sized and hidden, the same pattern
-        // `TabBarView.closeShortcut` already uses for ⌘W. Gated on a panel
-        // actually being open: `.keyboardShortcut(.cancelAction)` is
-        // dispatched at `performKeyEquivalent` time, BEFORE `keyDown` reaches
-        // the first responder, so an unconditionally-mounted claim on Esc
-        // would steal it from `MarkdownEditor`'s own `cancelOperation`
-        // handling (dismissing the `[[`-completion popup) even when there is
-        // no panel to close.
-        .overlay {
-            if panels.open != nil {
-                Button("Close panel") { panels.dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .opacity(0)
-                    .frame(width: 0, height: 0)
-                    .accessibilityHidden(true)
-            }
-        }
-        .alert("Create this note?",
-               isPresented: Binding(get: { unresolved != nil },
-                                    set: { if !$0 { unresolved = nil } })) {
-            Button("Cancel", role: .cancel) { unresolved = nil }
-            Button("Create") {
-                if let target = unresolved { createUnresolved(target) }
-                unresolved = nil
-            }
-        } message: {
-            Text("\"\(unresolved ?? "")\" doesn't exist in this vault yet.")
-        }
-        // A TOAST, not the "Not done" sheet this used to raise.
-        //
-        // The sentences are unchanged and still shown — the point of the
-        // original fix (a failed write that silently did nothing is worse than
-        // no affordance) is intact. What changed is the weight: a refused
-        // paste or drop leaves the document exactly as it was and asks nothing
-        // of the user, so a modal that must be dismissed before typing can
-        // continue is out of proportion to it. The sidebar's refused TRASH
-        // keeps the sheet, because that one names a condition the user has to
-        // resolve before the delete can happen at all.
-        .onChange(of: createFailure) { _, failure in
-            guard let failure else { return }
-            createFailure = nil
-            toasts.show(failure, status: .danger)
-        }
+    /// The heading rail. A separate property, not inline in `body`: the editor
+    /// expression it decorates is already large enough that adding this made
+    /// the type-checker give up on the whole chain.
+    @ViewBuilder private var spineRail: some View {
+        LoreSpineRail(outline: outline,
+                      documentLength: documentLength,
+                      caretOffset: caretOffset,
+                      theme: theme,
+                      onSelect: { offset in scrollHandler?(offset) })
+            .padding(.leading, AinkradSpacing.xs)
+            .padding(.vertical, AinkradSpacing.md)
     }
 
     /// Which banners are currently up, as a value `.animation(_:value:)` can
@@ -323,6 +367,10 @@ struct DocumentPane: View {
     /// the wrong place; it can never crash or select out of bounds.
     private func refreshOutline() {
         outline = (session.engine as? MarkdownEngine)?.outline ?? []
+        // Read from the same engine and on the same triggers as the outline,
+        // so the rail's proportional placement can never be computed against a
+        // length from a different revision of the text.
+        documentLength = (session.engine as? MarkdownEngine)?.note.body.utf16.count ?? 0
         onOutlineChange(outline)
     }
 

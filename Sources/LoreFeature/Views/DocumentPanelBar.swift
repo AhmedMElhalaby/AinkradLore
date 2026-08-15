@@ -14,7 +14,9 @@ struct DocumentPanelBar: View {
 
     var body: some View {
         HStack(spacing: AinkradSpacing.sm) {
-            ForEach([DocumentPanel.outline, .backlinks], id: \.self) { panel in
+            // Outline is no longer here: it became the always-present spine
+            // rail, so a button to summon it would summon nothing.
+            ForEach([DocumentPanel.backlinks], id: \.self) { panel in
                 button(panel)
             }
             Spacer(minLength: 0)

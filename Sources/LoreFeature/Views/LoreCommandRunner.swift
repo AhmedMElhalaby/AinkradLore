@@ -78,8 +78,11 @@ struct LoreCommandRunner {
             store.rebuildInBackground()
         case .toggleShowAllFiles:
             store.setShowAllFiles(!store.showAllFiles)
+        // ⌘⇧O opens the headings as a filterable JUMP PALETTE, not a panel.
+        // The glanceable half of the outline is the always-present spine rail;
+        // the keyboard half is this. Neither is a slideover any more.
         case .toggleOutline:
-            togglePanel(.outline)
+            openPalette(.headings)
         case .toggleBacklinks:
             togglePanel(.backlinks)
         case .commandPalette:

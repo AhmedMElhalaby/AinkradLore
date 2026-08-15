@@ -2,19 +2,30 @@ import SwiftUI
 import AinkradAppKit
 
 /// Which side panel the slideover is showing.
+/// Which side panel the slideover is showing.
+///
+/// Outline is GONE from this list: it became `LoreSpineRail`, which is always
+/// present, costs no layout, and tracks the caret — everything the panel did
+/// and three things it could not. Keeping both would have left two answers to
+/// one question, and the slower one first.
+///
+/// Linked mentions remains a panel for now. It is a different question asked
+/// at a different moment (between writing sessions, at length, rather than
+/// while writing), and its intended home is a footer below the document body —
+/// which needs the text view's bottom inset to host it and is the one genuinely
+/// risky piece of this plan. The panel stays until that lands, so there is
+/// never a build with no way to see backlinks.
 enum DocumentPanel: String, Hashable, Sendable {
-    case outline, backlinks
+    case backlinks
 
     var title: String {
         switch self {
-        case .outline: return "Outline"
         case .backlinks: return "Linked mentions"
         }
     }
 
     var systemName: String {
         switch self {
-        case .outline: return "list.bullet.indent"
         case .backlinks: return "link"
         }
     }

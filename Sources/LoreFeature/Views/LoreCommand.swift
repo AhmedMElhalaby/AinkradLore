@@ -150,7 +150,8 @@ enum LoreCommands {
         // View
         .init(id: .toggleSidebar, title: "Toggle Sidebar", systemName: "sidebar.leading",
               shortcut: LoreShortcut("\\"), requires: .always, group: .view),
-        .init(id: .toggleOutline, title: "Outline", systemName: "list.bullet.indent",
+        .init(id: .toggleOutline, title: "Jump to Heading…",
+              systemName: "list.bullet.indent",
               shortcut: LoreShortcut("o", shift: true), requires: .document, group: .view),
         .init(id: .toggleBacklinks, title: "Linked Mentions", systemName: "link",
               shortcut: LoreShortcut("b", shift: true), requires: .document, group: .view),
