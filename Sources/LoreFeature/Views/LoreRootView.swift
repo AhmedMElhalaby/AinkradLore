@@ -89,7 +89,7 @@ struct LoreRootView: View {
         HStack(spacing: 0) {
             if !store.sidebarCollapsed {
                 sidebar
-                    .frame(width: LoreMetrics.sidebarWidth)
+                    .frame(width: store.sidebarWidth)
                     // Surface hierarchy: the sidebar is CHROME and sits on
                     // `surface`, the editor is CONTENT and stays on
                     // `background`. Every one of these was `background`
@@ -98,6 +98,9 @@ struct LoreRootView: View {
                     // `surface` went entirely unused in the app.
                     .background(theme.tokens.surface)
                     .transition(.move(edge: .leading).combined(with: .opacity))
+                SidebarResizeHandle(width: store.sidebarWidth, theme: theme) { width in
+                    store.setSidebarWidth(width)
+                }
             }
             VStack(spacing: 0) {
                 // The header renders in EVERY state, including the empty one:
@@ -221,12 +224,33 @@ struct LoreRootView: View {
             .padding(.horizontal, AinkradSpacing.md)
             .padding(.top, AinkradSpacing.md)
 
+            // Bound to the EFFECTIVE mode, not the persisted preference.
+            //
+            // An active search or tag filter silently forces the flat list
+            // (see `effectiveSidebarMode`), and the picker used to go on
+            // showing "Folders" as selected the whole time — a control
+            // reporting a state the app is visibly not in. Now it reports what
+            // is on screen, and choosing "Folders" while filtering CLEARS the
+            // filter rather than doing nothing, because that is the only way
+            // the tree could actually appear.
             AinkradSegmentedPicker(
                 items: [LoreStore.SidebarMode.tree, .all],
-                selection: Binding(get: { store.sidebarMode },
-                                   set: { store.setSidebarMode($0) })
+                selection: Binding(
+                    get: { effectiveSidebarMode },
+                    set: { mode in
+                        if mode == .tree { query = ""; activeTag = nil }
+                        store.setSidebarMode(mode)
+                    })
             ) { mode in mode == .tree ? "Folders" : "All notes" }
             .padding(.horizontal, AinkradSpacing.md)
+            // Says WHY the tree is unavailable, rather than leaving the user
+            // to infer it from a picker that moved on its own.
+            if store.sidebarMode == .tree && effectiveSidebarMode == .all {
+                Text("Showing matches across all folders.")
+                    .font(.caption)
+                    .foregroundStyle(theme.tokens.foreground.opacity(LoreMetrics.secondaryText))
+                    .padding(.horizontal, AinkradSpacing.md)
+            }
 
             if effectiveSidebarMode == .tree {
                 FolderTreeView(store: store, theme: theme, selected: $selected,

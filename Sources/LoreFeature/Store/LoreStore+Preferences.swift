@@ -17,6 +17,18 @@ extension LoreStore {
     static let showAllFilesKey = "showAllFiles"
     static let sidebarCollapsedKey = "sidebarCollapsed"
     static let editorSettingsKey = "editorSettings"
+    static let sidebarWidthKey = "sidebarWidth"
+
+    /// Persist the sidebar's width, clamped to a usable range.
+    ///
+    /// The clamp lives HERE rather than in the drag gesture so it holds for
+    /// every writer, including a restored value from disk: a sidebar dragged
+    /// to 20pt is a sliver with no visible content and no grip wide enough to
+    /// drag back.
+    public func setSidebarWidth(_ width: CGFloat) {
+        sidebarWidth = LoreMetrics.clampSidebarWidth(width)
+        documents.setData("\(sidebarWidth)".data(using: .utf8), forKey: Self.sidebarWidthKey)
+    }
 
     /// Persist the editor's own display preferences.
     public func setEditorSettings(_ settings: EditorSettings) {

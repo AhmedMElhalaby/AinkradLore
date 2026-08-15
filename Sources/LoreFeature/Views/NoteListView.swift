@@ -94,8 +94,23 @@ struct NoteListView: View {
             if !store.allTags.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: AinkradSpacing.xs) {
+                        // The way OUT of a filter, and only while one is on.
+                        // Clearing a tag previously meant finding the active
+                        // chip again in a horizontally scrolling row and
+                        // clicking exactly it — which, once the row has
+                        // scrolled, means hunting for something you cannot see.
+                        if activeTag != nil {
+                            AinkradChip(label: "Clear", systemName: "xmark") {
+                                activeTag = nil
+                            }
+                            .accessibilityLabel("Clear tag filter")
+                        }
                         ForEach(store.allTags, id: \.self) { tag in
-                            AinkradSwatchChip(label: "#\(tag)",
+                            // The COUNT tells you whether a tag is worth
+                            // filtering by before you click it — a tag on two
+                            // notes and a tag on two hundred look identical
+                            // otherwise.
+                            AinkradSwatchChip(label: "#\(tag) \(store.tagCounts[tag] ?? 0)",
                                               swatch: theme.tokens.accentSecondary,
                                               isOn: activeTag == tag) {
                                 activeTag = (activeTag == tag) ? nil : tag

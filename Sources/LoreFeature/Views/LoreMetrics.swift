@@ -14,12 +14,17 @@ import AinkradAppKit
 /// rows line up, and folding it in here would bury it.
 enum LoreMetrics {
 
-    /// The sidebar's width.
-    ///
-    /// Still fixed — making it draggable and persisted is its own task — but
-    /// no longer a bare `280` sitting in `LoreRootView`'s body next to an
-    /// unrelated `.frame`.
-    static let sidebarWidth: CGFloat = 280
+    /// The sidebar's width when nothing has been chosen.
+    static let defaultSidebarWidth: CGFloat = 280
+    /// Narrow enough to be a list of names, wide enough to still show one.
+    static let minSidebarWidth: CGFloat = 180
+    /// Wide enough for deep trees, bounded so the editor cannot be squeezed
+    /// out of existence on a small display.
+    static let maxSidebarWidth: CGFloat = 520
+
+    static func clampSidebarWidth(_ width: CGFloat) -> CGFloat {
+        min(max(width, minSidebarWidth), maxSidebarWidth)
+    }
 
     /// Horizontal padding for Lore's own bars (the document header, the panel
     /// bar), so the editor's chrome lines up column-to-column.

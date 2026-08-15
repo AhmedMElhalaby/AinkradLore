@@ -44,6 +44,13 @@ public final class LoreStore {
     /// a per-vault-host UI choice, not per-document.
     public internal(set) var sidebarCollapsed: Bool = false
 
+    /// Sidebar width in points, persisted like the other layout choices.
+    ///
+    /// Clamped on read as well as on write: the stored value comes from a
+    /// file a user can edit, and a 4000pt sidebar would leave no editor at all
+    /// with no way to drag it back.
+    public internal(set) var sidebarWidth: CGFloat = LoreMetrics.defaultSidebarWidth
+
     /// The reader's preferences for the writing surface — see `EditorSettings`
     /// for why the editor owns these rather than inheriting them from the host
     /// theme.
@@ -143,6 +150,13 @@ public final class LoreStore {
         if let data = documents.data(forKey: Self.editorSettingsKey),
            let decoded = try? JSONDecoder().decode(EditorSettings.self, from: data) {
             editorSettings = decoded
+        }
+        if let data = documents.data(forKey: Self.sidebarWidthKey),
+           let text = String(data: data, encoding: .utf8), let width = Double(text) {
+            // Clamped on READ too — the stored value comes from a file a user
+            // can edit, and a 4000pt sidebar leaves no editor and no grip to
+            // drag back with.
+            sidebarWidth = LoreMetrics.clampSidebarWidth(CGFloat(width))
         }
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
@@ -415,6 +429,16 @@ public final class LoreStore {
     /// Every distinct tag across all indexed notes, sorted — drives the sidebar
     /// tag-filter chips.
     public var allTags: [String] { Array(Set(rows.flatMap(\.tags))).sorted() }
+
+    /// How many notes carry each tag.
+    ///
+    /// Computed with `allTags` rather than separately: both walk every row's
+    /// tag list, and the chip row reads them together on the same render.
+    public var tagCounts: [String: Int] {
+        rows.reduce(into: [:]) { counts, row in
+            for tag in row.tags { counts[tag, default: 0] += 1 }
+        }
+    }
 
     /// Immediate subdirectories of the vault root (dotfiles excluded) — the
     /// choices offered for `defaultNoteFolder` in Settings.
