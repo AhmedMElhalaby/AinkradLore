@@ -93,41 +93,12 @@ struct NoteListView: View {
         // `LoreRootView` already forces the flat list whenever a tag is active.
         VStack(spacing: AinkradSpacing.sm) {
             if !store.allTags.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: AinkradSpacing.xs) {
-                        // The way OUT of a filter, and only while one is on.
-                        // Clearing a tag previously meant finding the active
-                        // chip again in a horizontally scrolling row and
-                        // clicking exactly it — which, once the row has
-                        // scrolled, means hunting for something you cannot see.
-                        if activeTag != nil {
-                            AinkradChip(label: "Clear", systemName: "xmark") {
-                                activeTag = nil
-                            }
-                            .accessibilityLabel("Clear tag filter")
-                        }
-                        ForEach(store.allTags, id: \.self) { tag in
-                            // The COUNT tells you whether a tag is worth
-                            // filtering by before you click it — a tag on two
-                            // notes and a tag on two hundred look identical
-                            // otherwise.
-                            AinkradSwatchChip(label: "#\(tag) \(store.tagCounts[tag] ?? 0)",
-                                              swatch: theme.tokens.accentSecondary,
-                                              isOn: activeTag == tag) {
-                                activeTag = (activeTag == tag) ? nil : tag
-                            }
-                            // The chip's ON state is a fill and nothing else,
-                            // so whether a tag filter is active was carried by
-                            // colour alone.
-                            .accessibilityLabel(activeTag == tag
-                                                ? "Tag \(tag), filtering"
-                                                : "Filter by tag \(tag)")
-                            .accessibilityAddTraits(activeTag == tag
-                                                    ? [.isButton, .isSelected] : .isButton)
-                        }
-                    }
+                // Wrapping, not horizontally scrolling — see `TagChipRow`. The
+                // separate "Clear" chip went with the scroll: an active tag is
+                // now always visible, so clearing it means clicking it again.
+                TagChipRow(tags: store.allTags, counts: store.tagCounts,
+                           activeTag: $activeTag, theme: theme)
                     .padding(.vertical, 2)
-                }
             }
 
             if visible.isEmpty && NoteListView.isStillIndexing(store) {
