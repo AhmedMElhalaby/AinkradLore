@@ -112,6 +112,11 @@ struct DocumentPane: View {
     /// one-shot shape the panel request used, and for the same reason: the
     /// state belongs to the pane, the trigger does not.
     @Binding var mentionsRequest: Bool
+    /// Whether the ⋯ menu is open, and what it offers. Rendered here rather
+    /// than in the header bar, which is too short to host a dropdown without
+    /// clipping it.
+    @Binding var showingActions: Bool
+    let actionItems: [AinkradMenuItem]
     /// The caret's body-relative offset, reported by the editor, for the spine
     /// rail's active tick. `0` before the editor has appeared, which places
     /// the active heading at "none" rather than at a wrong one.
@@ -162,6 +167,57 @@ struct DocumentPane: View {
 
     var body: some View {
         pane
+        // The ⋯ menu, with a scrim catching the click-away. IN-WINDOW, not a
+        // floating panel: a menu hung off a toolbar button has no reason to
+        // live in another window, and the panel-based attempt dismissed on
+        // click without running the item.
+        .overlay(alignment: .topTrailing) {
+            if showingActions {
+                ZStack(alignment: .topTrailing) {
+                    Color.black.opacity(0.001)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { showingActions = false }
+                        .accessibilityHidden(true)
+                    DocumentActionsMenu(items: actionItems, theme: theme) {
+                        showingActions = false
+                    }
+                    .padding(.trailing, LoreMetrics.gutter)
+                }
+            }
+        }
+        // Linked mentions, summoned from that menu or ⇧⌘B. Overlays the
+        // editor rather than narrowing it, so the text column never reflows.
+        .overlay(alignment: .topTrailing) {
+            if showingMentions {
+                DocumentSlideover(title: "Linked mentions", theme: theme,
+                                  onClose: { showingMentions = false }) {
+                    mentionsList
+                }
+                .transition(reduceMotion ? .opacity : .move(edge: .trailing))
+            }
+        }
+        .animation(reduceMotion ? nil : AinkradMotion.hover, value: showingMentions)
+        // Esc closes whichever is up, claimed only while one is — the same
+        // gating that keeps it from stealing `cancelOperation` from the
+        // `[[`-completion popup.
+        .overlay {
+            if showingActions || showingMentions {
+                Button("Close") {
+                    showingActions = false
+                    showingMentions = false
+                }
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+            }
+        }
+        .onChange(of: mentionsRequest) { _, requested in
+            guard requested else { return }
+            mentionsRequest = false
+            showingMentions.toggle()
+        }
         .alert("Create this note?",
                isPresented: Binding(get: { unresolved != nil },
                                     set: { if !$0 { unresolved = nil } })) {

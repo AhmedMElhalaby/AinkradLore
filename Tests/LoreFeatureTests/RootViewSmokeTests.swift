@@ -42,7 +42,8 @@ final class RootViewSmokeTests: XCTestCase {
                              theme: HostTheme(TestTokens.make()),
                              ops: SidebarOperations(store: store),
                              onOutlineChange: { _ in }, onScrollHandler: { _ in },
-                             mentionsRequest: .constant(false))
+                             mentionsRequest: .constant(false),
+                             showingActions: .constant(false), actionItems: [])
         }
         // The tab strip is gone; the header is the chrome row that replaced
         // it. Built here for BOTH states — with a document and without —
@@ -50,10 +51,16 @@ final class RootViewSmokeTests: XCTestCase {
         // sidebar toggle and the history chevrons.
         _ = DocumentHeaderBar(session: store.selectedTab, store: store,
                               theme: HostTheme(TestTokens.make()),
-                              row: nil, ops: SidebarOperations(store: store))
+                              row: nil, ops: SidebarOperations(store: store),
+                              showingActions: .constant(false))
         _ = DocumentHeaderBar(session: nil, store: store,
                               theme: HostTheme(TestTokens.make()),
-                              row: nil, ops: SidebarOperations(store: store))
+                              row: nil, ops: SidebarOperations(store: store),
+                              showingActions: .constant(false))
+        // The ⋯ menu's own contents, which no test could previously reach
+        // because it lived inside a context-menu modifier.
+        _ = DocumentActionsMenu(items: [], theme: HostTheme(TestTokens.make()),
+                                onDismiss: {})
     }
 
     /// Regression for the whole-branch review finding: linked mentions were
@@ -80,7 +87,8 @@ final class RootViewSmokeTests: XCTestCase {
                          theme: HostTheme(TestTokens.make()),
                          ops: SidebarOperations(store: store),
                          onOutlineChange: { _ in }, onScrollHandler: { _ in },
-                         mentionsRequest: .constant(false))
+                         mentionsRequest: .constant(false),
+                         showingActions: .constant(false), actionItems: [])
     }
 
     /// The mentions list, now shown in a slideover on request rather than as a

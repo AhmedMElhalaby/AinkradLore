@@ -35,8 +35,9 @@ struct DocumentHeaderBar: View {
     /// therefore no rename/move/trash — the menu is absent rather than dead.
     let row: IndexRow?
     let ops: SidebarOperations
-    /// Opens the linked-mentions slideover from the actions menu.
-    var onShowMentions: () -> Void = {}
+    /// Whether the pane's actions menu is up. Owned by `DocumentPane`, which
+    /// renders it — see `DocumentActionsMenu`.
+    @Binding var showingActions: Bool
 
     @Environment(\.ainkradTypography) private var typo
     @Environment(\.ainkradReduceMotion) private var reduceMotion
@@ -69,21 +70,14 @@ struct DocumentHeaderBar: View {
             Spacer(minLength: AinkradSpacing.sm)
             saveLabel
             if let row {
-                // A LEFT-click menu. This was an `AinkradIconButton` with an
-                // empty action plus `.ainkradContextMenu`, which presents on
-                // RIGHT-click — so clicking the button did nothing at all.
-                //
-                // "Linked mentions" leads: it is the one item here that
-                // INSPECTS the document rather than changing it, and the rest
-                // are rename/move/trash.
-                LoreActionMenuButton(
-                    systemName: "ellipsis",
-                    tooltip: "Document actions",
-                    items: [AinkradMenuItem(title: "Linked mentions", systemName: "link",
-                                            shortcut: "\u{21E7}\u{2318}B",
-                                            action: onShowMentions)]
-                        + loreRowMenuItems(row: row, ops: ops, store: store),
-                    theme: theme)
+                // Toggles a binding the PANE owns: the menu is rendered as
+                // an overlay in the pane, not here. A menu hung off this bar
+                // would be clipped by it, and hosting it in a separate panel
+                // window is what the previous two attempts got wrong.
+                AinkradIconButton(systemName: "ellipsis", tooltip: "Document actions") {
+                    showingActions.toggle()
+                }
+                .accessibilityLabel("Document actions")
             }
         }
         .padding(.horizontal, LoreMetrics.gutter)

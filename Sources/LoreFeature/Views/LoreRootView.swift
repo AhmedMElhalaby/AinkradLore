@@ -32,6 +32,9 @@ struct LoreRootView: View {
     /// A request to show the linked-mentions slideover, raised by the document
     /// actions menu or ⌘⇧B. `DocumentPane` consumes it.
     @State private var mentionsRequest = false
+    /// Whether the document's ⋯ menu is open. Lives here because the header
+    /// bar is too short to host it without clipping — the pane renders it.
+    @State private var showingActions = false
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradTypography) private var typo
 
@@ -80,6 +83,21 @@ struct LoreRootView: View {
         return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
     }
 
+    /// The ⋯ menu's items.
+    ///
+    /// Built here because it needs `headerRow`, and rendered by the pane —
+    /// the SAME `loreRowMenuItems` the sidebar's right-click menu uses, so the
+    /// two cannot drift into offering different destructive affordances.
+    private var documentActionItems: [AinkradMenuItem] {
+        guard let row = headerRow else { return [] }
+        // "Linked mentions" leads: the one item here that INSPECTS the
+        // document rather than changing it.
+        return [AinkradMenuItem(title: "Linked mentions", systemName: "link",
+                                shortcut: "\u{21E7}\u{2318}B",
+                                action: { mentionsRequest = true })]
+            + loreRowMenuItems(row: row, ops: ops, store: store)
+    }
+
     /// A filtered tree of mostly-empty branches is worse than a list, so an
     /// active search or tag filter always wins over the persisted tree
     /// preference — the tree is only shown when nothing is filtering it.
@@ -112,7 +130,7 @@ struct LoreRootView: View {
                 // told about.
                 DocumentHeaderBar(session: store.selectedTab, store: store, theme: theme,
                                   row: headerRow, ops: ops,
-                                  onShowMentions: { mentionsRequest = true })
+                                  showingActions: $showingActions)
                 content
             }
             // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
@@ -255,7 +273,7 @@ struct LoreRootView: View {
                     .padding(.horizontal, AinkradSpacing.md)
             }
 
-            SidebarShortcutsSection(store: store, theme: theme, selected: $selected,
+            SidebarPinnedSection(store: store, theme: theme, selected: $selected,
                                     onSelect: openRow, ops: ops)
 
             if effectiveSidebarMode == .tree {
@@ -280,7 +298,9 @@ struct LoreRootView: View {
             DocumentPane(store: store, session: session, theme: theme, ops: ops,
                          onOutlineChange: { outline = $0 },
                          onScrollHandler: { jumpToOffset = $0 },
-                         mentionsRequest: $mentionsRequest)
+                         mentionsRequest: $mentionsRequest,
+                         showingActions: $showingActions,
+                         actionItems: documentActionItems)
                 .id(session.id)
         } else {
             switch Self.emptyState(for: store) {

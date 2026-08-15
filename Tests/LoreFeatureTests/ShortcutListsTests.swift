@@ -1,7 +1,13 @@
 import XCTest
 @testable import LoreFeature
 
-/// Pinned and recent documents.
+/// Pinned documents.
+///
+/// The "Recent" section this file also covered was removed: the sidebar shows
+/// the vault, the history chevrons answer "back to what I was just on", and
+/// ⌘P reaches anything by name, so recents was a fourth route to documents
+/// already one of the other three away. Its tests went with it rather than
+/// being left asserting a list nothing renders.
 @MainActor
 final class ShortcutListsTests: XCTestCase {
 
@@ -23,50 +29,6 @@ final class ShortcutListsTests: XCTestCase {
             to: url, atomically: true, encoding: .utf8)
         return url
     }
-
-    // MARK: - Recents
-
-    func test_openingADocumentPutsItAtTheTopOfRecents() async throws {
-        let (root, store, _) = try vault()
-        let a = try note(root, "a.md"), b = try note(root, "b.md")
-        await store.settleForTesting(); try store.rebuild()
-
-        store.open(url: a)
-        store.open(url: b)
-        XCTAssertEqual(store.recentRows.map(\.path.lastPathComponent), ["b.md", "a.md"])
-
-        // Re-opening MOVES it rather than adding a duplicate.
-        store.open(url: a)
-        XCTAssertEqual(store.recentRows.map(\.path.lastPathComponent), ["a.md", "b.md"])
-    }
-
-    func test_recentsAreCapped() async throws {
-        let (root, store, _) = try vault("recents-cap")
-        for i in 0..<(LoreStore.recentsLimit + 5) {
-            store.open(url: try note(root, "n\(i).md"))
-        }
-        await store.settleForTesting(); try store.rebuild()
-        XCTAssertLessThanOrEqual(store.recentPaths.count, LoreStore.recentsLimit)
-    }
-
-    /// A deleted or renamed document simply stops resolving. This is the whole
-    /// reason the lists store PATHS and filter through `rows`: the alternative
-    /// is a shortcut row that errors when clicked.
-    func test_aTrashedDocumentDisappearsFromRecents() async throws {
-        let (root, store, _) = try vault("recents-ghost")
-        let a = try note(root, "a.md")
-        await store.settleForTesting(); try store.rebuild()
-        store.open(url: a)
-        XCTAssertEqual(store.recentRows.count, 1)
-
-        let row = try XCTUnwrap(store.rows.first { $0.path.lastPathComponent == "a.md" })
-        _ = try store.trash(row)
-
-        XCTAssertTrue(store.recentRows.isEmpty,
-                      "a shortcut to a file that no longer exists must not be offered")
-    }
-
-    // MARK: - Pinned
 
     func test_pinningIsAToggleAndSurvivesARelaunch() async throws {
         let (root, store, docs) = try vault("pin")
@@ -93,20 +55,6 @@ final class ShortcutListsTests: XCTestCase {
 
         reopened.togglePinned(a)
         XCTAssertFalse(reopened.isPinned(a))
-    }
-
-    /// A document in both lists would take two rows in a section whose whole
-    /// purpose is to be short.
-    func test_apinnedDocumentIsNotAlsoListedAsRecent() async throws {
-        let (root, store, _) = try vault("pin-recent")
-        let a = try note(root, "a.md"), b = try note(root, "b.md")
-        await store.settleForTesting(); try store.rebuild()
-        store.open(url: a)
-        store.open(url: b)
-        store.togglePinned(a)
-
-        XCTAssertEqual(store.pinnedRows.map(\.path.lastPathComponent), ["a.md"])
-        XCTAssertEqual(store.recentRows.map(\.path.lastPathComponent), ["b.md"])
     }
 
     func test_pinnedRowsDropADeletedDocument() async throws {

@@ -1,17 +1,25 @@
 import SwiftUI
 import AinkradAppKit
 
-/// Pinned and recent documents, above the browse list.
+/// Pinned documents, above the browse list.
+///
+/// A "Recent" section shipped here alongside Pinned and was removed: the
+/// sidebar already shows the vault, the history chevrons already answer "back
+/// to what I was just on", and ⌘P reaches anything by name — so a recents list
+/// was a fourth route to documents that were never more than one of the other
+/// three away, costing permanent vertical space at the top of the sidebar.
+/// Pinning is different: it is a choice the user made, and nothing else
+/// records it.
 ///
 /// Deliberately ABOVE the mode picker and shared by both sidebar modes: these
 /// are not a third way of browsing the vault, they are a shortcut past
 /// browsing entirely, and they answer the same question whether the list below
 /// is a tree or a flat list.
 ///
-/// Hidden entirely when both lists are empty — which is every first-run vault.
-/// A pair of empty sections labelled "Pinned" and "Recent" above an empty note
-/// list is three ways of saying "nothing here" stacked on top of each other.
-struct SidebarShortcutsSection: View {
+/// Shared by both sidebar modes — pinning is a shortcut PAST browsing, not a
+/// third way of doing it — and hidden entirely when nothing is pinned, which
+/// is every first-run vault.
+struct SidebarPinnedSection: View {
     @Bindable var store: LoreStore
     let theme: HostTheme
     @Binding var selected: IndexRow?
@@ -22,21 +30,10 @@ struct SidebarShortcutsSection: View {
 
     var body: some View {
         let pinned = store.pinnedRows
-        // Recents are capped in the VIEW as well as the store: the store keeps
-        // ten so that a few going stale still leaves a useful list, but showing
-        // ten recents plus pins pushes the actual vault off the top of the
-        // sidebar, which is the opposite of a shortcut.
-        let recents = Array(store.recentRows.prefix(5))
-        if !pinned.isEmpty || !recents.isEmpty {
+        if !pinned.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                if !pinned.isEmpty {
-                    header("Pinned")
-                    ForEach(pinned, id: \.path) { row in shortcutRow(row) }
-                }
-                if !recents.isEmpty {
-                    header("Recent")
-                    ForEach(recents, id: \.path) { row in shortcutRow(row) }
-                }
+                header("Pinned")
+                ForEach(pinned, id: \.path) { row in shortcutRow(row) }
                 Divider().opacity(0.4).padding(.vertical, AinkradSpacing.xs)
             }
             .padding(.horizontal, AinkradSpacing.md)
