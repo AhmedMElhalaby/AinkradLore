@@ -69,16 +69,21 @@ struct DocumentHeaderBar: View {
             Spacer(minLength: AinkradSpacing.sm)
             saveLabel
             if let row {
-                AinkradIconButton(systemName: "ellipsis", tooltip: "Document actions") {}
-                    // "Linked mentions" leads: it is the one item here that
-                    // INSPECTS the document rather than changing it, and the
-                    // rest are rename/move/trash.
-                    .ainkradContextMenu(
-                        [AinkradMenuItem(title: "Linked mentions", systemName: "link",
-                                         shortcut: "\u{21E7}\u{2318}B",
-                                         action: onShowMentions)]
-                        + loreRowMenuItems(row: row, ops: ops, store: store))
-                    .accessibilityLabel("Document actions")
+                // A LEFT-click menu. This was an `AinkradIconButton` with an
+                // empty action plus `.ainkradContextMenu`, which presents on
+                // RIGHT-click — so clicking the button did nothing at all.
+                //
+                // "Linked mentions" leads: it is the one item here that
+                // INSPECTS the document rather than changing it, and the rest
+                // are rename/move/trash.
+                LoreActionMenuButton(
+                    systemName: "ellipsis",
+                    tooltip: "Document actions",
+                    items: [AinkradMenuItem(title: "Linked mentions", systemName: "link",
+                                            shortcut: "\u{21E7}\u{2318}B",
+                                            action: onShowMentions)]
+                        + loreRowMenuItems(row: row, ops: ops, store: store),
+                    theme: theme)
             }
         }
         .padding(.horizontal, LoreMetrics.gutter)
