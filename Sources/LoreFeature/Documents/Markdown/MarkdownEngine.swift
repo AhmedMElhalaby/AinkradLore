@@ -179,6 +179,7 @@ private struct MarkdownDocumentEditor: View {
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
                            settings: ctx.editorSettings,
+                           headingCompletions: ctx.headingCompletions,
                            createLinkedNote: ctx.createLinkedNote,
                            completions: ctx.completions, onOpenLink: ctx.openLink,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,

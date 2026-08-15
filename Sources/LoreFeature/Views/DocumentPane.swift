@@ -258,6 +258,10 @@ struct DocumentPane: View {
             session.engine.makeEditor(
                 EditorContext(theme: theme,
                               editorSettings: store.editorSettings,
+                              headingCompletions: { document, prefix in
+                                  store.headingCompletions(inDocumentNamed: document,
+                                                           matching: prefix)
+                              },
                               createLinkedNote: { name in
                                   // Creates WITHOUT opening: this fires
                                   // mid-sentence, and navigating to the note

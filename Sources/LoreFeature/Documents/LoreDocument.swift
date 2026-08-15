@@ -62,6 +62,10 @@ public struct IndexPayload: Sendable {
 /// What an engine's editor view needs from the shell.
 public struct EditorContext {
     public let theme: HostTheme
+    /// Headings of the document named before a `#` in a `[[…]]`, filtered by
+    /// what follows it. Defaulted to none, which is what suppresses heading
+    /// completion for an engine with no vault behind it.
+    public let headingCompletions: @MainActor (String, String) -> [String]
     /// Creates a note for a name typed into a `[[` completion, reporting
     /// whether it worked. Defaulted to "cannot create", which is what
     /// suppresses the popup's create row for an engine with no vault behind
@@ -142,6 +146,8 @@ public struct EditorContext {
 
     public init(theme: HostTheme,
                 editorSettings: EditorSettings = .default,
+                headingCompletions: @escaping @MainActor (String, String) -> [String]
+                    = { _, _ in [] },
                 createLinkedNote: @escaping @MainActor (String) -> Bool = { _ in false },
                 reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
                 onChange: @escaping @MainActor () -> Void,
@@ -158,6 +164,7 @@ public struct EditorContext {
                 commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
                     = { _ in .refused("Renaming is unavailable here.") }) {
         self.theme = theme; self.editorSettings = editorSettings
+        self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
         self.reportCaretOffset = reportCaretOffset
         self.onChange = onChange

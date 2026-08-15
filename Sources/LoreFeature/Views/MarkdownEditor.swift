@@ -10,6 +10,8 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// alternative was a process-wide current-settings global, which would
     /// have made two Lore instances in one host share a font size.
     let settings: EditorSettings
+    /// See `EditorContext.headingCompletions`.
+    let headingCompletions: (@MainActor (String, String) -> [String])?
     /// See `EditorContext.createLinkedNote`.
     let createLinkedNote: (@MainActor (String) -> Bool)?
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
@@ -55,6 +57,7 @@ public struct MarkdownEditor: NSViewRepresentable {
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 settings: EditorSettings = .default,
+                headingCompletions: (@MainActor (String, String) -> [String])? = nil,
                 createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
@@ -68,6 +71,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens; self.settings = settings
+        self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
@@ -108,6 +112,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// Nil when the shell offers no create path, which suppresses the
         /// popup's "Create …" row entirely.
         var createLinkedNote: (@MainActor (String) -> Bool)?
+        /// See `EditorContext.headingCompletions`.
+        var headingCompletions: (@MainActor (String, String) -> [String])?
 
         /// Kept in sync by `updateNSView`, so changing a setting restyles the
         /// document the user is already looking at rather than only the next
@@ -383,9 +389,21 @@ public struct MarkdownEditor: NSViewRepresentable {
                   let prefix = activePrefix(in: tv) else {
                 completionPanel.hide(); return
             }
-            let rows = completions(prefix)
-            let items = Self.completionItems(for: prefix, matches: rows,
+            // A `#` in the prefix switches the list to that document's
+            // HEADINGS. Checked before the document query so typing
+            // `[[Design#` stops offering documents the moment the fragment
+            // begins — the user has already chosen the document.
+            let items: [LinkCompletionItem]
+            if let query = LinkCompletionContext.headingQuery(inPrefix: prefix),
+               let headingCompletions {
+                items = headingCompletions(query.document, query.heading).map {
+                    .heading(document: query.document, text: $0)
+                }
+            } else {
+                let rows = completions(prefix)
+                items = Self.completionItems(for: prefix, matches: rows,
                                              canCreate: createLinkedNote != nil)
+            }
             guard !items.isEmpty else { completionPanel.hide(); return }
             completionPanel.show(matches: items, tokens: tokens,
                                  caretRect: caretRect(in: tv), over: tv)
@@ -444,6 +462,12 @@ public struct MarkdownEditor: NSViewRepresentable {
             switch item {
             case .document(let row):
                 insert(linkText: linkTarget(row))
+            case .heading(let document, let text):
+                // The document name is re-emitted with the fragment so the
+                // insertion replaces the whole typed prefix — the caret sits
+                // after `#`, and inserting only the heading would leave
+                // `[[Design#Design#Overview]]`.
+                insert(linkText: "\(document)#\(text)")
             case .create(let name):
                 // Created BEFORE the text is inserted, so a refused create
                 // (no vault, an invalid name) leaves the document untouched

@@ -106,6 +106,30 @@ public enum LinkCompletionContext {
         return LinkResolver.basename(of: target)
     }
 
+    /// Splits a typed `[[` prefix into the document it names and the heading
+    /// being typed after `#`, or nil when no `#` has been typed yet.
+    ///
+    /// The whole feature rides on this: `activePrefix` already hands back the
+    /// text between `[[` and the caret, so recognising a heading query needs no
+    /// new scanning of the document — only a decision about what that text
+    /// means.
+    ///
+    /// Splits on the FIRST `#`. A second one is part of the heading, because
+    /// markdown headings can legitimately contain `#` and the fragment syntax
+    /// has no escape for it — so `[[Doc#C# notes]]` asks for the heading
+    /// "C# notes", which is the only reading that lets such a heading be
+    /// linked at all.
+    ///
+    /// Returns nil for an EMPTY document name (`[[#`): a fragment with no
+    /// document is a link into nothing, and offering headings there would be
+    /// offering them from a document the user has not named.
+    static func headingQuery(inPrefix prefix: String) -> (document: String, heading: String)? {
+        guard let hash = prefix.firstIndex(of: "#") else { return nil }
+        let document = String(prefix[prefix.startIndex..<hash]).trimmingCharacters(in: .whitespaces)
+        guard !document.isEmpty else { return nil }
+        return (document, String(prefix[prefix.index(after: hash)...]))
+    }
+
     /// Characters that change what a target MEANS: `#` starts a fragment, `|`
     /// starts an alias, brackets end or restart the span, `/` turns the target
     /// into a path suffix.
@@ -216,6 +240,8 @@ enum LinkCompletionItem: Equatable {
     case document(IndexRow)
     /// Create a note with this name. Carries the typed text, not a row.
     case create(String)
+    /// A heading inside the document already named before the `#`.
+    case heading(document: String, text: String)
 
     /// What the row reads as.
     var label: String {
@@ -224,6 +250,8 @@ enum LinkCompletionItem: Equatable {
             return row.title.isEmpty ? row.path.lastPathComponent : row.title
         case .create(let name):
             return "Create “\(name)”"
+        case .heading(_, let text):
+            return text
         }
     }
 
@@ -231,6 +259,7 @@ enum LinkCompletionItem: Equatable {
         switch self {
         case .document(let row): return LoreSidebarRow.icon(for: row)
         case .create: return "plus.circle"
+        case .heading: return "number"
         }
     }
 }

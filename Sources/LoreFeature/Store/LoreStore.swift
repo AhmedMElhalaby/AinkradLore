@@ -53,6 +53,10 @@ public final class LoreStore {
 
     /// Canonical path keys of pinned documents — see `LoreStore+Shortcuts`.
     internal var pinnedPaths: Set<String> = []
+    /// One-document outline cache for `[[Doc#…]]` completion — see
+    /// `LoreStore+Headings`.
+    internal var headingCacheKey: String?
+    internal var headingCache: [String] = []
 
     /// The reader's preferences for the writing surface — see `EditorSettings`
     /// for why the editor owns these rather than inheriting them from the host
