@@ -133,7 +133,12 @@ enum MarkdownStyleRenderer {
     ///
     /// The runs are collected BEFORE any are written: mutating attributes from
     /// inside `enumerateAttribute`'s block mutates the thing being enumerated.
-    private static func composeFont(in r: NSRange, storage: NSTextStorage,
+    /// Internal rather than `private` since the code-highlighting half moved to
+    /// `MarkdownCodeStyling.swift` for the 500-line ceiling — Swift's `private`
+    /// is file-scoped, and comments need italics composed onto the monospaced
+    /// font the same way every other kind composes its traits. Still an
+    /// implementation detail outside this module.
+    static func composeFont(in r: NSRange, storage: NSTextStorage,
                                     _ transform: (NSFont) -> NSFont) {
         var runs: [(NSRange, NSFont)] = []
         storage.enumerateAttribute(.font, in: r) { value, sub, _ in
@@ -148,7 +153,7 @@ enum MarkdownStyleRenderer {
     /// italic only — those are the two the markdown kinds compose. Anything
     /// else (a condensed or expanded face) is not something this renderer sets,
     /// so re-applying it would be inventing state.
-    private static func inheritedTraits(of font: NSFont) -> NSFontTraitMask {
+    static func inheritedTraits(of font: NSFont) -> NSFontTraitMask {
         let traits = NSFontManager.shared.traits(of: font)
         var inherited: NSFontTraitMask = []
         if traits.contains(.boldFontMask) { inherited.insert(.boldFontMask) }
@@ -159,7 +164,7 @@ enum MarkdownStyleRenderer {
     /// `convert` returns the font UNCHANGED when the family has no such face,
     /// so an unavailable monospaced-italic degrades to upright rather than
     /// falling back to a different family and changing the metrics mid-line.
-    private static func applying(_ traits: NSFontTraitMask, to font: NSFont) -> NSFont {
+    static func applying(_ traits: NSFontTraitMask, to font: NSFont) -> NSFont {
         var result = font
         if traits.contains(.boldFontMask) {
             result = NSFontManager.shared.convert(result, toHaveTrait: .boldFontMask)
@@ -241,6 +246,13 @@ enum MarkdownStyleRenderer {
                                  value: MarkdownParagraphStyles.style(for: .codeBlock,
                                                                       theme: theme),
                                  range: (storage.string as NSString).paragraphRange(for: r))
+            // Token colouring BEFORE the language label, so the label — which
+            // sits on the opening fence line and is styled as a label, not as
+            // code — wins where the two overlap.
+            if let language, !language.isEmpty,
+               let grammar = CodeGrammar.named(language) {
+                highlightCode(in: r, grammar: grammar, storage: storage, tokens: tokens)
+            }
             if let language, !language.isEmpty {
                 styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
             }
@@ -472,4 +484,6 @@ enum MarkdownStyleRenderer {
         let upper = min(length, max(a, b) + viewportMargin)
         return NSRange(location: lower, length: max(0, upper - lower))
     }
+
 }
+
