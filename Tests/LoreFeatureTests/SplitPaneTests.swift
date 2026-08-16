@@ -122,6 +122,26 @@ final class SplitPaneTests: XCTestCase {
                       "the second pane's document was evicted while on screen")
     }
 
+    // MARK: - Divider
+
+    /// The same compounding bug `SidebarResizeHandle` documents: `translation`
+    /// is cumulative from where the drag began, so it must be applied to the
+    /// fraction AT THE START. Applied to the live value on every event, the
+    /// divider accelerates away from the pointer.
+    func test_theDividerAppliesTranslationToTheStartFraction() {
+        XCTAssertEqual(SplitDivider.clamped(0.5 + 0.1), 0.6, accuracy: 0.0001)
+        XCTAssertEqual(SplitDivider.clamped(0.5 + 0.2), 0.7, accuracy: 0.0001)
+    }
+
+    /// A pane too narrow to hold a line of text is not a pane — and once it is
+    /// that narrow there is no grip left to drag it back with.
+    func test_neitherPaneCanBeSqueezedAway() {
+        XCTAssertEqual(SplitDivider.clamped(-5), SplitDivider.minFraction)
+        XCTAssertEqual(SplitDivider.clamped(5), SplitDivider.maxFraction)
+        XCTAssertGreaterThan(SplitDivider.minFraction, 0.1)
+        XCTAssertLessThan(SplitDivider.maxFraction, 0.9)
+    }
+
     // MARK: - Per-pane history
 
     /// The reason history moved into `PaneState`: going back in the pane you

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AinkradAppKit
 
 struct LoreRootView: View {
@@ -35,6 +36,12 @@ struct LoreRootView: View {
     /// Whether the document's ⋯ menu is open. Lives here because the header
     /// bar is too short to host it without clipping — the pane renders it.
     @State private var showingActions = false
+    /// How much of the editor area the FIRST pane takes, 0…1.
+    ///
+    /// Session state, not persisted — decision 2.4: a split is a working
+    /// arrangement for a task rather than a preference, so neither the split
+    /// nor its proportions survive a relaunch.
+    @State private var splitFraction: CGFloat = 0.5
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradTypography) private var typo
 
@@ -254,11 +261,22 @@ struct LoreRootView: View {
         } else if let primary = store.pane.session {
             // One column, or two. Each owns its own header, actions menu and
             // mentions slideover — see `DocumentPaneColumn`.
-            HStack(spacing: 0) {
-                column(primary, isSecondary: false)
-                if let secondary = store.secondaryPane?.session {
-                    Divider().opacity(0.5)
-                    column(secondary, isSecondary: true)
+            //
+            // One `GeometryReader` around the pair, with an explicit width on
+            // the first column: the divider is a point wide and knows nothing
+            // about the space it is dividing, so the proportion has to be
+            // resolved where the total width is known.
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    if let secondary = store.secondaryPane?.session {
+                        column(primary, isSecondary: false)
+                            .frame(width: max(0, (geometry.size.width - 1) * splitFraction))
+                        SplitDivider(fraction: $splitFraction, theme: theme)
+                        column(secondary, isSecondary: true)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        column(primary, isSecondary: false)
+                    }
                 }
             }
         } else {
@@ -328,7 +346,19 @@ struct LoreRootView: View {
     private func openRow(_ row: IndexRow) {
         selected = row
         attempted = row.path
-        store.open(row)
+        // ⌥ opens BESIDE what is showing rather than replacing it — "put this
+        // next to what I am reading", which is the gesture split view exists
+        // for and would otherwise cost splitting first and then opening.
+        //
+        // Read from `NSEvent` rather than a SwiftUI modifier: the declarative
+        // alternative (`modifierKeyAlternate`) is macOS 15 and this targets
+        // 14. Read at the moment of the click, so a modifier held after the
+        // fact cannot change where an earlier click landed.
+        if NSEvent.modifierFlags.contains(.option) {
+            store.openInSecondaryPane(url: row.path)
+        } else {
+            store.open(row)
+        }
     }
 
     /// Create-and-open. The failure path goes through `ops.message` rather than
