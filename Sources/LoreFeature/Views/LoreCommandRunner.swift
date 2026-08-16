@@ -99,6 +99,12 @@ struct LoreCommandRunner {
             store.zoomEditor(by: -1)
         case .zoomReset:
             store.resetEditorZoom()
+        case .toggleSplit:
+            // Toggle, not "open": pressing it again with a split up is the
+            // obvious way to close one, and the alternative is a command that
+            // only ever adds a pane.
+            if store.isSplit { store.closeSecondaryPane() }
+            else { store.splitCurrentDocument() }
         // Routed through the responder chain rather than a held reference —
         // see `LoreFind`. A no-op when focus is not in a text view, which is
         // the right answer: ⌘F in the sidebar is not a request to search a

@@ -58,6 +58,27 @@ final class PaneWiringTests: XCTestCase {
                       "linked mentions are never constructed, so ⇧⌘B does nothing")
     }
 
+    /// Split view added a second place the same defect can live: the column
+    /// owns the header and the pane, so a request that reaches neither is
+    /// invisible in exactly the same way.
+    func test_theColumnRendersItsHeaderAndPane() throws {
+        let column = try source("DocumentPaneColumn.swift")
+        XCTAssertTrue(column.contains("DocumentHeaderBar("),
+                      "the column renders no header, so a split pane has no breadcrumb "
+                      + "or actions menu")
+        XCTAssertTrue(column.contains("DocumentPane("),
+                      "the column renders no pane, so a split shows nothing")
+    }
+
+    /// ⇧⌘B sets a shared flag; only the FOCUSED column may consume it, or both
+    /// panes open their mentions at once.
+    func test_theColumnGatesTheMentionsRequestOnFocus() throws {
+        let column = try source("DocumentPaneColumn.swift")
+        XCTAssertTrue(column.contains("isFocused ? $mentionsRequest"),
+                      "an unfocused column consuming the request would open both panes' "
+                      + "mentions from one keystroke")
+    }
+
     /// The request channel from the command/menu must be consumed, or ⇧⌘B sets
     /// a flag that is never acted on.
     func test_theMentionsRequestIsConsumed() throws {
