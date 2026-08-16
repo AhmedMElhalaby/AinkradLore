@@ -83,7 +83,16 @@ enum MarkdownEditorReveal {
     /// Builds the index for `text` and `spans`. O(text) once, on a text change
     /// — never on a caret move.
     static func index(text: String, spans: [StyleSpan]) -> Index {
-        let blocks = MarkdownReveal.blocks(in: text)
+        index(blocks: MarkdownReveal.blocks(in: text), spans: spans)
+    }
+
+    /// The same, for a caller that has ALREADY segmented the text.
+    ///
+    /// The edit path recomputes the block list every keystroke to prove the
+    /// segmentation did not move (`renderStylesForEdit`, check 4); having it
+    /// then call `index(text:spans:)` would scan the document a second time for
+    /// an answer it is holding.
+    static func index(blocks: [Range<Int>], spans: [StyleSpan]) -> Index {
         var buckets = [[Int]](repeating: [], count: blocks.count)
         for (position, span) in spans.enumerated() {
             guard let block = blockIndex(of: span.range.lowerBound, in: blocks) else { continue }

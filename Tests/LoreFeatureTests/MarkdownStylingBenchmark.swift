@@ -181,20 +181,29 @@ final class MarkdownStylingCacheTests: XCTestCase {
     }
 
     /// The debounce eventually fires and refreshes the cache with real spans.
+    ///
+    /// The counts here are BLOCK parses during the burst plus ONE document
+    /// parse from the debounce. Typing costs a block parse per character —
+    /// that is what styles the markdown on the keystroke rather than on the
+    /// pause — and the debounce is still the only thing that re-reads the whole
+    /// document, which is the property this test exists to pin.
     func test_theDebouncedParseEventuallyRuns() {
         let (coordinator, tv, _) = makeEditor("plain text\n")
         withExtendedLifetime(coordinator) {
             resetParseCounter()
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             for character in "# " { tv.insertText(String(character), replacementRange: tv.selectedRange()) }
-            XCTAssertEqual(MarkdownParseCounter.count, 0)
+            let duringBurst = MarkdownParseCounter.count
+            XCTAssertLessThanOrEqual(duringBurst, 2,
+                                     "at most one block parse per typed character")
 
             let parsed = expectation(description: "debounced parse")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { parsed.fulfill() }
             wait(for: [parsed], timeout: 2)
 
-            XCTAssertEqual(MarkdownParseCounter.count, 1,
-                           "one parse for the whole burst, not one per keystroke")
+            XCTAssertEqual(MarkdownParseCounter.count, duringBurst + 1,
+                           "exactly ONE document parse for the whole burst, "
+                           + "not one per keystroke")
             XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .heading(1) })
         }
     }

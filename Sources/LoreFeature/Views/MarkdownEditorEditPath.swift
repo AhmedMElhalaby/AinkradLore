@@ -104,29 +104,25 @@ extension MarkdownEditor.Coordinator {
     public func textDidChange(_ notification: Notification) {
         guard let tv = textView else { return }
         text.wrappedValue = tv.string
-        var spansBefore: Int?
         if let edit = pendingEdit {
-            spansBefore = styleCache.spans.count
             styleCache.shift(editedRange: edit.range,
                              delta: edit.replacementLength - edit.range.length,
                              newText: tv.string)
         }
         let edit = pendingEdit
         pendingEdit = nil
-        // Renders the SHIFTED spans — no parse on the keystroke path. The
-        // real parse lands one debounce later.
-        //
-        // `renderStylesForEdit` re-attributes only the block the edit
-        // landed in, and returns false — falling back to the full,
+        // `renderStylesForEdit` re-parses and re-attributes only the block the
+        // edit landed in, and returns false — falling back to the full,
         // whole-document render this used to do unconditionally — whenever
         // it cannot PROVE that is equivalent. See its doc comment for the
         // list of things it refuses to be clever about.
-        let handled: Bool
-        if let edit, let spansBefore {
-            handled = renderStylesForEdit(edit, spansBefore: spansBefore)
-        } else {
-            handled = false
-        }
+        //
+        // The spans OUTSIDE that block are the shifted ones: right position,
+        // possibly wrong kind, settled by the debounced parse a moment later.
+        // Inside it they are freshly parsed, which is what lets syntax style
+        // itself on the keystroke that finishes it rather than on the pause
+        // afterwards.
+        let handled = edit.map { renderStylesForEdit($0) } ?? false
         lastEditTookFastPath = handled
         if !handled { renderStyles() }
         scheduleParse()
@@ -206,9 +202,16 @@ extension MarkdownEditor.Coordinator {
     ///
     /// 1. The cache was current before the edit and shifted cleanly — the
     ///    caller only gets here with a `PendingEdit`, which is `nil` otherwise.
-    /// 2. `shift` DROPPED no span. It uses `compactMap` and discards spans a
-    ///    deletion collapsed, which would silently re-index every bucket in
-    ///    `revealIndex.spansByBlock`. Compared by count, from before the shift.
+    /// 2. (Retired.) This used to require that `shift` DROPPED no span —
+    ///    a deletion can collapse one, which silently re-indexed every bucket
+    ///    in `revealIndex.spansByBlock`, and the buckets were carried over.
+    ///    They are now REBUILT from the spliced spans, and check 5 is read off
+    ///    the spans rather than off the buckets, so nothing depends on the
+    ///    count being stable. Retiring it matters to the user rather than to
+    ///    the arithmetic: deleting the `*` that closed an emphasis run collapses
+    ///    a marker span, so every un-styling edit — the whole delete direction —
+    ///    used to fall back to a render that does not re-parse either, and the
+    ///    word stayed italic until the debounce.
     /// 3. The edit contains no line terminator and no fence character, in
     ///    EITHER direction — see `Coordinator.disturbsStructure`.
     /// 4. The recomputed block segmentation equals the old one moved by the
@@ -228,6 +231,19 @@ extension MarkdownEditor.Coordinator {
     /// 6. The document is under the viewport cap, so the render is not
     ///    windowed. Above it, styling follows the scroll and a block-scoped
     ///    update cannot maintain that.
+    /// 7. The document contains no link reference definition — the one
+    ///    construct that makes a block's styling depend on text outside it, and
+    ///    so the one thing that stops the block from being parsable alone. See
+    ///    `MarkdownStyleCache.hasReferenceDefinitions`.
+    ///
+    /// WHAT IT PARSES. Exactly one block, via `MarkdownStyleCache.deriveBlock`.
+    /// This method originally parsed NOTHING, which is what made it fast and
+    /// also what made it wrong to look at: shifted spans are the right shape in
+    /// the right place with the WRONG KINDS, so markdown you had just finished
+    /// typing stayed unstyled until the debounce fired after you stopped. The
+    /// block parse is what the checks above buy — having proven the edit cannot
+    /// have changed the meaning of anything outside this block, re-reading this
+    /// block is both sufficient and cheap.
     ///
     /// What the fast path still does in full, because each is cheap and each is
     /// a whole-document fact: the block list, list depths, the embed index, the
@@ -238,12 +254,10 @@ extension MarkdownEditor.Coordinator {
     /// And when this is wrong anyway, the 150 ms debounced parse lands a full,
     /// correct render on top: a mis-styled frame, never a mis-styled document.
     /// That is a safety net, not the argument — the checks above are.
-    func renderStylesForEdit(_ edit: MarkdownEditor.Coordinator.PendingEdit,
-                             spansBefore: Int) -> Bool {
+    func renderStylesForEdit(_ edit: MarkdownEditor.Coordinator.PendingEdit) -> Bool {
         guard let tv = textView, let storage = tv.textStorage else { return false }
-        // 3, 2, 6.
+        // 3, 6.
         guard !edit.touchesBlockStructure else { return false }
-        guard styleCache.spans.count == spansBefore else { return false }
         guard !styleCache.isOverViewportCap, !styleCache.isOverHardCap else { return false }
         // Nothing rendered yet — there is no previous picture to patch.
         guard renderedSnapshot != nil, !revealIndex.blocks.isEmpty else { return false }
@@ -264,20 +278,71 @@ extension MarkdownEditor.Coordinator {
         else { return false }
         let blockRange = fresh[block]
 
-        // 5. Every span touching this block must belong to it.
-        let bucket = Set(revealIndex.spansByBlock[block])
-        for (position, span) in styleCache.spans.enumerated()
+        // 5. Every span that TOUCHES this block must lie wholly INSIDE it.
+        //
+        // Stated as containment rather than as bucket membership, which is what
+        // it used to be. The two are equivalent — a span contained in the block
+        // starts in the block, which is exactly what bucketing means — and
+        // containment is the property step 7 actually needs: it replaces this
+        // block's spans outright, so a span reaching past the block's ends
+        // would lose its styling in a block nothing is about to re-attribute.
+        // (`test_bails_whenAFenceSpansMultipleBlocks` is the case: a fence with
+        // a blank line inside it. Reading the property off the spans instead of
+        // off the buckets is also what lets check 2 go — see below.)
+        var existing: [StyleSpan] = []
+        for span in styleCache.spans
         where span.range.lowerBound < blockRange.upperBound
             && span.range.upperBound > blockRange.lowerBound {
-            guard bucket.contains(position) else { return false }
+            guard span.range.lowerBound >= blockRange.lowerBound,
+                  span.range.upperBound <= blockRange.upperBound else { return false }
+            existing.append(span)
         }
+
+        // 7. Re-parse THIS BLOCK, so the markdown the user just typed is styled
+        // on the keystroke that completed it.
+        //
+        // Everything above this line was already true, and the path was still
+        // showing stale KINDS: `styleCache.shift` moves spans without re-reading
+        // them, so typing `**bold**` left plain text on screen until the 150 ms
+        // debounce fired — after the user stopped typing. That is the "renders
+        // on key-up" defect. A whole-document parse here is not affordable
+        // (9 ms on a 500-line note, 92 ms on a 5,000-line one, per character);
+        // parsing the one block the caret is in is O(block) — microseconds for
+        // an ordinary paragraph — and is the only part of the document whose
+        // meaning this edit can have changed, which checks 3 and 4 have already
+        // proven.
+        //
+        // A link reference definition is the one thing that would make that
+        // false, because it gives a block a meaning that is written elsewhere.
+        // Refuse rather than reason about it; see `hasReferenceDefinitions`.
+        guard !styleCache.hasReferenceDefinitions,
+              let blockSpans = MarkdownStyleCache.deriveBlock(of: tv.string, range: blockRange)
+        else { return false }
 
         // Proven. Everything below is the full render's whole-document
         // bookkeeping — all of it cheap — with the ONE expensive step,
         // re-attributing the document, narrowed to the block that changed.
-        revealIndex = MarkdownEditorReveal.Index(
-            blocks: fresh, spansByBlock: revealIndex.spansByBlock,
-            depths: MarkdownListDepth.depths(of: styleCache.spans))
+        //
+        // The splice is skipped outright when the parse agrees with the spans
+        // already there, which is the ordinary case: typing a letter into a
+        // paragraph changes where that paragraph's span ENDS, and `shift`
+        // already moved it there. Worth a comparison because the splice is not
+        // free — it re-indexes every span position after this block, so the
+        // buckets have to be rebuilt, and that is O(spans in the DOCUMENT).
+        // Measured: rebuilding unconditionally cost +5.8 ms per keystroke on
+        // the 5,000-line fixture, which is most of a frame spent discovering
+        // that nothing changed. When the parse DOES disagree — the keystroke
+        // that closed a `**bold**`, the one that deleted its closing marker —
+        // the rebuild is exactly the work that puts the new styling on screen,
+        // and it is paid on that keystroke alone.
+        if existing != blockSpans {
+            styleCache.spliceBlock(blockRange, with: blockSpans)
+            revealIndex = MarkdownEditorReveal.index(blocks: fresh, spans: styleCache.spans)
+        } else {
+            revealIndex = MarkdownEditorReveal.Index(
+                blocks: fresh, spansByBlock: revealIndex.spansByBlock,
+                depths: MarkdownListDepth.depths(of: styleCache.spans))
+        }
         revealIndexBuilds += 1
         rebuildEmbedIndex()
         documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)

@@ -137,8 +137,20 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
                       + "spans=\(coordinator.cachedSpansForTesting.count) "
                       + "per-keystroke=\(String(format: "%.2f", perKeystroke * 1000))ms "
                       + "parses=\(MarkdownParseCounter.count)")
-                XCTAssertEqual(MarkdownParseCounter.count, 0,
-                               "the burst must still cost zero parses")
+                // 21 = the warm keystroke plus the twenty measured, one BLOCK
+                // parse each. This used to assert zero, and the zero was the
+                // defect rather than the achievement: a keystroke path that
+                // parses nothing cannot see that what was just typed is
+                // markdown, so syntax stayed unstyled until the debounce fired
+                // after the user stopped. The property that must survive is the
+                // one the zero was standing in for — that the per-keystroke
+                // cost is a function of the BLOCK, not the document — and this
+                // loop asserts it in the only way that settles it: the same
+                // count at 200 lines and at 5,000, alongside the wall-clock
+                // ratio below.
+                XCTAssertEqual(MarkdownParseCounter.count, 21,
+                               "one block parse per keystroke at \(lines) lines — "
+                               + "unchanged by document size")
                 XCTAssertTrue(coordinator.lastEditTookFastPath,
                               "ordinary prose typing must take the single-block path")
                 // The improvement, asserted where the lag was unmistakable.

@@ -407,17 +407,157 @@ final class MarkdownEditFastPathTests: XCTestCase {
 
     // MARK: - Contracts that must not have been weakened
 
-    /// The fast path must not have bought its speed with a parse.
-    func test_theFastPathStillCostsZeroParses() {
+    /// The fast path parses ONE BLOCK per keystroke and never the document.
+    ///
+    /// This assertion used to read `count == 0`, and that zero was the defect:
+    /// a path that parses nothing cannot notice that the characters just typed
+    /// are markdown, so newly typed syntax stayed unstyled until the debounce
+    /// fired after the user stopped. What has to hold is the bound that made
+    /// the zero attractive in the first place — the per-keystroke cost must not
+    /// be a function of DOCUMENT size — and that is asserted directly below, by
+    /// checking the parsed text is the block rather than by counting.
+    func test_theFastPathParsesOneBlockPerKeystrokeAndNeverTheDocument() {
         let (coordinator, tv) = makeEditor(Self.fixture())
         withExtendedLifetime(coordinator) {
             tv.setSelectedRange(NSRange(location: 200, length: 0))
+            let typed = "the quick brown fox"
             resetParseCounter()
-            for character in "the quick brown fox" {
+            for character in typed {
                 tv.insertText(String(character), replacementRange: tv.selectedRange())
             }
-            XCTAssertEqual(MarkdownParseCounter.count, 0)
             XCTAssertTrue(coordinator.lastEditTookFastPath)
+            XCTAssertEqual(MarkdownParseCounter.count, typed.count,
+                           "exactly one block parse per keystroke — no more, and "
+                           + "no fewer, since fewer means stale kinds on screen")
+        }
+    }
+
+    /// The cost bound behind the count above: what gets parsed on a keystroke
+    /// is the CARET'S BLOCK, so a document ten times larger costs the same.
+    ///
+    /// Asserted by parsing the same block inside two documents of very
+    /// different sizes and requiring the same number of parses — a count that
+    /// scaled with the document would mean a whole-document parse had crept
+    /// back onto the keystroke path.
+    func test_theKeystrokeCostDoesNotGrowWithTheDocument() {
+        func parsesForTyping(in document: String, at site: String) -> Int {
+            let (coordinator, tv) = makeEditor(document)
+            return withExtendedLifetime(coordinator) { () -> Int in
+                let found = (tv.string as NSString).range(of: site)
+                XCTAssertNotEqual(found.location, NSNotFound)
+                tv.setSelectedRange(NSRange(location: found.location + 3, length: 0))
+                resetParseCounter()
+                for character in "abcdefgh" {
+                    tv.insertText(String(character), replacementRange: tv.selectedRange())
+                }
+                XCTAssertTrue(coordinator.lastEditTookFastPath)
+                return MarkdownParseCounter.count
+            }
+        }
+        let small = parsesForTyping(in: Self.fixture(), at: "prose with")
+        let large = parsesForTyping(in: Self.fixture() + Self.fixture() + Self.fixture(),
+                                    at: "prose with")
+        XCTAssertEqual(small, large,
+                       "a three-times-larger document must cost the same per keystroke")
+    }
+
+    // MARK: - The defect this path exists to fix
+
+    /// THE regression test. Markdown must be styled by the keystroke that
+    /// completes it, not by the pause afterwards.
+    ///
+    /// Measured before the fix: typing `**bold**` left the word in the body
+    /// font (symbolic traits `17408`) until the 150 ms debounce landed, at
+    /// which point it became bold (`2`). Asserted here with NO settle, so a
+    /// regression to "the debounce will fix it" fails rather than passes late.
+    func test_typedSyntaxIsStyledOnTheKeystrokeNotAfterTheDebounce() throws {
+        let (coordinator, tv) = makeEditor("# Title\n\nplain prose here\n")
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            let end = (tv.string as NSString).range(of: "prose here")
+            tv.setSelectedRange(NSRange(location: NSMaxRange(end), length: 0))
+            for character in " **bold**" {
+                tv.insertText(String(character), replacementRange: tv.selectedRange())
+            }
+            XCTAssertTrue(coordinator.lastEditTookFastPath)
+            let word = (tv.string as NSString).range(of: "bold")
+            let font = try XCTUnwrap(storage.attribute(.font, at: word.location,
+                                                       effectiveRange: nil) as? NSFont)
+            XCTAssertTrue(font.fontDescriptor.symbolicTraits.contains(.bold),
+                          "the word must be bold on the keystroke that closed the "
+                          + "emphasis, not one debounce later")
+        }
+    }
+
+    /// The same for a heading, which changes SIZE rather than weight — and
+    /// which is typed at the START of a block, the other common shape.
+    func test_typingAHeadingMarkerStylesTheLineImmediately() throws {
+        let (coordinator, tv) = makeEditor("alpha\n\nplain line\n\nomega\n")
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            let line = (tv.string as NSString).range(of: "plain line")
+            let bodySize = try XCTUnwrap(storage.attribute(.font, at: line.location,
+                                                           effectiveRange: nil) as? NSFont)
+                .pointSize
+            tv.setSelectedRange(NSRange(location: line.location, length: 0))
+            for character in "## " {
+                tv.insertText(String(character), replacementRange: tv.selectedRange())
+            }
+            let heading = (tv.string as NSString).range(of: "plain line")
+            let font = try XCTUnwrap(storage.attribute(.font, at: heading.location,
+                                                       effectiveRange: nil) as? NSFont)
+            XCTAssertGreaterThan(font.pointSize, bodySize,
+                                 "the line must render as a heading as soon as the "
+                                 + "marker is complete")
+        }
+    }
+
+    /// And the reverse direction: DELETING a marker must un-style immediately
+    /// too. Shifted spans grow to cover the caret, so a stale path leaves the
+    /// text emphasised after the syntax that emphasised it is gone.
+    func test_deletingAMarkerUnstylesImmediately() throws {
+        let (coordinator, tv) = makeEditor("intro\n\nsome *slanted* words\n\ntail\n")
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            let opener = (tv.string as NSString).range(of: "*slanted*")
+            // Remove the CLOSING marker, so what remains is not emphasis.
+            tv.insertText("", replacementRange: NSRange(location: NSMaxRange(opener) - 1,
+                                                        length: 1))
+            XCTAssertTrue(coordinator.lastEditTookFastPath)
+            let word = (tv.string as NSString).range(of: "slanted")
+            let font = try XCTUnwrap(storage.attribute(.font, at: word.location,
+                                                       effectiveRange: nil) as? NSFont)
+            XCTAssertFalse(font.fontDescriptor.symbolicTraits.contains(.italic),
+                           "with the closing marker gone the word is not emphasis")
+        }
+    }
+
+    /// A link reference definition anywhere in the document bars the block
+    /// parse: `[label]` means "link" only because a line elsewhere says so, and
+    /// a block parsed alone cannot see it.
+    func test_bails_whenTheDocumentHasALinkReferenceDefinition() {
+        let body = "[label]: https://example.com\n\nsee [label] for more\n\ntail here\n"
+        let (coordinator, tv) = makeEditor(body)
+        withExtendedLifetime(coordinator) {
+            let found = (tv.string as NSString).range(of: "tail here")
+            tv.insertText("x", replacementRange: NSRange(location: found.location + 2,
+                                                        length: 0))
+            XCTAssertFalse(coordinator.lastEditTookFastPath,
+                           "a block cannot be parsed alone when a definition "
+                           + "elsewhere decides what its links mean")
+        }
+    }
+
+    /// And the reverse, so the guard above is not silently barring everything:
+    /// an ordinary document with brackets in it must still take the fast path.
+    func test_bracketsThatAreNotADefinitionDoNotBarTheFastPath() {
+        let (coordinator, tv) = makeEditor("intro\n\nsee [a] and [b] here\n\ntail\n")
+        withExtendedLifetime(coordinator) {
+            let found = (tv.string as NSString).range(of: "tail")
+            tv.insertText("x", replacementRange: NSRange(location: found.location + 2,
+                                                        length: 0))
+            XCTAssertTrue(coordinator.lastEditTookFastPath,
+                          "`[a]` on its own is not a reference definition")
         }
     }
 
