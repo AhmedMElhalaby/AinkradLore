@@ -313,6 +313,19 @@ enum MarkdownStyleRenderer {
                                                                                      tokens: tokens),
                                  range: r)
 
+        case .table:
+            // The table itself carries no text styling: its cells are ordinary
+            // prose and style as such. What makes it a table is the alignment
+            // (`MarkdownTableStyling`) and the rule drawn under its header, and
+            // both need the collapse state, so neither can happen here.
+            break
+
+        case .tableHeader:
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
+                              to: current)
+            }
+
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
 

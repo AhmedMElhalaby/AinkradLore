@@ -20,6 +20,10 @@ public struct StyleSpan: Equatable, Sendable {
         case callout(MarkdownCallout.Kind)
         /// A callout's title — the author's own, on the header line.
         case calloutTitle(MarkdownCallout.Kind)
+        /// A GFM pipe table, whole.
+        case table
+        /// A table's header row, which renders bolder than its body.
+        case tableHeader
         case checkbox(Bool)
         /// An `![[target]]` embed's TARGET text — same convention as
         /// `.wikilink`'s content span: the brackets (and the leading `!`)
@@ -57,7 +61,7 @@ public struct StyleSpan: Equatable, Sendable {
             case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
-                 .checkbox, .marker:
+                 .table, .tableHeader, .checkbox, .marker:
                 return false
             }
         }
@@ -132,6 +136,42 @@ extension MarkdownASTCollector {
             appendMarkers(MarkdownMarkers.inlineLink(in: ns, text: text), .link)
         }
         descendInto(link)
+    }
+
+    /// A GFM pipe table.
+    ///
+    /// swift-markdown parses these, so the AST says WHERE one is; it does not
+    /// say where the `|` separators sit in the source or how wide each column
+    /// must be, and both are needed to render a grid without touching the text.
+    /// `MarkdownTable` measures that from the line, and this turns the answer
+    /// into spans the renderer already knows how to consume: markers collapse,
+    /// content styles.
+    ///
+    /// `descendInto` still runs, so `**bold**` inside a cell styles exactly as
+    /// it would anywhere else.
+    mutating func visitTable(_ table: Table) {
+        if let ns = resolve(table.range) {
+            let range = swiftRange(ns)
+            styleSpans.append(StyleSpan(range: range, kind: .table))
+            if let parsed = MarkdownTable.parse(range: range, in: text) {
+                if let header = parsed.headerRow {
+                    styleSpans.append(StyleSpan(range: header.range, kind: .tableHeader))
+                }
+                // The delimiter row is hidden WHOLE — it is pure notation, and
+                // the rule drawn under the header says what it says.
+                if let delimiter = parsed.delimiterRow {
+                    styleSpans.append(StyleSpan(range: delimiter.range,
+                                                kind: .marker(of: .tableDelimiter)))
+                }
+                for row in parsed.rows {
+                    for pipe in row.pipes {
+                        styleSpans.append(StyleSpan(range: pipe,
+                                                    kind: .marker(of: .tablePipe)))
+                    }
+                }
+            }
+        }
+        descendInto(table)
     }
 
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) {

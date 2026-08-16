@@ -9,6 +9,10 @@ public enum MarkerOwner: Equatable, Sendable {
     /// A callout's `[!type]` header, which collapses like any other syntax
     /// so the rendered block shows a title rather than its own declaration.
     case callout
+    /// A pipe table's `|` separators, and its `|---|` delimiter row. Both
+    /// are notation the rendered table replaces with alignment and a rule.
+    case tablePipe
+    case tableDelimiter
 }
 
 /// Marker ranges derived from a content span's ALREADY-RESOLVED source range.
