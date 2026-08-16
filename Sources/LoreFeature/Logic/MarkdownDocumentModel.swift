@@ -225,7 +225,39 @@ public struct MarkdownDocumentModel: Sendable {
     /// document is not styled", not a slow one.
     public var styleSpans: [StyleSpan] {
         guard !isOverStylingHardCap else { return [] }
-        return astStyleSpans + wikilinkSpans
+        return astStyleSpans + wikilinkSpans + mathSpans
+    }
+
+    /// `$…$` spans, derived on demand for the same reason `wikilinkSpans` is:
+    /// math is not CommonMark, so the AST never saw it.
+    ///
+    /// Code regions are handed over so a `$PATH` in a shell fence cannot open
+    /// an expression — the same suppression the link scanner uses, for the same
+    /// class of false positive.
+    public var mathSpans: [StyleSpan] {
+        let text = fullText as NSString
+        var out: [StyleSpan] = []
+        for span in MarkdownMath.spans(in: text, isSuppressed: { isInsideCode(utf16Offset: $0) }) {
+            out.append(StyleSpan(range: span.range,
+                                 kind: .math(isRendered: span.isRenderable)))
+            guard span.isRenderable else { continue }
+            // The delimiters, and the `^`/`_`/`{}` inside — collapsed only when
+            // the whole expression renders, or the reader would lose the `$`
+            // that told them this was mathematics at all.
+            let width = span.isBlock ? 2 : 1
+            out.append(StyleSpan(range: span.range.lowerBound..<(span.range.lowerBound + width),
+                                 kind: .marker(of: .math)))
+            out.append(StyleSpan(range: (span.range.upperBound - width)..<span.range.upperBound,
+                                 kind: .marker(of: .math)))
+            for marker in span.markers {
+                out.append(StyleSpan(range: marker, kind: .marker(of: .math)))
+            }
+            for script in span.scripts {
+                out.append(StyleSpan(range: script.range,
+                                     kind: .mathScript(isSuperscript: script.isSuperscript)))
+            }
+        }
+        return out
     }
 
     /// UTF-16 length, which is what every style offset is measured in.

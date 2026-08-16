@@ -24,6 +24,12 @@ public struct StyleSpan: Equatable, Sendable {
         case table
         /// A table's header row, which renders bolder than its body.
         case tableHeader
+        /// A `$…$` expression. `isRendered` is false when it contains
+        /// something this editor cannot render exactly, in which case the
+        /// source stays visible and is merely tinted — see `MarkdownMath`.
+        case math(isRendered: Bool)
+        /// Script content, raised or lowered.
+        case mathScript(isSuperscript: Bool)
         case checkbox(Bool)
         /// An `![[target]]` embed's TARGET text — same convention as
         /// `.wikilink`'s content span: the brackets (and the leading `!`)
@@ -61,8 +67,11 @@ public struct StyleSpan: Equatable, Sendable {
             case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
-                 .table, .tableHeader, .checkbox, .marker:
+                 .table, .tableHeader, .mathScript, .checkbox, .marker:
                 return false
+            // A `$…$` expression is delimited by ONE pair, so it reveals
+            // whole rather than splitting across a line break.
+            case .math: return true
             }
         }
     }

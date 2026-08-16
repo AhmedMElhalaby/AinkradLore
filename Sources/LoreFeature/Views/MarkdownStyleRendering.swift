@@ -2,24 +2,6 @@ import AppKit
 import SwiftUI
 import AinkradAppKit
 
-/// The scroll-to-offset entry point `OutlineSection` drives, kept here rather
-/// than in `MarkdownEditor.swift` to leave that file's AppKit wiring alone —
-/// see that file's line-count note.
-extension MarkdownEditor.Coordinator {
-    /// Moves the caret to `offset` (UTF-16, into the editor's text) and
-    /// scrolls it on screen. Clamped rather than guarded: an outline entry
-    /// computed against a slightly stale model (edit landed between parse and
-    /// click) should still land somewhere sane, not be silently dropped.
-    @MainActor func scrollToOffset(_ offset: Int) {
-        guard let tv = textView else { return }
-        let length = (tv.string as NSString).length
-        let clamped = max(0, min(offset, length))
-        let range = NSRange(location: clamped, length: 0)
-        tv.setSelectedRange(range)
-        tv.scrollRangeToVisible(range)
-    }
-}
-
 /// Turns style spans into text attributes.
 ///
 /// Split out of `MarkdownEditor` so that file stays about the editor's AppKit
@@ -326,6 +308,31 @@ enum MarkdownStyleRenderer {
                               to: current)
             }
 
+        case .math(let isRendered):
+            // Tinted either way, so an expression reads as mathematics rather
+            // than as prose. When it does NOT render, this tint is the only
+            // thing that happens to it — its `$` and its commands stay visible,
+            // which is the honest presentation of something this editor cannot
+            // draw. See `MarkdownMath`.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentSecondary)
+                                     .withAlphaComponent(isRendered ? 1.0 : 0.85),
+                                 range: r)
+
+        case .mathScript(let isSuperscript):
+            // A real script: smaller, and off the baseline in the right
+            // direction. Both derived from the font actually in place, so a
+            // script inside a heading scales with the heading.
+            composeFont(in: r, storage: storage) { current in
+                NSFont(descriptor: current.fontDescriptor,
+                       size: current.pointSize * 0.72) ?? current
+            }
+            let base = (storage.attribute(.font, at: r.location, effectiveRange: nil)
+                        as? NSFont)?.pointSize ?? baseSize
+            storage.addAttribute(.baselineOffset,
+                                 value: base * (isSuperscript ? 0.45 : -0.22),
+                                 range: r)
+
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
 
@@ -398,33 +405,6 @@ enum MarkdownStyleRenderer {
         return CGFloat(count) * spaceAdvance
     }
 
-    /// Styles the info string (`swift` in an opening ```` ```swift ```` line)
-    /// as a trailing label on that line, distinct from the block's body.
-    ///
-    /// `CodeBlock.range` covers the opening fence line itself (verified in
-    /// `test_codeBlockSpanRangeIncludesTheOpeningFence`), so the language text
-    /// is real characters already inside `r` — no attachment, no overlay
-    /// drawing, no second pass over the layout manager. The label is found by
-    /// locating the block's first line and searching it for `language`, which
-    /// is safe because CommonMark's info string is exactly that word (an
-    /// identifier, no spaces) immediately after the fence run.
-    private static func styleLanguageLabel(_ language: String, in r: NSRange,
-                                           storage: NSTextStorage, tokens: HostThemeTokens) {
-        let full = storage.string as NSString
-        let limit = NSMaxRange(r)
-        var lineEnd = r.location
-        while lineEnd < limit, full.character(at: lineEnd) != 0x0A { lineEnd += 1 }
-        let fenceLine = NSRange(location: r.location, length: lineEnd - r.location)
-        guard fenceLine.length > 0 else { return }
-        let lineText = full.substring(with: fenceLine)
-        guard let langRange = lineText.range(of: language, options: .backwards) else { return }
-        let nsLangRange = NSRange(langRange, in: lineText)
-        let labelRange = NSRange(location: fenceLine.location + nsLangRange.location,
-                                 length: nsLangRange.length)
-        guard NSMaxRange(labelRange) <= full.length else { return }
-        storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
-        storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
-    }
 
     // MARK: - Collapsing hidden markers
 

@@ -92,4 +92,32 @@ extension MarkdownStyleRenderer {
             }
         }
     }
+
+    /// Styles the info string (`swift` in an opening ```` ```swift ```` line)
+    /// as a trailing label on that line, distinct from the block's body.
+    ///
+    /// `CodeBlock.range` covers the opening fence line itself (verified in
+    /// `test_codeBlockSpanRangeIncludesTheOpeningFence`), so the language text
+    /// is real characters already inside `r` — no attachment, no overlay
+    /// drawing, no second pass over the layout manager. The label is found by
+    /// locating the block's first line and searching it for `language`, which
+    /// is safe because CommonMark's info string is exactly that word (an
+    /// identifier, no spaces) immediately after the fence run.
+    static func styleLanguageLabel(_ language: String, in r: NSRange,
+                                           storage: NSTextStorage, tokens: HostThemeTokens) {
+        let full = storage.string as NSString
+        let limit = NSMaxRange(r)
+        var lineEnd = r.location
+        while lineEnd < limit, full.character(at: lineEnd) != 0x0A { lineEnd += 1 }
+        let fenceLine = NSRange(location: r.location, length: lineEnd - r.location)
+        guard fenceLine.length > 0 else { return }
+        let lineText = full.substring(with: fenceLine)
+        guard let langRange = lineText.range(of: language, options: .backwards) else { return }
+        let nsLangRange = NSRange(langRange, in: lineText)
+        let labelRange = NSRange(location: fenceLine.location + nsLangRange.location,
+                                 length: nsLangRange.length)
+        guard NSMaxRange(labelRange) <= full.length else { return }
+        storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
+        storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
+    }
 }

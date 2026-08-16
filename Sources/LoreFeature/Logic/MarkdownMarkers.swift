@@ -13,6 +13,9 @@ public enum MarkerOwner: Equatable, Sendable {
     /// are notation the rendered table replaces with alignment and a rule.
     case tablePipe
     case tableDelimiter
+    /// A math expression's `$` delimiters, and the `^`/`_`/`{}` that mark a
+    /// script. Collapsed only when the expression renders exactly.
+    case math
 }
 
 /// Marker ranges derived from a content span's ALREADY-RESOLVED source range.
