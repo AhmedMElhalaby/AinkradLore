@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AinkradAppKit
 
 struct LoreRootView: View {
@@ -35,6 +36,12 @@ struct LoreRootView: View {
     /// Whether the document's ⋯ menu is open. Lives here because the header
     /// bar is too short to host it without clipping — the pane renders it.
     @State private var showingActions = false
+    /// How much of the editor area the FIRST pane takes, 0…1.
+    ///
+    /// Session state, not persisted — decision 2.4: a split is a working
+    /// arrangement for a task rather than a preference, so neither the split
+    /// nor its proportions survive a relaunch.
+    @State private var splitFraction: CGFloat = 0.5
     @Environment(\.ainkradReduceMotion) private var reduceMotion
     @Environment(\.ainkradTypography) private var typo
 
@@ -67,37 +74,6 @@ struct LoreRootView: View {
             dismissPalette: { palette = nil })
     }
 
-    /// The open document's index row, matched CANONICALLY.
-    ///
-    /// Canonical on both sides for the reason `LoreStore.trash` documents at
-    /// length: a session opened via `open(url:)` keeps the caller's spelling,
-    /// so a raw `==` silently finds nothing for a document opened with a
-    /// non-canonical URL — and the header would then drop its actions menu on
-    /// exactly the documents that look most ordinary.
-    ///
-    /// Nil with no document open, and for one outside the vault, where
-    /// rename / move / trash have nothing to act on.
-    private var headerRow: IndexRow? {
-        guard let session = store.selectedTab else { return nil }
-        let path = VaultIndexCoordinator.canonical(session.url)
-        return store.rows.first { VaultIndexCoordinator.canonical($0.path) == path }
-    }
-
-    /// The ⋯ menu's items.
-    ///
-    /// Built here because it needs `headerRow`, and rendered by the pane —
-    /// the SAME `loreRowMenuItems` the sidebar's right-click menu uses, so the
-    /// two cannot drift into offering different destructive affordances.
-    private var documentActionItems: [AinkradMenuItem] {
-        guard let row = headerRow else { return [] }
-        // "Linked mentions" leads: the one item here that INSPECTS the
-        // document rather than changing it.
-        return [AinkradMenuItem(title: "Linked mentions", systemName: "link",
-                                shortcut: "\u{21E7}\u{2318}B",
-                                action: { mentionsRequest = true })]
-            + loreRowMenuItems(row: row, ops: ops, store: store)
-    }
-
     /// A filtered tree of mostly-empty branches is worse than a list, so an
     /// active search or tag filter always wins over the persisted tree
     /// preference — the tree is only shown when nothing is filtering it.
@@ -122,17 +98,7 @@ struct LoreRootView: View {
                     store.setSidebarWidth(width)
                 }
             }
-            VStack(spacing: 0) {
-                // The header renders in EVERY state, including the empty one:
-                // it carries the sidebar toggle and the history chevrons, and
-                // hiding those with no document open would make a collapsed
-                // sidebar unrecoverable except by a shortcut nobody has been
-                // told about.
-                DocumentHeaderBar(session: store.selectedTab, store: store, theme: theme,
-                                  row: headerRow, ops: ops,
-                                  showingActions: $showingActions)
-                content
-            }
+            content
             // Attached HERE, not at the root, on purpose: `loreSidebarOperations`
             // already owns a `.sheet` on the root view, and two `.sheet`
             // modifiers on the same view are unreliable on macOS — with the
@@ -289,41 +255,80 @@ struct LoreRootView: View {
 
     @ViewBuilder private var content: some View {
         if let failure = store.openError, failure.url == attempted {
-            DocumentErrorCard(url: failure.url,
-                              message: "Lore couldn't open this document.",
-                              theme: theme)
-        } else if let session = store.selectedTab {
-            // Identity is the session's stable id — NOT its url, which changes
-            // when the session adopts a "save a copy" resolution.
-            DocumentPane(store: store, session: session, theme: theme, ops: ops,
-                         onOutlineChange: { outline = $0 },
-                         onScrollHandler: { jumpToOffset = $0 },
-                         mentionsRequest: $mentionsRequest,
-                         showingActions: $showingActions,
-                         actionItems: documentActionItems)
-                .id(session.id)
-        } else {
-            switch Self.emptyState(for: store) {
-            case .noVault:
-                // Offering "New note" here was the whole bug: with no vault the
-                // click could not succeed, and the copy told the user to press
-                // ⌘N — advice guaranteed to do nothing. The first-run state has
-                // exactly one useful action, so it is the only one offered.
-                AinkradEmptyState(
-                    icon: "folder.badge.questionmark",
-                    title: "No vault open",
-                    message: "Lore keeps your notes in a folder on disk. "
-                        + "Choose the folder that holds them to get started.",
-                    actionTitle: "Choose vault…",
-                    action: ops.beginChooseVault)
-            case .noDocument:
-                AinkradEmptyState(
-                    icon: "book.closed",
-                    title: "No document open",
-                    message: "Select a document from the list, or press ⌘N to capture a new one.",
-                    actionTitle: "New note",
-                    action: quickCapture)
+            emptyStateChrome { DocumentErrorCard(url: failure.url,
+                                                 message: "Lore couldn't open this document.",
+                                                 theme: theme) }
+        } else if let primary = store.pane.session {
+            // One column, or two. Each owns its own header, actions menu and
+            // mentions slideover — see `DocumentPaneColumn`.
+            //
+            // One `GeometryReader` around the pair, with an explicit width on
+            // the first column: the divider is a point wide and knows nothing
+            // about the space it is dividing, so the proportion has to be
+            // resolved where the total width is known.
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    if let secondary = store.secondaryPane?.session {
+                        column(primary, isSecondary: false)
+                            .frame(width: max(0, (geometry.size.width - 1) * splitFraction))
+                        SplitDivider(fraction: $splitFraction, theme: theme)
+                        column(secondary, isSecondary: true)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        column(primary, isSecondary: false)
+                    }
+                }
             }
+        } else {
+            emptyStateChrome { emptyState }
+        }
+    }
+
+    private func column(_ session: DocumentSession, isSecondary: Bool) -> some View {
+        DocumentPaneColumn(
+            store: store, session: session, theme: theme, ops: ops,
+            isFocused: store.focusIsSecondary == isSecondary,
+            isSplit: store.isSplit,
+            onFocus: { store.focusPane(secondary: isSecondary) },
+            onOutlineChange: { outline = $0 },
+            onScrollHandler: { jumpToOffset = $0 },
+            mentionsRequest: $mentionsRequest)
+    }
+
+    /// The header still renders with no document open: it carries the sidebar
+    /// toggle, and hiding that would make a collapsed sidebar unrecoverable
+    /// except by a shortcut nobody has been told about.
+    @ViewBuilder private func emptyStateChrome<Content: View>(
+        @ViewBuilder _ body: () -> Content
+    ) -> some View {
+        VStack(spacing: 0) {
+            DocumentHeaderBar(session: nil, store: store, theme: theme,
+                              row: nil, ops: ops, showingActions: $showingActions)
+            body()
+        }
+    }
+
+    @ViewBuilder private var emptyState: some View {
+            switch Self.emptyState(for: store) {
+        case .noVault:
+            // Offering "New note" here was the whole bug: with no vault the
+            // click could not succeed, and the copy told the user to press
+            // ⌘N — advice guaranteed to do nothing. The first-run state has
+            // exactly one useful action, so it is the only one offered.
+            AinkradEmptyState(
+                icon: "folder.badge.questionmark",
+                title: "No vault open",
+                message: "Lore keeps your notes in a folder on disk. "
+                    + "Choose the folder that holds them to get started.",
+                actionTitle: "Choose vault…",
+                action: ops.beginChooseVault)
+        case .noDocument:
+            AinkradEmptyState(
+                icon: "book.closed",
+                title: "No document open",
+                message: "Select a document from the list, or press ⌘N to capture a new one.",
+                actionTitle: "New note",
+                action: quickCapture)
         }
     }
 
@@ -341,7 +346,19 @@ struct LoreRootView: View {
     private func openRow(_ row: IndexRow) {
         selected = row
         attempted = row.path
-        store.open(row)
+        // ⌥ opens BESIDE what is showing rather than replacing it — "put this
+        // next to what I am reading", which is the gesture split view exists
+        // for and would otherwise cost splitting first and then opening.
+        //
+        // Read from `NSEvent` rather than a SwiftUI modifier: the declarative
+        // alternative (`modifierKeyAlternate`) is macOS 15 and this targets
+        // 14. Read at the moment of the click, so a modifier held after the
+        // fact cannot change where an earlier click landed.
+        if NSEvent.modifierFlags.contains(.option) {
+            store.openInSecondaryPane(url: row.path)
+        } else {
+            store.open(row)
+        }
     }
 
     /// Create-and-open. The failure path goes through `ops.message` rather than

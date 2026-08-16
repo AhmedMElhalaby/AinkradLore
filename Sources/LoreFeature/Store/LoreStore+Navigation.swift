@@ -59,7 +59,11 @@ extension LoreStore {
         guard tabs.count > Self.warmSessionLimit else { return }
         var overflow = tabs.count - Self.warmSessionLimit
         for session in tabs where overflow > 0 {
-            guard session !== selectedTab,
+            // BOTH panes, not just the focused one. Checking `selectedTab`
+            // alone was correct with one pane and becomes a data-loss shape
+            // with two: it would reclaim the session the other pane is
+            // displaying, out from under a document the user is reading.
+            guard !visibleSessions.contains(where: { $0 === session }),
                   !session.isDirty, !session.conflict, session.lastSaveError == nil
             else { continue }
             session.cancelPendingSave()
@@ -67,50 +71,35 @@ extension LoreStore {
             overflow -= 1
         }
     }
-    public var canGoBack: Bool { (historyIndex ?? 0) > 0 }
-    public var canGoForward: Bool {
-        guard let index = historyIndex else { return false }
-        return index + 1 < history.count
-    }
+    /// Whether the pane has somewhere to go. Forwarded from `PaneState`,
+    /// which owns the arithmetic — see that type for why the history moved off
+    /// the store ahead of split view.
+    public var canGoBack: Bool { focusedPane.canGoBack }
+    public var canGoForward: Bool { focusedPane.canGoForward }
 
-    /// Records a visit, truncating any forward entries.
-    ///
-    /// Truncation is what makes Forward mean something: after going Back and
-    /// then opening something new, the trail you abandoned is not somewhere
-    /// you can return to — the same rule every browser follows, and the
-    /// absence of it is how a forward stack turns into a list of places the
-    /// user has no memory of choosing.
-    ///
-    /// Re-visiting the CURRENT document records nothing: clicking the open
-    /// note in the sidebar is not navigation, and treating it as such fills
-    /// the stack with duplicates that make Back appear broken.
+    /// Records a visit in the pane. The key function is passed in rather than
+    /// reached for, so `PaneState` stays free of the store's canonicalisation
+    /// and can be reasoned about — and tested — on its own.
     func recordVisit(_ url: URL) {
-        let key = Self.pathKey(url)
-        if let index = historyIndex, history.indices.contains(index),
-           Self.pathKey(history[index]) == key {
-            return
-        }
-        if let index = historyIndex, index + 1 < history.count {
-            history.removeSubrange((index + 1)...)
-        }
-        history.append(url)
-        historyIndex = history.count - 1
+        focusedPane.recordVisit(url, key: Self.pathKey)
     }
 
     /// Opens the previously visited document.
     @discardableResult
     public func goBack() -> Bool {
-        guard canGoBack, let index = historyIndex else { return false }
-        historyIndex = index - 1
-        open(url: history[index - 1], recordingHistory: false)
+        guard focusedPane.canGoBack, let index = focusedPane.historyIndex
+        else { return false }
+        focusedPane.historyIndex = index - 1
+        open(url: focusedPane.history[index - 1], recordingHistory: false)
         return true
     }
 
     @discardableResult
     public func goForward() -> Bool {
-        guard canGoForward, let index = historyIndex else { return false }
-        historyIndex = index + 1
-        open(url: history[index + 1], recordingHistory: false)
+        guard focusedPane.canGoForward, let index = focusedPane.historyIndex
+        else { return false }
+        focusedPane.historyIndex = index + 1
+        open(url: focusedPane.history[index + 1], recordingHistory: false)
         return true
     }
 }

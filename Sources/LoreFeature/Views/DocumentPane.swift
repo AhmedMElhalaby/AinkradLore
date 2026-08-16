@@ -258,6 +258,10 @@ struct DocumentPane: View {
             session.engine.makeEditor(
                 EditorContext(theme: theme,
                               editorSettings: store.editorSettings,
+                              headingCompletions: { document, prefix in
+                                  store.headingCompletions(inDocumentNamed: document,
+                                                           matching: prefix)
+                              },
                               createLinkedNote: { name in
                                   // Creates WITHOUT opening: this fires
                                   // mid-sentence, and navigating to the note
@@ -460,45 +464,6 @@ struct DocumentPane: View {
         }
     }
 
-    /// Persistent and non-alarming: this file is open, readable and searchable,
-    /// it simply cannot be written back. A user typing into a document that
-    /// will never save, with no indication, is the failure this prevents.
-    ///
-    /// `.neutral`, not a warning: nothing is wrong and there is nothing to
-    /// fix. The status also picks the icon and colour, which is why these
-    /// three banners no longer name either — see `LoreBanner`.
-    private var readOnlyBanner: some View {
-        LoreBanner(message: "Read-only: this file isn't valid UTF-8, so Lore can't write it "
-                       + "back without destroying data. Edits here won't be saved.",
-                   status: .neutral)
-    }
-
-    /// Three resolutions, all reachable, none destructive by default. The old
-    /// dialog offered only "load from disk" and treated dismissal as
-    /// "overwrite", which meant the safe choice was the one you got by
-    /// accident.
-    private var conflictBanner: some View {
-        LoreBanner(message: "This document changed on disk outside Lore.",
-                   status: .warning) {
-            AinkradButton(title: "Reload from disk", style: .secondary) {
-                try? session.resolveByReloading()
-            }
-            // Labelled to say where editing continues: this tab adopts the copy.
-            AinkradButton(title: "Save my copy & edit it", style: .secondary) {
-                try? session.resolveBySavingCopy()
-            }
-            AinkradButton(title: "Overwrite disk", style: .ghost) {
-                try? session.resolveByOverwriting()
-            }
-        }
-    }
-
-    /// Disk full, permissions, a read-only volume. There is no resolution to
-    /// offer — the only requirement is that it stops being invisible.
-    private func saveErrorBanner(_ error: Error) -> some View {
-        LoreBanner(message: "Couldn't save this document: \(error.localizedDescription)",
-                   status: .danger)
-    }
 }
 
 /// Coalesces a burst of `ctx.onChange` calls (one per keystroke) into a

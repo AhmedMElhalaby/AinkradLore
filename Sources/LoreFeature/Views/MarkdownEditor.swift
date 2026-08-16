@@ -10,6 +10,8 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// alternative was a process-wide current-settings global, which would
     /// have made two Lore instances in one host share a font size.
     let settings: EditorSettings
+    /// See `EditorContext.headingCompletions`.
+    let headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
     /// See `EditorContext.createLinkedNote`.
     let createLinkedNote: (@MainActor (String) -> Bool)?
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
@@ -55,6 +57,7 @@ public struct MarkdownEditor: NSViewRepresentable {
 
     public init(text: Binding<String>, tokens: HostThemeTokens,
                 settings: EditorSettings = .default,
+                headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)? = nil,
                 createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
@@ -68,6 +71,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onSelectionChange: (@MainActor (String, NSRange, Int) -> Void)? = nil,
                 registerMenuActions: (@MainActor (EditorMenuActions) -> Void)? = nil) {
         self._text = text; self.tokens = tokens; self.settings = settings
+        self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
         self.completions = completions; self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
@@ -108,6 +112,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// Nil when the shell offers no create path, which suppresses the
         /// popup's "Create …" row entirely.
         var createLinkedNote: (@MainActor (String) -> Bool)?
+        /// See `EditorContext.headingCompletions`.
+        var headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
 
         /// Kept in sync by `updateNSView`, so changing a setting restyles the
         /// document the user is already looking at rather than only the next
@@ -160,14 +166,21 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// move, because `MarkdownReveal.blocks(in:)` scans the whole string.
         /// See `MarkdownEditorReveal.Index`.
         var revealIndex = MarkdownEditorReveal.Index.empty
-        /// The INDICES of the blocks whose markers are currently revealed. The
-        /// reveal state in full: if a caret move leaves this unchanged there is
-        /// nothing to redraw, which is what keeps arrowing free of styling work.
-        var revealedBlockIndices: Range<Int> = 0..<0
+        /// The source range whose markers are currently revealed, or `nil` when
+        /// none are. The reveal state in full: if a caret move leaves this
+        /// unchanged there is nothing to redraw, which is what keeps arrowing
+        /// free of styling work.
+        ///
+        /// A RANGE rather than the block indices this used to hold, because the
+        /// reveal unit is now the LINE — see `MarkdownReveal.revealedRange`. The
+        /// cost of the change is that moving the caret between two lines of one
+        /// paragraph now flips this where it used to be a no-op; the work that
+        /// buys is one block restyled, not one document.
+        var revealedRange: Range<Int>?
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip
-        /// `revealedBlockIndices` — still forces a full re-apply rather than
+        /// `revealedRange` — still forces a full re-apply rather than
         /// being short-circuited away as "same selection, nothing to do".
         var lastRevealFocus = true
         /// Every `.embed` span's position, source range and owning block, for
@@ -361,122 +374,6 @@ public struct MarkdownEditor: NSViewRepresentable {
         }
 
         // MARK: - Completion
-
-        /// The typed prefix for the current caret, or `nil`.
-        ///
-        /// Runs per keystroke, so it allocates nothing proportional to the
-        /// document: `Range(_:in:)` converts the UTF-16 caret to a
-        /// `String.Index` without copying, and the scan itself stops at the
-        /// start of the current line.
-        private func activePrefix(in tv: NSTextView) -> String? {
-            guard tv.selectedRange().length == 0 else { return nil }
-            let text = tv.string
-            guard let caret = Range(NSRange(location: tv.selectedRange().location, length: 0),
-                                    in: text)?.lowerBound else { return nil }
-            return LinkCompletionContext.activePrefix(in: text, caret: caret)
-        }
-
-        /// Internal for the same cross-file reason as `pendingEdit`: its one
-        /// caller, `textDidChange`, lives in `MarkdownEditorEditPath.swift`.
-        func refreshCompletions() {
-            guard let tv = textView, let completions,
-                  let prefix = activePrefix(in: tv) else {
-                completionPanel.hide(); return
-            }
-            let rows = completions(prefix)
-            let items = Self.completionItems(for: prefix, matches: rows,
-                                             canCreate: createLinkedNote != nil)
-            guard !items.isEmpty else { completionPanel.hide(); return }
-            completionPanel.show(matches: items, tokens: tokens,
-                                 caretRect: caretRect(in: tv), over: tv)
-        }
-
-        /// Scrolling moves the caret on screen but changes nothing about what
-        /// is being completed — so this re-places the panel and never re-queries.
-        private func repositionCompletions() {
-            // Scrolling slides the text out from under a STATIONARY pointer,
-            // so whatever the preview is describing is no longer what the
-            // pointer is over. The completion panel repositions because it
-            // tracks the CARET, which moved with the text; this tracks the
-            // pointer, which did not.
-            if previewPanel.isVisible {
-                hoverTask?.cancel()
-                hoverTask = nil
-                previewPanel.hide()
-            }
-            guard completionPanel.isVisible, let tv = textView else { return }
-            completionPanel.reposition(caretRect: caretRect(in: tv), over: tv)
-        }
-
-        private func caretRect(in tv: NSTextView) -> NSRect {
-            tv.firstRect(forCharacterRange: tv.selectedRange(), actualRange: nil)
-        }
-
-        /// Replaces the typed prefix with a target that resolves back to `row`,
-        /// closes the link, and leaves the caret AFTER the `]]` so typing
-        /// continues in prose.
-        /// The rows the popup offers for a typed prefix.
-        ///
-        /// Pure and `static` so the one rule worth stating — WHEN a create row
-        /// appears — is asserted directly. It appears only when the typed text
-        /// is not already the name of something offered: a "Create «Design»"
-        /// row underneath an existing `Design` invites making a second
-        /// document with the same name, which is the one outcome a vault
-        /// cannot easily undo.
-        static func completionItems(for prefix: String, matches: [IndexRow],
-                                    canCreate: Bool) -> [LinkCompletionItem] {
-            let trimmed = prefix.trimmingCharacters(in: .whitespaces)
-            var items = matches.map { LinkCompletionItem.document($0) }
-            guard canCreate, !trimmed.isEmpty else { return items }
-            let exists = matches.contains { row in
-                let name = row.title.isEmpty ? row.path.lastPathComponent : row.title
-                return name.compare(trimmed, options: .caseInsensitive) == .orderedSame
-            }
-            // LAST, never first: the common case is picking a note that
-            // exists, and a create row at the top is one stray Return away
-            // from a duplicate.
-            if !exists { items.append(.create(trimmed)) }
-            return items
-        }
-
-        /// Handles a picked row.
-        private func accept(_ item: LinkCompletionItem) {
-            switch item {
-            case .document(let row):
-                insert(linkText: linkTarget(row))
-            case .create(let name):
-                // Created BEFORE the text is inserted, so a refused create
-                // (no vault, an invalid name) leaves the document untouched
-                // rather than writing a link to a note that was never made.
-                guard createLinkedNote?(name) == true else {
-                    completionPanel.hide(); return
-                }
-                insert(linkText: name)
-            }
-        }
-
-        private func insert(linkText: String) {
-            guard let tv = textView, let prefix = activePrefix(in: tv) else {
-                completionPanel.hide(); return
-            }
-            let insertion = linkText + "]]"
-            // The `]]` may ALREADY be there: `[` auto-pairs, so typing `[[`
-            // leaves `[[]]` with the caret in the middle. `linkInsertionRange`
-            // absorbs an existing closer into the replaced range, which is what
-            // stops an accepted completion reading `[[Target]]]]`.
-            let range = MarkdownEditing.linkInsertionRange(
-                text: tv.string, caret: tv.selectedRange().location,
-                prefixLength: prefix.utf16.count)
-            // Through `shouldChangeText`/`didChangeText` so the edit is one
-            // undo step and the delegate still fires.
-            if tv.shouldChangeText(in: range, replacementString: insertion) {
-                tv.textStorage?.replaceCharacters(in: range, with: insertion)
-                tv.didChangeText()
-            }
-            tv.setSelectedRange(NSRange(location: range.location + (insertion as NSString).length,
-                                        length: 0))
-            completionPanel.hide()
-        }
 
         // MARK: - Click-to-open
 

@@ -6,6 +6,9 @@ enum MarkdownBlock: Equatable {
     case heading(Int)
     case listItem(depth: Int)
     case blockQuote
+    /// An Obsidian callout. Indented further than a quote, to leave room for
+    /// the icon drawn beside its title as well as the bar.
+    case callout(MarkdownCallout.Kind)
     case codeBlock
 }
 
@@ -130,6 +133,14 @@ enum MarkdownParagraphStyles {
             // Room for the bar drawn in `MarkdownBlockBackgrounds`.
             s.firstLineHeadIndent = theme.listIndentStep
             s.headIndent = theme.listIndentStep
+
+        case .callout:
+            // Wider than a quote: the bar, plus the icon drawn beside the
+            // title. One indent for every line, so the body sits under the
+            // title rather than under the icon.
+            s.firstLineHeadIndent = theme.listIndentStep * 2
+            s.headIndent = theme.listIndentStep * 2
+            s.paragraphSpacing = theme.paragraphSpacing * 0.5
 
         case .codeBlock:
             s.firstLineHeadIndent = theme.listIndentStep * 0.5

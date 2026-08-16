@@ -122,6 +122,7 @@ extension MarkdownEditor {
         // disagree about what a name points at.
         context.coordinator.resolveHoverTarget = resolveEmbedTarget
         context.coordinator.createLinkedNote = createLinkedNote
+        context.coordinator.headingCompletions = headingCompletions
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
@@ -170,6 +171,7 @@ extension MarkdownEditor {
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
         context.coordinator.createLinkedNote = createLinkedNote
+        context.coordinator.headingCompletions = headingCompletions
         context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.writePastedImage = writePastedImage
         context.coordinator.writeDroppedFile = writeDroppedFile

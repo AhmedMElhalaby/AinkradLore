@@ -2,24 +2,6 @@ import AppKit
 import SwiftUI
 import AinkradAppKit
 
-/// The scroll-to-offset entry point `OutlineSection` drives, kept here rather
-/// than in `MarkdownEditor.swift` to leave that file's AppKit wiring alone —
-/// see that file's line-count note.
-extension MarkdownEditor.Coordinator {
-    /// Moves the caret to `offset` (UTF-16, into the editor's text) and
-    /// scrolls it on screen. Clamped rather than guarded: an outline entry
-    /// computed against a slightly stale model (edit landed between parse and
-    /// click) should still land somewhere sane, not be silently dropped.
-    @MainActor func scrollToOffset(_ offset: Int) {
-        guard let tv = textView else { return }
-        let length = (tv.string as NSString).length
-        let clamped = max(0, min(offset, length))
-        let range = NSRange(location: clamped, length: 0)
-        tv.setSelectedRange(range)
-        tv.scrollRangeToVisible(range)
-    }
-}
-
 /// Turns style spans into text attributes.
 ///
 /// Split out of `MarkdownEditor` so that file stays about the editor's AppKit
@@ -29,6 +11,10 @@ extension MarkdownEditor.Coordinator {
 enum MarkdownStyleRenderer {
     static let baseSize: CGFloat = 14
     static var baseFont: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
+    /// The base font at semibold, for a callout's title.
+    static var boldBaseFont: NSFont {
+        .monospacedSystemFont(ofSize: baseSize, weight: .semibold)
+    }
 
     /// How much text on either side of the visible range is styled in viewport
     /// mode. Big enough that a flick of the scroll wheel lands inside
@@ -129,7 +115,12 @@ enum MarkdownStyleRenderer {
     ///
     /// The runs are collected BEFORE any are written: mutating attributes from
     /// inside `enumerateAttribute`'s block mutates the thing being enumerated.
-    private static func composeFont(in r: NSRange, storage: NSTextStorage,
+    /// Internal rather than `private` since the code-highlighting half moved to
+    /// `MarkdownCodeStyling.swift` for the 500-line ceiling — Swift's `private`
+    /// is file-scoped, and comments need italics composed onto the monospaced
+    /// font the same way every other kind composes its traits. Still an
+    /// implementation detail outside this module.
+    static func composeFont(in r: NSRange, storage: NSTextStorage,
                                     _ transform: (NSFont) -> NSFont) {
         var runs: [(NSRange, NSFont)] = []
         storage.enumerateAttribute(.font, in: r) { value, sub, _ in
@@ -144,7 +135,7 @@ enum MarkdownStyleRenderer {
     /// italic only — those are the two the markdown kinds compose. Anything
     /// else (a condensed or expanded face) is not something this renderer sets,
     /// so re-applying it would be inventing state.
-    private static func inheritedTraits(of font: NSFont) -> NSFontTraitMask {
+    static func inheritedTraits(of font: NSFont) -> NSFontTraitMask {
         let traits = NSFontManager.shared.traits(of: font)
         var inherited: NSFontTraitMask = []
         if traits.contains(.boldFontMask) { inherited.insert(.boldFontMask) }
@@ -155,7 +146,7 @@ enum MarkdownStyleRenderer {
     /// `convert` returns the font UNCHANGED when the family has no such face,
     /// so an unavailable monospaced-italic degrades to upright rather than
     /// falling back to a different family and changing the metrics mid-line.
-    private static func applying(_ traits: NSFontTraitMask, to font: NSFont) -> NSFont {
+    static func applying(_ traits: NSFontTraitMask, to font: NSFont) -> NSFont {
         var result = font
         if traits.contains(.boldFontMask) {
             result = NSFontManager.shared.convert(result, toHaveTrait: .boldFontMask)
@@ -237,6 +228,13 @@ enum MarkdownStyleRenderer {
                                  value: MarkdownParagraphStyles.style(for: .codeBlock,
                                                                       theme: theme),
                                  range: (storage.string as NSString).paragraphRange(for: r))
+            // Token colouring BEFORE the language label, so the label — which
+            // sits on the opening fence line and is styled as a label, not as
+            // code — wins where the two overlap.
+            if let language, !language.isEmpty,
+               let grammar = CodeGrammar.named(language) {
+                highlightCode(in: r, grammar: grammar, storage: storage, tokens: tokens)
+            }
             if let language, !language.isEmpty {
                 styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
             }
@@ -280,6 +278,60 @@ enum MarkdownStyleRenderer {
                                  value: MarkdownParagraphStyles.style(for: .blockQuote,
                                                                       theme: theme),
                                  range: (storage.string as NSString).paragraphRange(for: r))
+
+        case .callout(let kind):
+            // NOT the quote's dimmed foreground: a callout is emphasis, and
+            // greying its body would work against the panel drawn behind it.
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.foreground), range: r)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .callout(kind),
+                                                                      theme: theme),
+                                 range: (storage.string as NSString).paragraphRange(for: r))
+
+        case .calloutTitle(let kind):
+            storage.addAttribute(.font, value: MarkdownStyleRenderer.boldBaseFont, range: r)
+            storage.addAttribute(.foregroundColor,
+                                 value: MarkdownBlockBackgrounds.Palette.calloutTint(kind,
+                                                                                     tokens: tokens),
+                                 range: r)
+
+        case .table:
+            // The table itself carries no text styling: its cells are ordinary
+            // prose and style as such. What makes it a table is the alignment
+            // (`MarkdownTableStyling`) and the rule drawn under its header, and
+            // both need the collapse state, so neither can happen here.
+            break
+
+        case .tableHeader:
+            composeFont(in: r, storage: storage) { current in
+                Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
+                              to: current)
+            }
+
+        case .math(let isRendered):
+            // Tinted either way, so an expression reads as mathematics rather
+            // than as prose. When it does NOT render, this tint is the only
+            // thing that happens to it — its `$` and its commands stay visible,
+            // which is the honest presentation of something this editor cannot
+            // draw. See `MarkdownMath`.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentSecondary)
+                                     .withAlphaComponent(isRendered ? 1.0 : 0.85),
+                                 range: r)
+
+        case .mathScript(let isSuperscript):
+            // A real script: smaller, and off the baseline in the right
+            // direction. Both derived from the font actually in place, so a
+            // script inside a heading scales with the heading.
+            composeFont(in: r, storage: storage) { current in
+                NSFont(descriptor: current.fontDescriptor,
+                       size: current.pointSize * 0.72) ?? current
+            }
+            let base = (storage.attribute(.font, at: r.location, effectiveRange: nil)
+                        as? NSFont)?.pointSize ?? baseSize
+            storage.addAttribute(.baselineOffset,
+                                 value: base * (isSuperscript ? 0.45 : -0.22),
+                                 range: r)
 
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
@@ -353,33 +405,6 @@ enum MarkdownStyleRenderer {
         return CGFloat(count) * spaceAdvance
     }
 
-    /// Styles the info string (`swift` in an opening ```` ```swift ```` line)
-    /// as a trailing label on that line, distinct from the block's body.
-    ///
-    /// `CodeBlock.range` covers the opening fence line itself (verified in
-    /// `test_codeBlockSpanRangeIncludesTheOpeningFence`), so the language text
-    /// is real characters already inside `r` — no attachment, no overlay
-    /// drawing, no second pass over the layout manager. The label is found by
-    /// locating the block's first line and searching it for `language`, which
-    /// is safe because CommonMark's info string is exactly that word (an
-    /// identifier, no spaces) immediately after the fence run.
-    private static func styleLanguageLabel(_ language: String, in r: NSRange,
-                                           storage: NSTextStorage, tokens: HostThemeTokens) {
-        let full = storage.string as NSString
-        let limit = NSMaxRange(r)
-        var lineEnd = r.location
-        while lineEnd < limit, full.character(at: lineEnd) != 0x0A { lineEnd += 1 }
-        let fenceLine = NSRange(location: r.location, length: lineEnd - r.location)
-        guard fenceLine.length > 0 else { return }
-        let lineText = full.substring(with: fenceLine)
-        guard let langRange = lineText.range(of: language, options: .backwards) else { return }
-        let nsLangRange = NSRange(langRange, in: lineText)
-        let labelRange = NSRange(location: fenceLine.location + nsLangRange.location,
-                                 length: nsLangRange.length)
-        guard NSMaxRange(labelRange) <= full.length else { return }
-        storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
-        storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
-    }
 
     // MARK: - Collapsing hidden markers
 
@@ -452,4 +477,6 @@ enum MarkdownStyleRenderer {
         let upper = min(length, max(a, b) + viewportMargin)
         return NSRange(location: lower, length: max(0, upper - lower))
     }
+
 }
+

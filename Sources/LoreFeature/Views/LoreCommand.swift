@@ -29,6 +29,7 @@ struct LoreCommand: Identifiable, Hashable {
         case findInDocument, findNext, findPrevious, replaceInDocument
         case goBack, goForward
         case zoomIn, zoomOut, zoomReset
+        case toggleSplit
         case rebuildIndex, toggleShowAllFiles
         case toggleOutline, toggleBacklinks
         case commandPalette, quickOpen
@@ -190,6 +191,13 @@ enum LoreCommands {
         // View
         .init(id: .toggleSidebar, title: "Toggle Sidebar", systemName: "sidebar.leading",
               shortcut: LoreShortcut("\\"), requires: .always, group: .view),
+        // `.document`, not `.always`: splitting starts from what is open, so
+        // with nothing open there is nothing to split on and the command has
+        // no meaning rather than an empty second pane.
+        .init(id: .toggleSplit, title: "Split View",
+              systemName: "rectangle.split.2x1",
+              shortcut: LoreShortcut("\\", option: true), requires: .document,
+              group: .view),
         .init(id: .toggleOutline, title: "Jump to Heading…",
               systemName: "list.bullet.indent",
               shortcut: LoreShortcut("o", shift: true), requires: .document, group: .view),

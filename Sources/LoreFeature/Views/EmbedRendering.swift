@@ -416,7 +416,7 @@ extension MarkdownEditor.Coordinator {
             offset < embedIndex.count ? embedIndex[offset].block : nil
         })
         for block in blocks.sorted() {
-            restyleBlock(block, revealed: revealedBlockIndices.contains(block), in: storage)
+            restyleBlock(block, revealed: revealedRange, in: storage)
         }
         return !blocks.isEmpty
     }

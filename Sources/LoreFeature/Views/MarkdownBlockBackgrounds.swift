@@ -31,6 +31,19 @@ enum MarkdownBlockBackgrounds {
         /// The associated value is what to DRAW, never what the document says —
         /// the source text is untouched, as everywhere else here.
         case listMarker(String)
+        /// A tinted panel plus a coloured bar behind an Obsidian callout, and
+        /// the icon and heading drawn on its first line.
+        ///
+        /// One case rather than three because all four parts share the callout's
+        /// hue and its geometry, and splitting them would mean deriving the same
+        /// rect three times and hoping the answers agreed.
+        ///
+        /// `title` is what to DRAW beside the icon: `nil` when the author wrote
+        /// their own — that text is real, is in the document, and is styled as
+        /// `.calloutTitle` — and the type's name when they did not, since a
+        /// callout whose `[!note]` has collapsed would otherwise show an empty
+        /// heading line.
+        case callout(MarkdownCallout.Kind, title: String?)
     }
 
     /// A stretch of text to decorate. UTF-16, into the view's own string.
@@ -49,11 +62,52 @@ enum MarkdownBlockBackgrounds {
         /// A list marker is quiet foreground too — it is punctuation, not a
         /// control, so it must not read as clickable.
         let listMarker: NSColor
+        /// Kept so a callout's tint can be derived per KIND at draw time.
+        /// Thirteen callout types would otherwise mean thirteen stored colours
+        /// resolved for every document, almost all of them never used.
+        let tokens: HostThemeTokens
 
         init(tokens: HostThemeTokens) {
+            self.tokens = tokens
             codePanel = NSColor(tokens.surfaceElevated).withAlphaComponent(0.55)
             quoteBar = NSColor(tokens.foreground).withAlphaComponent(0.30)
             listMarker = NSColor(tokens.foreground).withAlphaComponent(0.55)
+        }
+
+        /// A callout's colour: its own hue, at a saturation and brightness that
+        /// sit correctly on THIS theme's surface.
+        ///
+        /// The hue is fixed and the rest is derived, which is the whole trade —
+        /// `danger` has to read as red in every theme or it is not saying
+        /// danger, but a red picked for a dark surface glares on a light one.
+        /// Brightness follows the theme's own foreground: a light foreground
+        /// means a dark surface, so the tint is lightened to carry against it.
+        ///
+        /// `.quote` has no colour of its own and falls back to quiet
+        /// foreground, exactly as an ordinary block quote does.
+        static func calloutTint(_ kind: MarkdownCallout.Kind,
+                                tokens: HostThemeTokens) -> NSColor {
+            guard !kind.isNeutral else {
+                return NSColor(tokens.foreground).withAlphaComponent(0.70)
+            }
+            let onDark = isDarkSurface(tokens: tokens)
+            return NSColor(hue: kind.hue / 360,
+                           saturation: onDark ? 0.55 : 0.75,
+                           brightness: onDark ? 0.95 : 0.70,
+                           alpha: 1)
+        }
+
+        /// Whether the editor is painting on a dark surface, judged from the
+        /// FOREGROUND rather than from a theme name: a light foreground implies
+        /// a dark background, and this works for any host theme without the
+        /// tokens having to declare an appearance.
+        static func isDarkSurface(tokens: HostThemeTokens) -> Bool {
+            let foreground = NSColor(tokens.foreground).usingColorSpace(.sRGB)
+            guard let foreground else { return true }
+            let luminance = 0.299 * foreground.redComponent
+                + 0.587 * foreground.greenComponent
+                + 0.114 * foreground.blueComponent
+            return luminance > 0.5
         }
     }
 
@@ -85,6 +139,16 @@ enum MarkdownBlockBackgrounds {
             switch span.kind {
             case .codeBlock: kind = .codePanel
             case .blockQuote: kind = .quoteBar
+            case .callout(let callout):
+                // The heading to draw is decided HERE, where the text is in
+                // hand, rather than at draw time: `draw` runs on every redraw
+                // and must not be re-reading the document to find out whether
+                // the author wrote a title.
+                guard let text, NSMaxRange(r) <= text.length else { return nil }
+                let header = MarkdownCallout.header(ofQuoteAt: span.range, in: text)
+                kind = .callout(callout,
+                                title: header?.titleRange == nil
+                                    ? callout.displayTitle : nil)
             case .marker(of: .listBullet):
                 // NOT clipped to the window: a marker is two or three
                 // characters, so intersecting it would draw half a `10.`. It is
@@ -190,6 +254,12 @@ enum MarkdownBlockBackgrounds {
                                origin: origin, dirtyRect: dirtyRect)
                 continue
             }
+            if case .callout(let kind, let title) = region.kind {
+                drawCallout(kind, title: title, at: region.range, columnX: x,
+                            columnWidth: width, tokens: palette.tokens,
+                            in: textView, origin: origin, dirtyRect: dirtyRect)
+                continue
+            }
             var rect = boundingRect(of: region.range, in: textView)
             guard !rect.isNull, !rect.isEmpty else { continue }
             rect = rect.offsetBy(dx: origin.x, dy: origin.y)
@@ -212,7 +282,7 @@ enum MarkdownBlockBackgrounds {
                 palette.quoteBar.setFill()
                 NSBezierPath(roundedRect: bar, xRadius: barWidth / 2,
                              yRadius: barWidth / 2).fill()
-            case .listMarker:
+            case .listMarker, .callout:
                 break   // handled above, before the rect is taken
             }
         }
@@ -298,5 +368,72 @@ enum MarkdownBlockBackgrounds {
                                         actualCharacterRange: nil)
         guard glyphs.length > 0 else { return .null }
         return manager.boundingRect(forGlyphRange: glyphs, in: container)
+    }
+
+    /// Draws a callout: the tinted panel, the coloured bar, the icon on the
+    /// first line, and — only when the author wrote no title — the type's name.
+    ///
+    /// The icon and the name are DRAWN, never inserted. Inserting them would
+    /// change the document text and with it every offset the index, the link
+    /// graph and the MCP tools hold, which is the rule the whole of this file
+    /// exists to honour.
+    @MainActor
+    private static func drawCallout(_ kind: MarkdownCallout.Kind, title: String?,
+                                    at range: NSRange, columnX x: CGFloat,
+                                    columnWidth width: CGFloat,
+                                    tokens: HostThemeTokens,
+                                    in textView: NSTextView, origin: NSPoint,
+                                    dirtyRect: NSRect) {
+        var rect = boundingRect(of: range, in: textView)
+        guard !rect.isNull, !rect.isEmpty else { return }
+        rect = rect.offsetBy(dx: origin.x, dy: origin.y)
+        let tint = Palette.calloutTint(kind, tokens: tokens)
+
+        let panel = NSRect(x: x, y: rect.minY - 2, width: width, height: rect.height + 4)
+        guard panel.intersects(dirtyRect) else { return }
+        // A wash, not a fill: the body text sits on this, and a callout that
+        // out-shouts its own contents is decoration rather than emphasis.
+        tint.withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
+                     yRadius: cornerRadius).fill()
+        tint.withAlphaComponent(0.85).setFill()
+        NSBezierPath(roundedRect: NSRect(x: x, y: panel.minY, width: barWidth,
+                                         height: panel.height),
+                     xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+
+        // The FIRST LINE's rect, for the icon and the drawn name. Taken from
+        // the first character rather than from the block, whose rect spans
+        // every line in it.
+        let firstCharacter = NSRange(location: range.location,
+                                     length: min(1, range.length))
+        var line = boundingRect(of: firstCharacter, in: textView)
+        guard !line.isNull, line.height > 0 else { return }
+        line = line.offsetBy(dx: origin.x, dy: origin.y)
+
+        let font = MarkdownStyleRenderer.boldBaseFont
+        let iconSize = font.pointSize
+        let iconX = x + barWidth + 6
+        if let icon = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil) {
+            let configured = icon.withSymbolConfiguration(
+                .init(pointSize: iconSize, weight: .semibold)) ?? icon
+            let box = NSRect(x: iconX,
+                             y: line.midY - iconSize / 2,
+                             width: iconSize, height: iconSize)
+            configured.isTemplate = true
+            tint.set()
+            configured.draw(in: box, from: .zero, operation: .sourceOver,
+                            fraction: 1, respectFlipped: true, hints: nil)
+        }
+
+        // The author's own title is real text and is styled as
+        // `.calloutTitle`; only its absence is drawn over.
+        guard let title else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: tint
+        ]
+        let size = (title as NSString).size(withAttributes: attributes)
+        (title as NSString).draw(at: NSPoint(x: iconX + iconSize + 6,
+                                             y: line.midY - size.height / 2),
+                                 withAttributes: attributes)
     }
 }

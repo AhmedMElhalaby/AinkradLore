@@ -23,6 +23,24 @@ struct MarkdownStyleCache {
     /// `*` can turn prose into emphasis. Only a parse settles that.
     private(set) var isStale = false
 
+    /// Whether the last FULL parse saw a link reference definition
+    /// (`[label]: /target`) anywhere in the document.
+    ///
+    /// The one thing that makes a block's meaning depend on text outside it:
+    /// `[label]` styles as a link only because a definition somewhere else says
+    /// so, and a block parsed in isolation cannot see that. `spliceBlock`
+    /// refuses when this is set — see its doc comment.
+    ///
+    /// Deliberately NOT recomputed by `shift`, which would put a document scan
+    /// back on the keystroke path this exists to keep cheap. It therefore
+    /// describes the document as of the last parse, and can be up to one
+    /// debounce out of date: typing the `:` that turns `[label]` into a
+    /// definition leaves the flag false until the parse lands 150 ms later. The
+    /// consequence is bounded — for that window, shortcut links elsewhere in
+    /// the document style as plain text, which is exactly what they looked like
+    /// before the definition was typed.
+    private(set) var hasReferenceDefinitions = false
+
     func describes(_ candidate: String) -> Bool { text == candidate }
 
     /// Refreshes the spans from a real parse — EXCEPT above the hard cap, where
@@ -49,12 +67,18 @@ struct MarkdownStyleCache {
         let spans: [StyleSpan]
         let isOverHardCap: Bool
         let isOverViewportCap: Bool
+        /// See `MarkdownStyleCache.hasReferenceDefinitions`.
+        let hasReferenceDefinitions: Bool
     }
 
     /// The pure, actor-free half of `reparse`. Safe to call from any thread.
     static func derive(_ newText: String) -> Derived {
         guard newText.utf16.count <= MarkdownDocumentModel.stylingHardCap else {
-            return Derived(spans: [], isOverHardCap: true, isOverViewportCap: true)
+            return Derived(spans: [], isOverHardCap: true, isOverViewportCap: true,
+                           // Nothing is styled above the hard cap, so the block
+                           // path is barred anyway; `true` states that without
+                           // paying for a scan of a document this large.
+                           hasReferenceDefinitions: true)
         }
         // `init(body:)`: the editor styles exactly the string it was given,
         // whole. For markdown that string is `note.body` (bound in
@@ -68,7 +92,106 @@ struct MarkdownStyleCache {
         let model = MarkdownDocumentModel(body: newText)
         return Derived(spans: model.styleSpans,
                        isOverHardCap: model.isOverStylingHardCap,
-                       isOverViewportCap: model.isOverStylingViewportCap)
+                       isOverViewportCap: model.isOverStylingViewportCap,
+                       hasReferenceDefinitions: containsReferenceDefinition(newText))
+    }
+
+    /// Whether any line LOOKS like a link reference definition.
+    ///
+    /// Deliberately over-eager, and deliberately not a parse. It is only ever
+    /// read to REFUSE the single-block splice, so a false positive costs the
+    /// document the fast path — the behaviour that shipped before it — while a
+    /// false negative would let a block be styled without the definition it
+    /// depends on. Nothing here can produce a false negative for a real
+    /// definition: CommonMark requires one to begin a line (up to three spaces
+    /// of indent) with `[`, and to have its `]:` on that same line.
+    ///
+    /// Runs once per full parse, alongside a parse that is orders of magnitude
+    /// more expensive than a character scan — never on the keystroke path.
+    static func containsReferenceDefinition(_ text: String) -> Bool {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.drop { $0 == " " || $0 == "\t" }
+            guard trimmed.first == "[" else { continue }
+            // The `]` must be followed immediately by `:` to be a definition;
+            // `[a] : b` is a paragraph.
+            if let close = trimmed.dropFirst().firstIndex(of: "]"),
+               trimmed.index(after: close) < trimmed.endIndex,
+               trimmed[trimmed.index(after: close)] == ":" { return true }
+        }
+        return false
+    }
+
+    /// Spans for ONE block, parsed in ISOLATION and re-based onto the document.
+    ///
+    /// This is what lets a keystroke show the markdown it just typed. The rest
+    /// of the edit path deliberately never parses — it SHIFTS the previous
+    /// spans, which keeps positions right and kinds frozen, so `**bold**` typed
+    /// into a paragraph stayed plain until the debounced parse landed 150 ms
+    /// after the user stopped. Parsing the one block the caret is in costs
+    /// microseconds against the 9–92 ms a whole-document parse costs, and
+    /// answers the question that actually changed.
+    ///
+    /// Correct in isolation only because `MarkdownReveal.blocks` splits on BLANK
+    /// LINES, which is also where CommonMark ends a leaf block: with the two
+    /// exceptions the caller checks for — a span reaching past the block's ends
+    /// (a fence containing a blank line) and a link reference definition
+    /// elsewhere in the document — a blank-line-delimited block parses to the
+    /// same nodes alone as it does in place.
+    ///
+    /// Returns `nil` rather than a wrong answer if any derived span escapes the
+    /// block after re-basing. That cannot happen for a substring parse and is
+    /// checked anyway: this writes into the cache the whole editor renders from,
+    /// and an out-of-block span there would style characters belonging to a
+    /// block nobody is about to re-attribute.
+    static func deriveBlock(of text: String, range: Range<Int>) -> [StyleSpan]? {
+        let ns = text as NSString
+        guard range.lowerBound >= 0, range.upperBound <= ns.length,
+              range.lowerBound < range.upperBound else { return nil }
+        let slice = ns.substring(with: NSRange(location: range.lowerBound,
+                                               length: range.count))
+        let model = MarkdownDocumentModel(body: slice)
+        guard !model.isOverStylingHardCap else { return nil }
+        var out: [StyleSpan] = []
+        out.reserveCapacity(model.styleSpans.count)
+        for span in model.styleSpans {
+            let lower = span.range.lowerBound + range.lowerBound
+            let upper = span.range.upperBound + range.lowerBound
+            guard lower >= range.lowerBound, upper <= range.upperBound,
+                  upper > lower else { return nil }
+            out.append(StyleSpan(range: lower..<upper, kind: span.kind))
+        }
+        return out
+    }
+
+    /// Replaces the spans of one block with freshly parsed ones.
+    ///
+    /// - Parameters:
+    ///   - range: the block, in UTF-16 offsets into the current `text`.
+    ///   - fresh: `deriveBlock`'s answer for that block.
+    ///
+    /// Ordering is rebuilt as "everything starting before the block, then the
+    /// block, then everything starting at or after it", preserving relative
+    /// order inside each part. That is NOT the order a full parse produces —
+    /// `styleSpans` is every AST span followed by every wikilink — but it is
+    /// equivalent where equivalence is observable. Order matters to the renderer
+    /// only between OVERLAPPING spans (a later one overwrites an earlier one's
+    /// attributes) and to `MarkdownListDepth`, whose stack needs list spans in
+    /// document order. Spans in different blocks never overlap, and within a
+    /// block relative order is untouched, so both hold. `MarkdownEditFastPathTests`
+    /// asserts it against a full render rather than taking this on trust.
+    ///
+    /// `isStale` stays as it was: only THIS block has been settled by a parse,
+    /// and every other span in the document is still a shifted guess that the
+    /// debounce must come back for.
+    mutating func spliceBlock(_ range: Range<Int>, with fresh: [StyleSpan]) {
+        var before: [StyleSpan] = []
+        var after: [StyleSpan] = []
+        for span in spans {
+            if span.range.lowerBound < range.lowerBound { before.append(span) }
+            else if span.range.lowerBound >= range.upperBound { after.append(span) }
+            // Anything starting inside the block is dropped: `fresh` replaces it.
+        }
+        spans = before + fresh + after
     }
 
     /// Installs a derivation together with the string it describes.
@@ -82,6 +205,7 @@ struct MarkdownStyleCache {
         spans = derived.spans
         isOverHardCap = derived.isOverHardCap
         isOverViewportCap = derived.isOverViewportCap
+        hasReferenceDefinitions = derived.hasReferenceDefinitions
         isStale = false
     }
 
@@ -119,6 +243,9 @@ struct MarkdownStyleCache {
         spans = []
         isOverHardCap = newText.utf16.count > MarkdownDocumentModel.stylingHardCap
         isOverViewportCap = newText.utf16.count > MarkdownDocumentModel.stylingViewportCap
+        // Conservative until a real parse says otherwise: a provisional cache
+        // has not looked at the document, so it cannot rule a definition out.
+        hasReferenceDefinitions = true
         isStale = true
     }
 

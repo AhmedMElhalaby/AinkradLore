@@ -53,6 +53,10 @@ public final class LoreStore {
 
     /// Canonical path keys of pinned documents — see `LoreStore+Shortcuts`.
     internal var pinnedPaths: Set<String> = []
+    /// One-document outline cache for `[[Doc#…]]` completion — see
+    /// `LoreStore+Headings`.
+    internal var headingCacheKey: String?
+    internal var headingCache: [String] = []
 
     /// The reader's preferences for the writing surface — see `EditorSettings`
     /// for why the editor owns these rather than inheriting them from the host
@@ -316,11 +320,11 @@ public final class LoreStore {
             tab.cancelPendingSave()
         }
         tabs = []
-        selectedTab = nil
         openError = nil
-        // History outlives no vault: its URLs point into the one being closed.
-        history = []
-        historyIndex = nil
+        // The pane goes with the vault: its session and its history both point
+        // into the one being closed. `reset()` keeps that teardown in one
+        // place rather than split across three assignments here.
+        pane.reset()
     }
     func settleForTesting() async { await coordinator.settleForTesting() }
     func handleVaultChange() { coordinator.handleVaultChange() }
@@ -329,106 +333,60 @@ public final class LoreStore {
     // MARK: - Tabs
 
     public internal(set) var tabs: [DocumentSession] = []
-    public internal(set) var selectedTab: DocumentSession?
+
+    /// The single pane Lore shows today — see `PaneState` for why the
+    /// document and its history live in a value rather than as loose
+    /// properties on the store.
+    internal var pane = PaneState()
+
+    /// The second pane, when the view is split. Nil is the ordinary state.
+    ///
+    /// Optional rather than a second always-present `PaneState`: "no split" has
+    /// to be representable, and an empty pane that exists but shows nothing is
+    /// a state every reader downstream would have to keep checking for.
+    internal var secondaryPane: PaneState?
+
+    /// Which pane commands act on.
+    ///
+    /// Never `true` while `secondaryPane` is nil — `closeSecondaryPane` moves
+    /// focus back rather than leaving it pointed at a pane that is gone, which
+    /// is the one way this could quietly send ⌘W to nothing.
+    internal var focusIsSecondary = false
+
+    /// The pane commands act on. Reading is total; writing goes to whichever
+    /// pane has focus.
+    internal var focusedPane: PaneState {
+        get { (focusIsSecondary ? secondaryPane : nil) ?? pane }
+        set {
+            if focusIsSecondary, secondaryPane != nil { secondaryPane = newValue }
+            else { pane = newValue }
+        }
+    }
+
+    /// Every document currently ON SCREEN — one, or two when split.
+    ///
+    /// Used by eviction, which must never reclaim a session a pane is
+    /// showing. A single `selectedTab` check was correct while there was one
+    /// pane and becomes a data-loss shape the moment there are two.
+    internal var visibleSessions: [DocumentSession] {
+        [pane.session, secondaryPane?.session].compactMap { $0 }
+    }
+
+    /// The document on screen in the FOCUSED pane.
+    ///
+    /// Forwards, so every existing caller and every test is untouched: with no
+    /// split, the focused pane is the only pane and this means exactly what it
+    /// always did.
+    public var selectedTab: DocumentSession? {
+        get { focusedPane.session }
+        set { focusedPane.session = newValue }
+    }
     /// Set when the last open attempt failed. The UI renders the fallback
     /// viewer from this rather than silently doing nothing — a file the list
     /// shows must always produce a visible response when clicked.
-    public private(set) var openError: (url: URL, error: Error)?
-
-    public func open(_ row: IndexRow) { open(url: row.path) }
-
-    public func open(url: URL) {
-        open(url: url, recordingHistory: true)
-    }
-
-    /// Opens `url`, optionally without recording the visit.
-    ///
-    /// `recordingHistory: false` is what `goBack()`/`goForward()` use: moving
-    /// through history is not itself a new visit, and recording it would make
-    /// Back push an entry that Forward then has to step over — a stack that
-    /// grows every time you use it and never returns you where you started.
-    func open(url: URL, recordingHistory: Bool) {
-        // Canonical on both sides. Compared raw, opening the already-open
-        // `/tmp/v/a.md` as `/private/tmp/v/a.md` (or via a canonical `row.path`)
-        // produced a SECOND session on the same file, each with its own mtime
-        // baseline and its own debounced autosave racing the other.
-        if let existing = tabs.first(where: { Self.pathKey($0.url) == Self.pathKey(url) }) {
-            touch(existing)
-            selectedTab = existing
-            if recordingHistory { recordVisit(existing.url) }
-            return
-        }
-        do {
-            let session = try DocumentSession.open(url: url, coordinator: coordinator)
-            tabs.append(session)
-            selectedTab = session
-            openError = nil
-            if recordingHistory { recordVisit(session.url) }
-            evictColdSessions()
-        } catch {
-            openError = (url, error)
-        }
-    }
-
-    public func selectTab(_ session: DocumentSession) {
-        touch(session)
-        selectedTab = session
-        recordVisit(session.url)
-    }
-
-    // MARK: - History
-
-    /// Documents visited, oldest first — the back/forward stack.
-    ///
-    /// Replaces the tab strip's job of "get me back to what I was just
-    /// looking at". In a vault, that is almost always a LINEAR trail (follow a
-    /// link, read, come back), which a stack models exactly and a strip models
-    /// only by accident of ordering.
-    public internal(set) var history: [URL] = []
-    /// Where in `history` the open document sits. Nil before anything opens.
-    public internal(set) var historyIndex: Int?
-
-    /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
-    /// 500ms debounce, so a tab closed immediately after a keystroke could
-    /// otherwise lose that edit. A read-only session can never be dirty (see
-    /// `DocumentSession.markChanged`), so this only ever writes a document the
-    /// engine can actually save.
-    ///
-    /// A `false` return means the document still has unsaved work and is
-    /// still open: the tab was NOT removed, its selection was left
-    /// untouched, and the session's own `conflict` / `lastSaveError` flags
-    /// already explain why (a real save failure, or an external change).
-    /// Callers must not assume a `false` return means the tab is gone.
-    /// Pass `force: true` to remove the tab regardless — the user explicitly
-    /// choosing to discard.
-    @discardableResult
-    public func closeTab(_ session: DocumentSession, force: Bool = false) -> Bool {
-        guard let idx = tabs.firstIndex(where: { $0 === session }) else { return false }
-        if session.isDirty && !session.isReadOnly {
-            do {
-                try session.saveNow()
-            } catch {
-                if !force { return false }
-            }
-        }
-        // Past this point the tab IS being removed, on both the normal and the
-        // forced path, so the debounced autosave must be disarmed: it would
-        // otherwise fire into a document nobody owns any more — writing back
-        // edits the user chose to discard, or resurrecting a file a delete is
-        // about to unlink.
-        session.cancelPendingSave()
-        tabs.remove(at: idx)
-        if selectedTab === session {
-            // The most recently used document, which `tabs`' LRU ordering puts
-            // last. This used to pick the closed tab's NEIGHBOUR, which was
-            // right when `tabs` was a visible strip (the eye expects the gap to
-            // close sideways) and is wrong now that it is a cache: adjacency in
-            // a cache is meaningless, and "what I was looking at before this
-            // one" is the only answer a user can predict.
-            selectedTab = tabs.last
-        }
-        return true
-    }
+    /// `internal(set)`: the open path lives in `LoreStore+Sessions.swift` and
+    /// Swift's `private(set)` is file-scoped. Still closed outside the module.
+    public internal(set) var openError: (url: URL, error: Error)?
 
     /// Switching vaults is a teardown of the old one, not just a new root:
     /// tabs, selection and `openError` all point INTO the previous vault, and

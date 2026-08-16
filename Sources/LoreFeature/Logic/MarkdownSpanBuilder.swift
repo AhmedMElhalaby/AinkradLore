@@ -13,6 +13,23 @@ public struct StyleSpan: Equatable, Sendable {
         case wikilink
         case listItem
         case blockQuote
+        /// A block quote that opens with `[!type]` — an Obsidian callout.
+        /// Emitted INSTEAD of `.blockQuote`, not alongside it: the two want
+        /// different decoration (a tinted panel and a coloured bar against a
+        /// grey bar) and emitting both would draw them on top of each other.
+        case callout(MarkdownCallout.Kind)
+        /// A callout's title — the author's own, on the header line.
+        case calloutTitle(MarkdownCallout.Kind)
+        /// A GFM pipe table, whole.
+        case table
+        /// A table's header row, which renders bolder than its body.
+        case tableHeader
+        /// A `$…$` expression. `isRendered` is false when it contains
+        /// something this editor cannot render exactly, in which case the
+        /// source stays visible and is merely tinted — see `MarkdownMath`.
+        case math(isRendered: Bool)
+        /// Script content, raised or lowered.
+        case mathScript(isSuperscript: Bool)
         case checkbox(Bool)
         /// An `![[target]]` embed's TARGET text — same convention as
         /// `.wikilink`'s content span: the brackets (and the leading `!`)
@@ -32,6 +49,31 @@ public struct StyleSpan: Equatable, Sendable {
         /// separately from the content span so Live Preview can collapse the
         /// markers without touching the text they delimit.
         case marker(of: MarkerOwner)
+
+        /// Whether ONE opening marker and ONE closing marker delimit this kind,
+        /// with the content between them.
+        ///
+        /// The reveal rule's one exception, and it lives on the kind rather than in
+        /// `MarkdownReveal` so that adding a kind forces the question to be
+        /// answered here — see `MarkdownReveal.revealedRange`. A span like this that
+        /// crosses a line boundary must reveal WHOLE, or the caret sits inside
+        /// syntax whose other half is hidden.
+        ///
+        /// `blockQuote`, `listItem` and `heading` answer `false`: each of their
+        /// lines carries its own marker, so there is no pair to split, and
+        /// revealing them together is the block-scoped behaviour being replaced.
+        var isDelimitedByASinglePair: Bool {
+            switch self {
+            case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
+                return true
+            case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
+                 .table, .tableHeader, .mathScript, .checkbox, .marker:
+                return false
+            // A `$…$` expression is delimited by ONE pair, so it reveals
+            // whole rather than splitting across a line break.
+            case .math: return true
+            }
+        }
     }
     /// UTF-16 offsets into the EDITOR's full string, frontmatter included.
     /// Not Character offsets — `LinkSpan.targetRange` uses those, and mixing
@@ -105,9 +147,59 @@ extension MarkdownASTCollector {
         descendInto(link)
     }
 
+    /// A GFM pipe table.
+    ///
+    /// swift-markdown parses these, so the AST says WHERE one is; it does not
+    /// say where the `|` separators sit in the source or how wide each column
+    /// must be, and both are needed to render a grid without touching the text.
+    /// `MarkdownTable` measures that from the line, and this turns the answer
+    /// into spans the renderer already knows how to consume: markers collapse,
+    /// content styles.
+    ///
+    /// `descendInto` still runs, so `**bold**` inside a cell styles exactly as
+    /// it would anywhere else.
+    mutating func visitTable(_ table: Table) {
+        if let ns = resolve(table.range) {
+            let range = swiftRange(ns)
+            styleSpans.append(StyleSpan(range: range, kind: .table))
+            if let parsed = MarkdownTable.parse(range: range, in: text) {
+                if let header = parsed.headerRow {
+                    styleSpans.append(StyleSpan(range: header.range, kind: .tableHeader))
+                }
+                // The delimiter row is hidden WHOLE — it is pure notation, and
+                // the rule drawn under the header says what it says.
+                if let delimiter = parsed.delimiterRow {
+                    styleSpans.append(StyleSpan(range: delimiter.range,
+                                                kind: .marker(of: .tableDelimiter)))
+                }
+                for row in parsed.rows {
+                    for pipe in row.pipes {
+                        styleSpans.append(StyleSpan(range: pipe,
+                                                    kind: .marker(of: .tablePipe)))
+                    }
+                }
+            }
+        }
+        descendInto(table)
+    }
+
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
         if let ns = resolve(blockQuote.range) {
-            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .blockQuote))
+            let range = swiftRange(ns)
+            // A quote opening with `[!type]` is a CALLOUT, and takes the
+            // callout kind instead of `.blockQuote` — see that case's comment
+            // for why it is instead of and not as well as.
+            if let header = MarkdownCallout.header(ofQuoteAt: range, in: text) {
+                styleSpans.append(StyleSpan(range: range, kind: .callout(header.kind)))
+                styleSpans.append(StyleSpan(range: header.markerRange,
+                                            kind: .marker(of: .callout)))
+                if let title = header.titleRange {
+                    styleSpans.append(StyleSpan(range: title,
+                                                kind: .calloutTitle(header.kind)))
+                }
+            } else {
+                styleSpans.append(StyleSpan(range: range, kind: .blockQuote))
+            }
             appendMarkers(MarkdownMarkers.linePrefix(">", in: ns, text: text), .blockQuote)
         }
         descendInto(blockQuote)
