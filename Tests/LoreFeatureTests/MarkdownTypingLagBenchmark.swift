@@ -225,11 +225,11 @@ final class MarkdownTypingLagBenchmark: XCTestCase {
                 }
                 average("MarkdownReveal.hiddenMarkers") {
                     _ = MarkdownReveal.hiddenMarkers(spans: spans, selection: selection,
-                                                     blocks: blocks, isFocused: true)
+                                                     text: text, isFocused: true)
                 }
                 average("MarkdownStyleRenderer.collapse") {
                     let hidden = MarkdownReveal.hiddenMarkers(spans: spans, selection: selection,
-                                                             blocks: blocks, isFocused: true)
+                                                             text: text, isFocused: true)
                     MarkdownStyleRenderer.collapse(hidden, in: storage)
                 }
                 average("EmbedGeometry.strongWritingDirection") {

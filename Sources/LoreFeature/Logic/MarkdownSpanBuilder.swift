@@ -32,6 +32,27 @@ public struct StyleSpan: Equatable, Sendable {
         /// separately from the content span so Live Preview can collapse the
         /// markers without touching the text they delimit.
         case marker(of: MarkerOwner)
+
+        /// Whether ONE opening marker and ONE closing marker delimit this kind,
+        /// with the content between them.
+        ///
+        /// The reveal rule's one exception, and it lives on the kind rather than in
+        /// `MarkdownReveal` so that adding a kind forces the question to be
+        /// answered here — see `MarkdownReveal.revealedRange`. A span like this that
+        /// crosses a line boundary must reveal WHOLE, or the caret sits inside
+        /// syntax whose other half is hidden.
+        ///
+        /// `blockQuote`, `listItem` and `heading` answer `false`: each of their
+        /// lines carries its own marker, so there is no pair to split, and
+        /// revealing them together is the block-scoped behaviour being replaced.
+        var isDelimitedByASinglePair: Bool {
+            switch self {
+            case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
+                return true
+            case .heading, .listItem, .blockQuote, .checkbox, .marker:
+                return false
+            }
+        }
     }
     /// UTF-16 offsets into the EDITOR's full string, frontmatter included.
     /// Not Character offsets — `LinkSpan.targetRange` uses those, and mixing

@@ -10,8 +10,80 @@ final class MarkdownRevealTests: XCTestCase {
         let model = MarkdownDocumentModel(body: body)
         return MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                             selection: selection,
-                                            blocks: MarkdownReveal.blocks(in: body),
+                                            text: body,
                                             isFocused: isFocused)
+    }
+
+    // MARK: - The reveal unit is the LINE
+
+    /// THE test for this change. A list with no blank line between its items is
+    /// ONE block, so a block-scoped reveal showed the `- ` marker on every item
+    /// the moment the caret entered any of them. Obsidian — the bar Ahmed set —
+    /// reveals only the line you are on.
+    func test_aCaretInOneListItemRevealsOnlyThatItemsMarker() {
+        let body = "- alpha\n- beta\n- gamma\n"
+        // Precondition: this really is one block, or the test proves nothing.
+        XCTAssertEqual(MarkdownReveal.blocks(in: body).count, 1,
+                       "a list with no blank lines must be a single block, "
+                       + "or this test is not exercising the defect it exists for")
+
+        let caretInBeta = NSRange(location: body.utf16.count / 2, length: 0)
+        let hiddenRanges = hidden(body, selection: caretInBeta)
+        let ns = body as NSString
+        let betaLine = ns.lineRange(for: caretInBeta)
+
+        XCTAssertFalse(hiddenRanges.isEmpty,
+                       "the other two items' markers must still be hidden")
+        for range in hiddenRanges {
+            XCTAssertFalse(range.lowerBound >= betaLine.location
+                           && range.upperBound <= NSMaxRange(betaLine),
+                           "no marker on the caret's own line may be hidden")
+        }
+    }
+
+    /// The mirror: every OTHER line's markers stay hidden while one is revealed.
+    /// Asserted on a paragraph of hard-wrapped prose, the other shape where a
+    /// block holds several lines.
+    func test_revealingOneLineLeavesTheRestOfTheParagraphRendered() {
+        let body = "**one** here\n**two** here\n**three** here\n"
+        XCTAssertEqual(MarkdownReveal.blocks(in: body).count, 1)
+
+        let caretOnFirstLine = NSRange(location: 3, length: 0)
+        let hiddenRanges = hidden(body, selection: caretOnFirstLine)
+        // Two lines' worth of `**` pairs = four markers still collapsed.
+        XCTAssertEqual(hiddenRanges.count, 4,
+                       "lines two and three keep both of their markers hidden")
+        for range in hiddenRanges {
+            XCTAssertGreaterThanOrEqual(range.lowerBound, 13,
+                                        "nothing on the caret's line may be hidden")
+        }
+    }
+
+    /// A fenced code block reveals WHOLE, because its markers are the fence
+    /// lines: a line-scoped rule alone would leave the caret sitting inside a
+    /// block whose delimiters it could neither see nor edit.
+    func test_aCaretInsideAFenceRevealsTheFenceLines() {
+        let body = "intro\n\n```swift\nlet x = 1\nlet y = 2\n```\n\ntail\n"
+        let caretInsideTheCode = NSRange(location: (body as NSString).range(of: "let y").location,
+                                         length: 0)
+        let hiddenRanges = hidden(body, selection: caretInsideTheCode)
+        let fenceStart = (body as NSString).range(of: "```swift").location
+        for range in hiddenRanges {
+            XCTAssertFalse(range.lowerBound >= fenceStart,
+                           "the fence's own markers must be revealed when the caret "
+                           + "is anywhere inside the code block")
+        }
+    }
+
+    /// And the deliberate NON-widening: a block quote spans lines too, but each
+    /// line carries its own `>`, so revealing them all is exactly the defect.
+    func test_aCaretInAQuoteRevealsOnlyItsOwnLinesMarker() {
+        let body = "> first line\n> second line\n> third line\n"
+        XCTAssertEqual(MarkdownReveal.blocks(in: body).count, 1)
+        let caretOnSecond = NSRange(location: (body as NSString).range(of: "second").location,
+                                    length: 0)
+        XCTAssertFalse(hidden(body, selection: caretOnSecond).isEmpty,
+                       "the other quote lines' markers stay hidden")
     }
 
     /// An unfocused editor KEEPS its selection, so the block the caret was
@@ -126,9 +198,18 @@ final class MarkdownRevealTests: XCTestCase {
         XCTAssertTrue(hidden(body, selection: NSRange(location: 3, length: 0)).isEmpty)
     }
 
-    /// Reveal is BLOCK-scoped, not line-scoped. Obsidian reveals per line,
-    /// which splits a multi-line emphasis span mid-word and looks broken.
-    func test_revealIsBlockScopedSoAMultiLineSpanRevealsWholly() {
+    /// A span delimited by a SINGLE marker pair reveals wholly, even across a
+    /// line break.
+    ///
+    /// This test used to be named `test_revealIsBlockScoped…` and its comment
+    /// read "Obsidian reveals per line, which splits a multi-line emphasis span
+    /// mid-word and looks broken". The concern was right; the remedy — making
+    /// EVERY construct reveal by block — was too coarse, and is what showed all
+    /// five markers of a list when the caret entered one item. Reveal is now
+    /// line-scoped and widens over single-pair spans specifically, so the
+    /// guarantee this test protects is unchanged while the collateral damage is
+    /// gone. See `StyleSpan.Kind.isDelimitedByASinglePair`.
+    func test_aMultiLineSpanRevealsWholly() {
         let body = "**bold\nacross lines**\n\nother"
         // Caret on the FIRST line of the span; the marker on the SECOND line
         // must reveal too.
@@ -180,9 +261,9 @@ final class MarkdownRevealTests: XCTestCase {
         XCTAssertEqual(MarkdownReveal.blocks(in: body).count, 2)
     }
 
-    /// The block-scoped multi-line reveal guarantee holds in a CRLF document:
-    /// the CRLF analogue of test_revealIsBlockScopedSoAMultiLineSpanRevealsWholly.
-    func test_revealIsBlockScopedAcrossACRLFLineBreak() {
+    /// The multi-line reveal guarantee holds in a CRLF document too: the CRLF
+    /// analogue of `test_aMultiLineSpanRevealsWholly`.
+    func test_aMultiLineSpanRevealsWhollyAcrossACRLFLineBreak() {
         let body = "**bold\r\nacross lines**\r\n\r\nother"
         // Caret on the FIRST line of the span; the marker on the SECOND line
         // must reveal too, because CRLF must not fracture the block.
@@ -282,7 +363,7 @@ extension MarkdownRevealTests {
             MarkdownStyleRenderer.collapse(
                 MarkdownReveal.hiddenMarkers(spans: model.styleSpans,
                                              selection: NSRange(location: caret, length: 0),
-                                             blocks: blocks, isFocused: true),
+                                             text: body, isFocused: true),
                 in: storage)
             return (storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?
                 .pointSize ?? -1

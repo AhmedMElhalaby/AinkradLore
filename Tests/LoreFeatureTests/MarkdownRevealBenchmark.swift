@@ -27,7 +27,7 @@ final class MarkdownRevealBenchmark: XCTestCase {
         for location in stride(from: 0, to: 20_000, by: 500) {
             _ = MarkdownReveal.hiddenMarkers(spans: spans,
                                              selection: NSRange(location: location, length: 0),
-                                             blocks: blocks, isFocused: true)
+                                             text: body, isFocused: true)
         }
         XCTAssertEqual(MarkdownParseCounter.count, 0,
                        "caret movement must never trigger a parse")
@@ -105,14 +105,14 @@ final class EditorPerformanceBenchmark: XCTestCase {
             coordinator.restyledBlockCount = 0
 
             var crossings = 0
-            var previous = coordinator.revealedBlockIndices
+            var previous = coordinator.revealedRange
             // Stride of ONE, so a move can cross at most one boundary and the
             // "two blocks per crossing" bound is exact rather than amortised.
             for location in stride(from: 0, to: 6_000, by: 1) {
                 tv.setSelectedRange(NSRange(location: location, length: 0))
                 coordinator.revealForSelectionChange()
-                if coordinator.revealedBlockIndices != previous { crossings += 1 }
-                previous = coordinator.revealedBlockIndices
+                if coordinator.revealedRange != previous { crossings += 1 }
+                previous = coordinator.revealedRange
             }
 
             XCTAssertGreaterThan(crossings, 10, "the sweep must actually cross boundaries")
@@ -123,6 +123,14 @@ final class EditorPerformanceBenchmark: XCTestCase {
             // Two blocks per crossing: the one leaving reveal and the one
             // entering it. The bound is a CONSTANT multiple of the number of
             // crossings, and independent of the document's length.
+            //
+            // `crossings` counts REVEAL changes, which since the move to a
+            // line-scoped reveal means every line the caret enters rather than
+            // every block. There are far more of them, and the per-crossing
+            // bound is unchanged and is the thing that matters: the union of
+            // the blocks the reveal left and entered is one block when the
+            // caret moved within a block, two when it crossed a boundary.
+            // Never a function of the document's length.
             XCTAssertLessThanOrEqual(coordinator.restyledBlockCount, crossings * 2,
                                      "a crossing may re-attribute at most the two blocks "
                                      + "whose reveal state flipped")

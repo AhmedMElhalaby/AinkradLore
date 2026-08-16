@@ -207,7 +207,7 @@ final class MarkdownEditFastPathTests: XCTestCase {
                                      forceFullRender: false)
         let full = try dumpAfterEdit(insert: "", at: found.location, deleting: 5,
                                      forceFullRender: true)
-        XCTAssertEqual(fast.dump, full.dump)
+        assertSameAttributes(fast.dump, full.dump, site: "a deletion")
     }
 
     /// The `toRestyle` symmetric-difference branch, which every other
@@ -238,21 +238,25 @@ final class MarkdownEditFastPathTests: XCTestCase {
             })?.lowerBound,
             "the fixture must contain a prose block that is not the first")
 
-        // FAST: place the caret exactly on the boundary, confirm reveal really
-        // does span two blocks, then type.
+        // FAST: place the caret exactly on the boundary, then type.
+        //
+        // This used to assert that the caret revealed BOTH adjacent blocks and
+        // then narrowed to one. That widening rule belonged to block-scoped
+        // reveal and is gone: the unit is now the LINE, and a caret at a block
+        // boundary sits on exactly one of them. What the test is really for
+        // survives unchanged — an edit at a boundary must leave the same
+        // attributes as a full render — and the branch it exercises is still
+        // exercised, because the revealed range moves across the edit and the
+        // block it left has to be re-collapsed.
         let (fast, fastView) = makeEditor(text)
         let fastStorage = try XCTUnwrap(fastView.textStorage)
         fastView.setSelectedRange(NSRange(location: boundary, length: 0))
-        XCTAssertEqual(fast.revealedBlockIndices.count, 2,
-                       "a caret on a block boundary must reveal both adjacent blocks, "
-                       + "or this test is not exercising the branch it exists for")
-        let was = fast.revealedBlockIndices
+        let was = fast.revealedRange
+        XCTAssertNotNil(was, "a focused editor with a caret must reveal something")
         fastView.insertText("x", replacementRange: NSRange(location: boundary, length: 0))
         XCTAssertTrue(fast.lastEditTookFastPath)
-        XCTAssertEqual(fast.revealedBlockIndices.count, 1,
-                       "moving off the boundary must narrow the revealed range")
-        XCTAssertNotEqual(fast.revealedBlockIndices, was,
-                          "and the symmetric difference must therefore be non-empty")
+        XCTAssertNotEqual(fast.revealedRange, was,
+                          "typing at a boundary must move the revealed range")
 
         // FULL: the same edit, then a whole-document render on top.
         let (full, fullView) = makeEditor(text)

@@ -349,27 +349,30 @@ extension MarkdownEditor.Coordinator {
             ?? .leftToRight
         // Reveal, computed the way a FULL render computes it — from the live
         // selection and focus against the fresh blocks — rather than read from
-        // `revealedBlockIndices`. That field is maintained by the caret path,
+        // `revealedRange`. That field is maintained by the caret path,
         // and during an edit AppKit posts its selection change against the
         // PRE-edit block list, so trusting it here collapsed the markers of the
         // very block being typed in: the first version of this method showed
         // `**bold**` with its asterisks hidden while the caret sat inside them,
         // which the equivalence test caught immediately.
         let focused = isTextViewFocused
-        let was = revealedBlockIndices
-        let now = focused
-            ? MarkdownEditorReveal.revealedBlockIndices(fresh, selection: tv.selectedRange())
-            : 0..<0
+        let was = revealedRange
+        let now = MarkdownReveal.revealedRange(in: tv.string,
+                                               selection: tv.selectedRange(),
+                                               spans: styleCache.spans,
+                                               isFocused: focused)
         lastRevealFocus = focused
-        revealedBlockIndices = now
-        // The block that changed, plus any whose reveal state flipped — the
-        // same symmetric difference the caret path uses. Block COUNT is
+        revealedRange = now
+        // The block that changed, plus every block the reveal moved out of or
+        // into — the same union the caret path takes, and for the same reason:
+        // a line-scoped reveal can move within one block. Block COUNT is
         // unchanged (checked above), so indices from before the edit are still
         // comparable with these.
-        var toRestyle = Set(now).symmetricDifference(Set(was))
+        var toRestyle = MarkdownEditorReveal.blockIndices(touching: was, in: fresh)
+        toRestyle.formUnion(MarkdownEditorReveal.blockIndices(touching: now, in: fresh))
         toRestyle.insert(block)
         for index in toRestyle.sorted() {
-            restyleBlock(index, revealed: now.contains(index), in: storage)
+            restyleBlock(index, revealed: now, in: storage)
         }
         // Keeps `revealedEmbedSpans` in step, exactly as the caret path does,
         // so the next caret move compares against the truth.

@@ -166,14 +166,21 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// move, because `MarkdownReveal.blocks(in:)` scans the whole string.
         /// See `MarkdownEditorReveal.Index`.
         var revealIndex = MarkdownEditorReveal.Index.empty
-        /// The INDICES of the blocks whose markers are currently revealed. The
-        /// reveal state in full: if a caret move leaves this unchanged there is
-        /// nothing to redraw, which is what keeps arrowing free of styling work.
-        var revealedBlockIndices: Range<Int> = 0..<0
+        /// The source range whose markers are currently revealed, or `nil` when
+        /// none are. The reveal state in full: if a caret move leaves this
+        /// unchanged there is nothing to redraw, which is what keeps arrowing
+        /// free of styling work.
+        ///
+        /// A RANGE rather than the block indices this used to hold, because the
+        /// reveal unit is now the LINE — see `MarkdownReveal.revealedRange`. The
+        /// cost of the change is that moving the caret between two lines of one
+        /// paragraph now flips this where it used to be a no-op; the work that
+        /// buys is one block restyled, not one document.
+        var revealedRange: Range<Int>?
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip
-        /// `revealedBlockIndices` — still forces a full re-apply rather than
+        /// `revealedRange` — still forces a full re-apply rather than
         /// being short-circuited away as "same selection, nothing to do".
         var lastRevealFocus = true
         /// Every `.embed` span's position, source range and owning block, for

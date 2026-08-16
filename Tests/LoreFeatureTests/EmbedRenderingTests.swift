@@ -449,19 +449,28 @@ final class EmbedRevealTests: XCTestCase {
         let text = "![[diagram.png]]\nTrailing line.\n"
         let (coordinator, tv) = makeEditor(text) { _ in imageURL }
         withExtendedLifetime(coordinator) {
-            // Start with the caret at the very end — outside the embed.
-            tv.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            // Start at offset 0 — the embed's own line, but OUTSIDE its span,
+            // which `currentlyRevealedEmbedSpans` tests by strict overlap.
+            //
+            // The caret used to start at the end of the document, one line
+            // down. That was a valid "no block flip" then and is not now: the
+            // reveal unit is the LINE, so crossing to another line flips it and
+            // the move would go through the ordinary path, leaving I6
+            // unexercised. Staying on one line keeps the reveal range fixed
+            // while the EMBED's reveal changes, which is exactly the shape this
+            // test exists for.
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
             coordinator.applyStyles()
             XCTAssertEqual(tv.embedImages.count, 1,
-                           "precondition: the embed renders while the caret is elsewhere")
-            let blocksBefore = coordinator.revealedBlockIndices
+                           "precondition: the embed renders while the caret is outside it")
+            let revealedBefore = coordinator.revealedRange
 
             // Move INTO the embed's own range. No text change, no keystroke.
             tv.setSelectedRange(NSRange(location: 5, length: 0))
             coordinator.revealForSelectionChange()
 
-            XCTAssertEqual(coordinator.revealedBlockIndices, blocksBefore,
-                           "precondition: this move must not be a block flip, "
+            XCTAssertEqual(coordinator.revealedRange, revealedBefore,
+                           "precondition: this move must not flip the revealed range, "
                            + "or the test is not exercising I6")
             XCTAssertTrue(tv.embedImages.isEmpty,
                           "an embed whose range the caret entered must un-render "
