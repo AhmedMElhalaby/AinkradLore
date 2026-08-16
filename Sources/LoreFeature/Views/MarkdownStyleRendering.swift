@@ -29,6 +29,10 @@ extension MarkdownEditor.Coordinator {
 enum MarkdownStyleRenderer {
     static let baseSize: CGFloat = 14
     static var baseFont: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
+    /// The base font at semibold, for a callout's title.
+    static var boldBaseFont: NSFont {
+        .monospacedSystemFont(ofSize: baseSize, weight: .semibold)
+    }
 
     /// How much text on either side of the visible range is styled in viewport
     /// mode. Big enough that a flick of the scroll wheel lands inside
@@ -280,6 +284,22 @@ enum MarkdownStyleRenderer {
                                  value: MarkdownParagraphStyles.style(for: .blockQuote,
                                                                       theme: theme),
                                  range: (storage.string as NSString).paragraphRange(for: r))
+
+        case .callout(let kind):
+            // NOT the quote's dimmed foreground: a callout is emphasis, and
+            // greying its body would work against the panel drawn behind it.
+            storage.addAttribute(.foregroundColor, value: NSColor(tokens.foreground), range: r)
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.style(for: .callout(kind),
+                                                                      theme: theme),
+                                 range: (storage.string as NSString).paragraphRange(for: r))
+
+        case .calloutTitle(let kind):
+            storage.addAttribute(.font, value: MarkdownStyleRenderer.boldBaseFont, range: r)
+            storage.addAttribute(.foregroundColor,
+                                 value: MarkdownBlockBackgrounds.Palette.calloutTint(kind,
+                                                                                     tokens: tokens),
+                                 range: r)
 
         case .checkbox:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)

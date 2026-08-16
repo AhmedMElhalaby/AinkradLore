@@ -13,6 +13,13 @@ public struct StyleSpan: Equatable, Sendable {
         case wikilink
         case listItem
         case blockQuote
+        /// A block quote that opens with `[!type]` — an Obsidian callout.
+        /// Emitted INSTEAD of `.blockQuote`, not alongside it: the two want
+        /// different decoration (a tinted panel and a coloured bar against a
+        /// grey bar) and emitting both would draw them on top of each other.
+        case callout(MarkdownCallout.Kind)
+        /// A callout's title — the author's own, on the header line.
+        case calloutTitle(MarkdownCallout.Kind)
         case checkbox(Bool)
         /// An `![[target]]` embed's TARGET text — same convention as
         /// `.wikilink`'s content span: the brackets (and the leading `!`)
@@ -49,7 +56,8 @@ public struct StyleSpan: Equatable, Sendable {
             switch self {
             case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
-            case .heading, .listItem, .blockQuote, .checkbox, .marker:
+            case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
+                 .checkbox, .marker:
                 return false
             }
         }
@@ -128,7 +136,21 @@ extension MarkdownASTCollector {
 
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
         if let ns = resolve(blockQuote.range) {
-            styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .blockQuote))
+            let range = swiftRange(ns)
+            // A quote opening with `[!type]` is a CALLOUT, and takes the
+            // callout kind instead of `.blockQuote` — see that case's comment
+            // for why it is instead of and not as well as.
+            if let header = MarkdownCallout.header(ofQuoteAt: range, in: text) {
+                styleSpans.append(StyleSpan(range: range, kind: .callout(header.kind)))
+                styleSpans.append(StyleSpan(range: header.markerRange,
+                                            kind: .marker(of: .callout)))
+                if let title = header.titleRange {
+                    styleSpans.append(StyleSpan(range: title,
+                                                kind: .calloutTitle(header.kind)))
+                }
+            } else {
+                styleSpans.append(StyleSpan(range: range, kind: .blockQuote))
+            }
             appendMarkers(MarkdownMarkers.linePrefix(">", in: ns, text: text), .blockQuote)
         }
         descendInto(blockQuote)

@@ -6,6 +6,9 @@ import Foundation
 /// inside a `Kind`.
 public enum MarkerOwner: Equatable, Sendable {
     case heading, strong, emphasis, inlineCode, codeFence, link, wikilink, blockQuote, listBullet
+    /// A callout's `[!type]` header, which collapses like any other syntax
+    /// so the rendered block shows a title rather than its own declaration.
+    case callout
 }
 
 /// Marker ranges derived from a content span's ALREADY-RESOLVED source range.

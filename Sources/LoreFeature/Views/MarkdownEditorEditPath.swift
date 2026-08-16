@@ -337,11 +337,54 @@ extension MarkdownEditor.Coordinator {
         // and it is paid on that keystroke alone.
         if existing != blockSpans {
             styleCache.spliceBlock(blockRange, with: blockSpans)
-            revealIndex = MarkdownEditorReveal.index(blocks: fresh, spans: styleCache.spans)
+            // Wide spans INCREMENTALLY, never by rescanning the document.
+            // `MarkdownReveal.wideSpans` runs `rangeOfCharacter` per single-pair
+            // span and MEASURED 3.75 ms over the 5,000-line fixture — a whole
+            // frame, on the keystroke path, to rediscover facts about blocks
+            // the edit could not have touched.
+            //
+            // Only the edited block's spans were replaced, so only its wide
+            // spans can differ. The rest are shifted, exactly as the
+            // non-splice branch shifts them and by the same rule.
+            let limit = (tv.string as NSString).length
+            let outside = revealIndex.wideSpans.compactMap { span -> Range<Int>? in
+                let moved = movedOffset(span.lowerBound, start: edit.range.location,
+                                        delta: delta, limit: limit)
+                    ..< movedOffset(span.upperBound, start: edit.range.location,
+                                    delta: delta, limit: limit)
+                // Dropped if it belongs to the block just respliced; that
+                // block's wide spans are recomputed from its fresh parse below.
+                guard moved.lowerBound < blockRange.lowerBound
+                        || moved.lowerBound >= blockRange.upperBound else { return nil }
+                return moved.lowerBound < moved.upperBound ? moved : nil
+            }
+            revealIndex = MarkdownEditorReveal.index(
+                blocks: fresh, spans: styleCache.spans,
+                wideSpans: outside + MarkdownReveal.wideSpans(in: tv.string,
+                                                              spans: blockSpans))
         } else {
+            // The buckets and the wide spans are both carried over, but for
+            // different reasons. The buckets describe POSITIONS in the span
+            // array, which the splice did not change. The wide spans describe
+            // OFFSETS, which the edit did move — so they are shifted by the
+            // same rule `MarkdownStyleCache.shift` applies to the spans they
+            // came from, rather than recomputed, which would put an O(spans)
+            // scan back on the keystroke.
+            //
+            // Sound because check 3 already barred this edit from containing a
+            // line terminator or a fence character in either direction: it
+            // cannot have made a span cross a line, or stop crossing one, so
+            // the SET is unchanged and only its offsets move.
+            let limit = (tv.string as NSString).length
             revealIndex = MarkdownEditorReveal.Index(
                 blocks: fresh, spansByBlock: revealIndex.spansByBlock,
-                depths: MarkdownListDepth.depths(of: styleCache.spans))
+                depths: MarkdownListDepth.depths(of: styleCache.spans),
+                wideSpans: revealIndex.wideSpans.map { span in
+                    movedOffset(span.lowerBound, start: edit.range.location,
+                                delta: delta, limit: limit)
+                        ..< movedOffset(span.upperBound, start: edit.range.location,
+                                        delta: delta, limit: limit)
+                })
         }
         revealIndexBuilds += 1
         rebuildEmbedIndex()
@@ -359,7 +402,7 @@ extension MarkdownEditor.Coordinator {
         let was = revealedRange
         let now = MarkdownReveal.revealedRange(in: tv.string,
                                                selection: tv.selectedRange(),
-                                               spans: styleCache.spans,
+                                               wideSpans: revealIndex.wideSpans,
                                                isFocused: focused)
         lastRevealFocus = focused
         revealedRange = now

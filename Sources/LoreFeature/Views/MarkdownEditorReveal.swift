@@ -76,14 +76,19 @@ enum MarkdownEditorReveal {
         let spansByBlock: [[Int]]
         /// Nesting depth per span, aligned by index. See `MarkdownListDepth`.
         let depths: [Int]
+        /// The single-pair spans that cross a line — all the caret path needs
+        /// to compute reveal. See `MarkdownReveal.wideSpans`, which explains
+        /// why this is cached rather than derived per caret move.
+        let wideSpans: [Range<Int>]
 
-        static let empty = Index(blocks: [], spansByBlock: [], depths: [])
+        static let empty = Index(blocks: [], spansByBlock: [], depths: [], wideSpans: [])
     }
 
     /// Builds the index for `text` and `spans`. O(text) once, on a text change
     /// — never on a caret move.
     static func index(text: String, spans: [StyleSpan]) -> Index {
-        index(blocks: MarkdownReveal.blocks(in: text), spans: spans)
+        index(blocks: MarkdownReveal.blocks(in: text), spans: spans,
+              wideSpans: MarkdownReveal.wideSpans(in: text, spans: spans))
     }
 
     /// The same, for a caller that has ALREADY segmented the text.
@@ -92,14 +97,16 @@ enum MarkdownEditorReveal {
     /// segmentation did not move (`renderStylesForEdit`, check 4); having it
     /// then call `index(text:spans:)` would scan the document a second time for
     /// an answer it is holding.
-    static func index(blocks: [Range<Int>], spans: [StyleSpan]) -> Index {
+    static func index(blocks: [Range<Int>], spans: [StyleSpan],
+                      wideSpans: [Range<Int>]) -> Index {
         var buckets = [[Int]](repeating: [], count: blocks.count)
         for (position, span) in spans.enumerated() {
             guard let block = blockIndex(of: span.range.lowerBound, in: blocks) else { continue }
             buckets[block].append(position)
         }
         return Index(blocks: blocks, spansByBlock: buckets,
-                     depths: MarkdownListDepth.depths(of: spans))
+                     depths: MarkdownListDepth.depths(of: spans),
+                     wideSpans: wideSpans)
     }
 
     /// The block containing `offset`, by binary search. Blocks are sorted and
@@ -394,8 +401,12 @@ extension MarkdownEditor.Coordinator {
             renderStyles(forcedFocus: focused)
             return
         }
+        // The CACHED wide spans, not the whole span array: this is the caret
+        // path, and scanning every span here is what made an arrow key cost a
+        // function of the document's length.
         let now = MarkdownReveal.revealedRange(in: tv.string, selection: selection,
-                                               spans: styleCache.spans, isFocused: focused)
+                                               wideSpans: revealIndex.wideSpans,
+                                               isFocused: focused)
         let was = revealedRange
         guard now != was else {
             // NOT a block flip — but an embed's reveal is a SPAN-level

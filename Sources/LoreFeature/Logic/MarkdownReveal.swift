@@ -91,8 +91,42 @@ enum MarkdownReveal {
     /// last on stayed revealed and kept showing its syntax to a reader who was
     /// no longer editing. Reveal exists to let you edit the markers you are
     /// standing in; standing in them requires focus.
+    /// The single-pair spans that actually CROSS a line, which are the only
+    /// ones `revealedRange` can ever widen over.
+    ///
+    /// Derived once per text change and cached on `MarkdownEditorReveal.Index`,
+    /// because the alternative is what the first version of this did: scan
+    /// every span in the document, twice, on every caret move. MEASURED at
+    /// 1,000 lines and 2,184 spans that cost 3.2 ms per keystroke — it turned a
+    /// 4.25 ms keystroke into 7.47 ms — and it scaled with the DOCUMENT, which
+    /// is exactly the property the caret path is supposed not to have.
+    ///
+    /// Almost always empty: a span delimited by one marker pair that also spans
+    /// a line break is a fenced code block, or prose someone hard-wrapped in
+    /// the middle of an emphasis run.
+    static func wideSpans(in text: String, spans: [StyleSpan]) -> [Range<Int>] {
+        let ns = text as NSString
+        return spans.compactMap { span in
+            guard span.kind.isDelimitedByASinglePair,
+                  span.range.lowerBound >= 0, span.range.upperBound <= ns.length,
+                  span.range.lowerBound < span.range.upperBound else { return nil }
+            let range = NSRange(location: span.range.lowerBound, length: span.range.count)
+            // A span inside one line can never widen past that line, so it
+            // cannot affect the answer and does not need to be carried.
+            let hasBreak = ns.rangeOfCharacter(from: .newlines, options: [], range: range)
+            return hasBreak.location == NSNotFound ? nil : span.range
+        }
+    }
+
     static func revealedRange(in text: String, selection: NSRange,
                               spans: [StyleSpan], isFocused: Bool) -> Range<Int>? {
+        revealedRange(in: text, selection: selection,
+                      wideSpans: wideSpans(in: text, spans: spans), isFocused: isFocused)
+    }
+
+    /// The same, for a caller holding the cached `wideSpans` — the caret path.
+    static func revealedRange(in text: String, selection: NSRange,
+                              wideSpans: [Range<Int>], isFocused: Bool) -> Range<Int>? {
         guard isFocused else { return nil }
         let ns = text as NSString
         guard ns.length > 0 else { return nil }
@@ -108,20 +142,19 @@ enum MarkdownReveal {
         // it settles, because these nest — `**bold with `code` inside**` —
         // and widening over the inner one can bring the outer one into scope.
         // Bounded by the span count and in practice one or two passes.
-        var widened = true
+        var widened = !wideSpans.isEmpty
         while widened {
             widened = false
-            for span in spans where span.kind.isDelimitedByASinglePair {
+            for span in wideSpans {
                 // STRICT overlap. An inclusive test treats a span that merely
                 // ABUTS the line's end as overlapping it, so the caret on line
                 // one of `**a**\n**b**` widened over line two's span and
                 // revealed it as well — the block-scoped behaviour creeping
                 // back in through the exception. Caught by
                 // `test_revealingOneLineLeavesTheRestOfTheParagraphRendered`.
-                guard span.range.lowerBound < upper && lower < span.range.upperBound
-                else { continue }
-                if span.range.lowerBound < lower { lower = span.range.lowerBound; widened = true }
-                if span.range.upperBound > upper { upper = span.range.upperBound; widened = true }
+                guard span.lowerBound < upper && lower < span.upperBound else { continue }
+                if span.lowerBound < lower { lower = span.lowerBound; widened = true }
+                if span.upperBound > upper { upper = span.upperBound; widened = true }
             }
         }
         return lower..<upper
