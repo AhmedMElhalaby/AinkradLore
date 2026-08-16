@@ -99,6 +99,57 @@ final class MarkdownTableTests: XCTestCase {
                       "the delimiter row must be collapsed")
     }
 
+    // MARK: - Column alignment markers
+
+    func test_delimiterColonsSetTheColumnAlignment() throws {
+        let table = try XCTUnwrap(parse("| a | b | c | d |\n|:--|--:|:-:|---|\n| e | f | g | h |\n"))
+        XCTAssertEqual(table.columnAlignments, [.left, .right, .center, .left])
+    }
+
+    func test_aTableWithNoColonsIsAllLeft() throws {
+        let table = try XCTUnwrap(parse("| a | b |\n|---|---|\n| c | d |\n"))
+        XCTAssertEqual(table.columnAlignments, [.left, .left])
+    }
+
+    /// A RIGHT-aligned column's cells must end at the same x, which is the
+    /// whole point of asking for one. Measured on screen, like the alignment
+    /// test below and for the same reason.
+    @MainActor
+    func test_aRightAlignedColumnEndsFlush() throws {
+        let body = "intro\n\n| n | qty |\n|---|--:|\n| a | 3 |\n| b | 1200 |\n"
+        let (coordinator, tv) = editor(body)
+        try withExtendedLifetime(coordinator) {
+            let ns = body as NSString
+            func end(of cell: String) -> CGFloat {
+                let range = ns.range(of: cell)
+                XCTAssertNotEqual(range.location, NSNotFound, "fixture must contain \(cell)")
+                let rect = tv.firstRect(forCharacterRange: range, actualRange: nil)
+                XCTAssertGreaterThan(rect.width, 0, "\(cell) must have been laid out")
+                return rect.maxX
+            }
+            XCTAssertEqual(end(of: "3"), end(of: "1200"), accuracy: 1.0,
+                           "a right-aligned column's cells must share a trailing edge")
+        }
+    }
+
+    /// And a LEFT column in the same table still starts flush, so honouring one
+    /// column's colon does not disturb its neighbour.
+    @MainActor
+    func test_alignmentIsPerColumn() throws {
+        let body = "intro\n\n| n | qty |\n|---|--:|\n| a | 3 |\n| bbb | 1200 |\n"
+        let (coordinator, tv) = editor(body)
+        try withExtendedLifetime(coordinator) {
+            let ns = body as NSString
+            func start(of cell: String) -> CGFloat {
+                let range = ns.range(of: cell)
+                XCTAssertNotEqual(range.location, NSNotFound)
+                return tv.firstRect(forCharacterRange: range, actualRange: nil).minX
+            }
+            XCTAssertEqual(start(of: "a |"), start(of: "bbb |"), accuracy: 1.0,
+                           "the left column keeps its leading edge")
+        }
+    }
+
     // MARK: - Alignment, measured on screen
 
     /// Windows are retained for the length of the test, and the view is laid

@@ -32,11 +32,20 @@ struct MarkdownTable: Equatable {
         let range: Range<Int>
     }
 
+    /// How a column's cells sit inside their width, from the colons on the
+    /// delimiter row: `|:--|` left, `|--:|` right, `|:-:|` centred.
+    enum Alignment: Equatable {
+        case left, center, right
+    }
+
     let rows: [Row]
     /// The `|---|:--:|` line, which carries no content and is hidden whole.
     let delimiterRow: Row?
     /// Width in characters of each column: the widest cell in it.
     let columnWidths: [Int]
+    /// One entry per column, defaulting to `.left` — GFM's own default, and
+    /// the answer for a table whose delimiter row carries no colons at all.
+    let columnAlignments: [Alignment]
     /// The header row, which is the first one. `nil` for a malformed table
     /// with no rows at all.
     var headerRow: Row? { rows.first }
@@ -86,7 +95,14 @@ struct MarkdownTable: Equatable {
                 widths[column] = max(widths[column], cell.width)
             }
         }
-        return MarkdownTable(rows: content, delimiterRow: delimiter, columnWidths: widths)
+        var alignments = [Alignment](repeating: .left, count: columns)
+        if let delimiter {
+            for (column, cell) in delimiter.cells.enumerated() where column < columns {
+                alignments[column] = alignment(ofDelimiterCell: cell.range, in: text)
+            }
+        }
+        return MarkdownTable(rows: content, delimiterRow: delimiter,
+                             columnWidths: widths, columnAlignments: alignments)
     }
 
     /// Splits one line into cells and pipes.
@@ -127,6 +143,24 @@ struct MarkdownTable: Equatable {
         }
         if let last = cells.last, last.width == 0, cells.count > 0 { cells.removeLast() }
         return Row(cells: cells, pipes: pipes, range: line)
+    }
+
+    /// Which way a delimiter cell's colons point.
+    ///
+    /// Read from the SOURCE rather than taken from swift-markdown's
+    /// `Table.columnAlignments`, because this type is consumed by the styling
+    /// layer, which holds text and no AST — and because the two must agree
+    /// about column INDICES, which only the same split can guarantee.
+    private static func alignment(ofDelimiterCell range: Range<Int>,
+                                  in text: NSString) -> Alignment {
+        guard range.lowerBound < range.upperBound else { return .left }
+        let leading = text.character(at: range.lowerBound) == 0x3A
+        let trailing = text.character(at: range.upperBound - 1) == 0x3A
+        switch (leading, trailing) {
+        case (true, true): return .center
+        case (false, true): return .right
+        default: return .left
+        }
     }
 
     /// Whether a cell is a delimiter cell: optional colons around a run of at
