@@ -184,6 +184,11 @@ public struct MarkdownDocumentModel: Sendable {
     /// unlike the line scanner this replaces.
     public let outline: [OutlineEntry]
 
+    /// The non-AST syntaxes, from the SAME pass that produced the code
+    /// regions. A second scan here would be a second parse, which is exactly
+    /// the disagreement this type exists to remove.
+    public let extensionSpans: [MarkdownExtensions.Span]
+
     /// Wikilink spans, derived on demand rather than in `init`.
     ///
     /// On demand because `LinkParser` — the one scanner that knows a `[[link]]`
@@ -314,9 +319,20 @@ public struct MarkdownDocumentModel: Sendable {
         self.codeRegions = collector.regions
         self.astStyleSpans = collector.styleSpans
         self.outline = collector.outline
-        self.allKindsIndex = CodeRegionIndex(regions: collector.regions, kinds: nil)
+        let allKindsIndex = CodeRegionIndex(regions: collector.regions, kinds: nil)
+        self.allKindsIndex = allKindsIndex
         self.linkSuppressionIndex = CodeRegionIndex(regions: collector.regions,
                                                     kinds: Self.linkSuppressingKinds)
+
+        // Masked = code regions plus math expressions, from THIS same pass —
+        // a second scan here would be a second parse. Computed via
+        // `MarkdownMath.spans` directly, not `self.mathSpans`: `self` is not
+        // fully initialized until `extensionSpans` itself is assigned.
+        let codeRanges = collector.regions.map { Range($0.range)! }
+        let text = fullText as NSString
+        let mathRanges = MarkdownMath.spans(in: text, isSuppressed: { allKindsIndex.contains($0) })
+            .map(\.range)
+        self.extensionSpans = MarkdownExtensions.scan(text, masked: codeRanges + mathRanges)
     }
 
     /// True if `offset` is inside ANY code region. Semantics unchanged: callers
