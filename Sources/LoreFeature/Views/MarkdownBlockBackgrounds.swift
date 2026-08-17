@@ -55,6 +55,13 @@ enum MarkdownBlockBackgrounds {
         /// has always decided this the same way, from geometry, which
         /// self-corrects because the geometry IS the reveal state.
         case callout(MarkdownCallout.Kind, title: String?, marker: NSRange)
+        /// A drawn math expression, laid out. Painted only while its source is
+        /// COLLAPSED — measured at draw time, never stored, for the reason the
+        /// callout case above spells out.
+        case math(MathBox)
+        /// A pipe table drawn as a real grid, with per-cell wrapping. Painted
+        /// only while its source is COLLAPSED, measured at draw time.
+        case table(TableBox, marker: NSRange)
     }
 
     /// A stretch of text to decorate. UTF-16, into the view's own string.
@@ -73,6 +80,10 @@ enum MarkdownBlockBackgrounds {
         /// A list marker is quiet foreground too — it is punctuation, not a
         /// control, so it must not read as clickable.
         let listMarker: NSColor
+        /// The colour a drawn expression is painted in — the same tint the
+        /// `.math` span puts on an expression shown as source, so the two
+        /// presentations of mathematics agree with each other.
+        let mathTint: NSColor
         /// Kept so a callout's tint can be derived per KIND at draw time.
         /// Thirteen callout types would otherwise mean thirteen stored colours
         /// resolved for every document, almost all of them never used.
@@ -83,6 +94,7 @@ enum MarkdownBlockBackgrounds {
             codePanel = NSColor(tokens.surfaceElevated).withAlphaComponent(0.55)
             quoteBar = NSColor(tokens.foreground).withAlphaComponent(0.30)
             listMarker = NSColor(tokens.foreground).withAlphaComponent(0.55)
+            mathTint = NSColor(tokens.accentSecondary)
         }
 
         /// A callout's colour: its own hue, at a saturation and brightness that
@@ -249,6 +261,24 @@ enum MarkdownBlockBackgrounds {
     /// by three orders of magnitude.
     static let collapsedMarkerWidth: CGFloat = 2
 
+    /// The gap between the bar and a callout's icon, and between the icon and
+    /// the text.
+    static let calloutIconGap: CGFloat = 6
+
+    /// How far a callout's text is indented: exactly the room its decoration
+    /// occupies — the bar, a gap, the icon, a gap.
+    ///
+    /// ONE definition, read by both the paragraph indent
+    /// (`MarkdownParagraphStyles`) and the drawing below, because they are two
+    /// answers to the same question and were previously computed apart. The
+    /// indent was `listIndentStep * 2` = 44 pt against decoration needing 29,
+    /// so a callout carried 15 pt of dead space — invisible while the icon
+    /// covered it, and an obvious empty gutter the moment the caret revealed
+    /// the source and the icon stopped being drawn (2026-08-17, image 9).
+    nonisolated static var calloutTextIndent: CGFloat {
+        barWidth + calloutIconGap + MarkdownStyleRenderer.baseSize + calloutIconGap
+    }
+
     /// Paints `regions` into the current context, behind `textView`'s text.
     ///
     /// Called from `drawBackground(in:)`, so the text is drawn on top of
@@ -268,6 +298,25 @@ enum MarkdownBlockBackgrounds {
                 drawListMarker(glyph, at: region.range, columnX: x,
                                palette: palette, in: textView,
                                origin: origin, dirtyRect: dirtyRect)
+                continue
+            }
+            if case .table(let box, let marker) = region.kind {
+                if MarkdownMathStyling.drawsExpression(at: marker, in: textView) {
+                    MarkdownTableStyling.draw(box, tint: palette.listMarker,
+                                              rule: palette.quoteBar, in: textView,
+                                              origin: origin, dirtyRect: dirtyRect)
+                }
+                continue
+            }
+            if case .math(let box) = region.kind {
+                // The same geometry question as the callout heading: a visible
+                // source means the caret is in the expression, and the drawn
+                // form must not be painted over the top of it.
+                if MarkdownMathStyling.drawsExpression(at: region.range, in: textView) {
+                    MarkdownMathStyling.draw(box, at: region.range,
+                                             tint: palette.mathTint, in: textView,
+                                             origin: origin, dirtyRect: dirtyRect)
+                }
                 continue
             }
             if case .callout(let kind, let title, let marker) = region.kind {
@@ -304,7 +353,7 @@ enum MarkdownBlockBackgrounds {
                 palette.quoteBar.setFill()
                 NSBezierPath(roundedRect: bar, xRadius: barWidth / 2,
                              yRadius: barWidth / 2).fill()
-            case .listMarker, .callout:
+            case .listMarker, .callout, .math, .table:
                 break   // handled above, before the rect is taken
             }
         }
@@ -359,7 +408,10 @@ enum MarkdownBlockBackgrounds {
     /// that property is touched ONLY when `textLayoutManager` is already nil,
     /// which means the view is TextKit 1 and there is nothing left to downgrade.
     @MainActor
-    private static func boundingRect(of range: NSRange, in textView: NSTextView) -> NSRect {
+    /// Internal rather than private since `MarkdownMathStyling` places a drawn
+    /// expression from the same rect this returns — one source of geometry, so
+    /// the decoration and the text cannot disagree about where a run is.
+    static func boundingRect(of range: NSRange, in textView: NSTextView) -> NSRect {
         if let layout = textView.textLayoutManager,
            let content = layout.textContentManager {
             let document = content.documentRange
@@ -404,74 +456,5 @@ enum MarkdownBlockBackgrounds {
         let rect = boundingRect(of: marker, in: textView)
         guard !rect.isNull else { return true }
         return rect.width < collapsedMarkerWidth
-    }
-
-    /// Draws a callout: the tinted panel, the coloured bar, the icon on the
-    /// first line, and — only when the author wrote no title — the type's name.
-    ///
-    /// The icon and the name are DRAWN, never inserted. Inserting them would
-    /// change the document text and with it every offset the index, the link
-    /// graph and the MCP tools hold, which is the rule the whole of this file
-    /// exists to honour.
-    @MainActor
-    private static func drawCallout(_ kind: MarkdownCallout.Kind, title: String?,
-                                    drawsIcon: Bool,
-                                    at range: NSRange, columnX x: CGFloat,
-                                    columnWidth width: CGFloat,
-                                    tokens: HostThemeTokens,
-                                    in textView: NSTextView, origin: NSPoint,
-                                    dirtyRect: NSRect) {
-        var rect = boundingRect(of: range, in: textView)
-        guard !rect.isNull, !rect.isEmpty else { return }
-        rect = rect.offsetBy(dx: origin.x, dy: origin.y)
-        let tint = Palette.calloutTint(kind, tokens: tokens)
-
-        let panel = NSRect(x: x, y: rect.minY - 2, width: width, height: rect.height + 4)
-        guard panel.intersects(dirtyRect) else { return }
-        // A wash, not a fill: the body text sits on this, and a callout that
-        // out-shouts its own contents is decoration rather than emphasis.
-        tint.withAlphaComponent(0.10).setFill()
-        NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
-                     yRadius: cornerRadius).fill()
-        tint.withAlphaComponent(0.85).setFill()
-        NSBezierPath(roundedRect: NSRect(x: x, y: panel.minY, width: barWidth,
-                                         height: panel.height),
-                     xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
-
-        // The FIRST LINE's rect, for the icon and the drawn name. Taken from
-        // the first character rather than from the block, whose rect spans
-        // every line in it.
-        let firstCharacter = NSRange(location: range.location,
-                                     length: min(1, range.length))
-        var line = boundingRect(of: firstCharacter, in: textView)
-        guard !line.isNull, line.height > 0 else { return }
-        line = line.offsetBy(dx: origin.x, dy: origin.y)
-
-        let font = MarkdownStyleRenderer.boldBaseFont
-        let iconSize = font.pointSize
-        let iconX = x + barWidth + 6
-        if drawsIcon,
-           let icon = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil) {
-            let configured = icon.withSymbolConfiguration(
-                .init(pointSize: iconSize, weight: .semibold)) ?? icon
-            let box = NSRect(x: iconX,
-                             y: line.midY - iconSize / 2,
-                             width: iconSize, height: iconSize)
-            configured.isTemplate = true
-            tint.set()
-            configured.draw(in: box, from: .zero, operation: .sourceOver,
-                            fraction: 1, respectFlipped: true, hints: nil)
-        }
-
-        // The author's own title is real text and is styled as
-        // `.calloutTitle`; only its absence is drawn over.
-        guard let title else { return }
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: tint
-        ]
-        let size = (title as NSString).size(withAttributes: attributes)
-        (title as NSString).draw(at: NSPoint(x: iconX + iconSize + 6,
-                                             y: line.midY - size.height / 2),
-                                 withAttributes: attributes)
     }
 }

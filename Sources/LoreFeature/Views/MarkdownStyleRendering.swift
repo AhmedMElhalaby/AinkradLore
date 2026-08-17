@@ -9,7 +9,11 @@ import AinkradAppKit
 /// appearance, which Task 9 will keep changing.
 @MainActor
 enum MarkdownStyleRenderer {
-    static let baseSize: CGFloat = 14
+    /// `nonisolated` so the paragraph styles — which are computed off the main
+    /// actor — can size a callout's indent from the SAME number the drawing
+    /// uses. An immutable `CGFloat` is safe to read from anywhere; the point is
+    /// that there is exactly one of it.
+    nonisolated static let baseSize: CGFloat = 14
     static var baseFont: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
     /// The base font at semibold, for a callout's title.
     static var boldBaseFont: NSFont {
@@ -317,20 +321,6 @@ enum MarkdownStyleRenderer {
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.accentSecondary)
                                      .withAlphaComponent(isRendered ? 1.0 : 0.85),
-                                 range: r)
-
-        case .mathScript(let isSuperscript):
-            // A real script: smaller, and off the baseline in the right
-            // direction. Both derived from the font actually in place, so a
-            // script inside a heading scales with the heading.
-            composeFont(in: r, storage: storage) { current in
-                NSFont(descriptor: current.fontDescriptor,
-                       size: current.pointSize * 0.72) ?? current
-            }
-            let base = (storage.attribute(.font, at: r.location, effectiveRange: nil)
-                        as? NSFont)?.pointSize ?? baseSize
-            storage.addAttribute(.baselineOffset,
-                                 value: base * (isSuperscript ? 0.45 : -0.22),
                                  range: r)
 
         case .checkbox:

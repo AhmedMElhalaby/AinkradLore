@@ -432,14 +432,16 @@ extension MarkdownEditor.Coordinator {
         // Keeps `revealedEmbedSpans` in step, exactly as the caret path does,
         // so the next caret move compares against the truth.
         revealEmbedsForSelectionChange(in: storage)
-        if let linkView = tv as? LinkTextView {
-            linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
-            linkView.blockBackgrounds =
-                MarkdownBlockBackgrounds.regions(for: styleCache.spans,
-                                                 length: storage.length,
-                                                 limitedTo: nil,
-                                                 in: storage.string as NSString)
+        // A table's rows reserve their drawn heights, so an edit inside one has
+        // to re-measure the grid before the decoration is rebuilt from it.
+        if styleCache.spans.contains(where: { if case .table = $0.kind { return true }
+                                              return false }) {
+            tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
+                                                        revealed: revealedRange,
+                                                        maxWidth: textColumnWidth(of: tv),
+                                                        in: storage)
         }
+        refreshBlockBackgrounds(in: storage, window: nil)
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
         renderedSnapshot = (tv.string, tokens)

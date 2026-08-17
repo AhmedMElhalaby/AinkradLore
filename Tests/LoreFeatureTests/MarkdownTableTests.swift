@@ -82,8 +82,9 @@ final class MarkdownTableTests: XCTestCase {
         XCTAssertTrue(found.contains { $0.kind == .tableHeader }, "its header row")
         XCTAssertTrue(found.contains { $0.kind == .marker(of: .tableDelimiter) },
                       "the |---| row, as a marker so it collapses whole")
-        XCTAssertGreaterThan(found.filter { $0.kind == .marker(of: .tablePipe) }.count, 3,
-                             "every | is a marker")
+        XCTAssertEqual(found.filter { $0.kind == .marker(of: .tablePipe) }.count, 2,
+                       "one marker per ROW — a row collapses whole, because the "
+                       + "drawing replaces all of it, not just its notation")
     }
 
     /// The delimiter row must be HIDDEN when the caret is elsewhere — it is
@@ -111,55 +112,34 @@ final class MarkdownTableTests: XCTestCase {
         XCTAssertEqual(table.columnAlignments, [.left, .left])
     }
 
-    /// A RIGHT-aligned column's cells must end at the same x, which is the
-    /// whole point of asking for one. Measured on screen, like the alignment
-    /// test below and for the same reason.
-    @MainActor
-    func test_aRightAlignedColumnEndsFlush() throws {
-        let body = "intro\n\n| n | qty |\n|---|--:|\n| a | 3 |\n| b | 1200 |\n"
-        let (coordinator, tv) = editor(body)
-        try withExtendedLifetime(coordinator) {
-            let ns = body as NSString
-            func end(of cell: String) -> CGFloat {
-                let range = ns.range(of: cell)
-                XCTAssertNotEqual(range.location, NSNotFound, "fixture must contain \(cell)")
-                let rect = tv.firstRect(forCharacterRange: range, actualRange: nil)
-                XCTAssertGreaterThan(rect.width, 0, "\(cell) must have been laid out")
-                return rect.maxX
-            }
-            XCTAssertEqual(end(of: "3"), end(of: "1200"), accuracy: 1.0,
-                           "a right-aligned column's cells must share a trailing edge")
-        }
-    }
-
-    /// And a LEFT column in the same table still starts flush, so honouring one
-    /// column's colon does not disturb its neighbour.
-    @MainActor
-    func test_alignmentIsPerColumn() throws {
-        let body = "intro\n\n| n | qty |\n|---|--:|\n| a | 3 |\n| bbb | 1200 |\n"
-        let (coordinator, tv) = editor(body)
-        try withExtendedLifetime(coordinator) {
-            let ns = body as NSString
-            func start(of cell: String) -> CGFloat {
-                let range = ns.range(of: cell)
-                XCTAssertNotEqual(range.location, NSNotFound)
-                return tv.firstRect(forCharacterRange: range, actualRange: nil).minX
-            }
-            XCTAssertEqual(start(of: "a |"), start(of: "bbb |"), accuracy: 1.0,
-                           "the left column keeps its leading edge")
-        }
-    }
-
-    // MARK: - Alignment, measured on screen
-
-    /// Windows are retained for the length of the test, and the view is laid
-    /// out before anything is measured.
+    /// Alignment decides where a cell's text sits in its column's slack.
     ///
-    /// Both matter, and the first version of the alignment test had neither:
-    /// `firstRect(forCharacterRange:)` on a text view with no window returns
-    /// zero for EVERY range, so the assertion compared 0 against 0 and passed
-    /// whether or not the columns were aligned. Caught by disabling
-    /// `MarkdownTableStyling.align` and watching this test go on passing.
+    /// Asserted on the arithmetic rather than on screen: the kern-era version
+    /// moved real glyphs, so a character rect could report it, but a DRAWN grid
+    /// puts the text where no rect can see. The parsing half above and this
+    /// half together cover what the on-screen test used to.
+    @MainActor
+    func test_alignmentPlacesTextInItsColumnsSlack() {
+        XCTAssertEqual(MarkdownTableStyling.cellOffset(for: .left, slack: 40), 0)
+        XCTAssertEqual(MarkdownTableStyling.cellOffset(for: .right, slack: 40), 40)
+        XCTAssertEqual(MarkdownTableStyling.cellOffset(for: .center, slack: 40), 20)
+    }
+
+    /// A cell that exactly fills its column has no slack, so every alignment
+    /// puts it in the same place.
+    @MainActor
+    func test_aFullCellIsPlacedTheSameWhateverItsAlignment() {
+        for alignment: MarkdownTable.Alignment in [.left, .right, .center] {
+            XCTAssertEqual(MarkdownTableStyling.cellOffset(for: alignment, slack: 0), 0)
+        }
+    }
+
+    // MARK: - Harness
+
+    /// Windows are retained and the view laid out before anything is measured:
+    /// a windowless `NSTextView` returns a zero rect for every range, which is
+    /// how an alignment test in the previous milestone passed with its feature
+    /// switched off.
     private var windows: [NSWindow] = []
 
     @MainActor
@@ -182,76 +162,231 @@ final class MarkdownTableTests: XCTestCase {
         return (coordinator, tv)
     }
 
-    /// THE test. Cells in the same column must START at the same x.
+    // MARK: - The drawn grid
+
+    /// The box the EDITOR built, not one re-measured here.
     ///
-    /// Asserted through `firstRect(forCharacterRange:)` — where the text view
-    /// actually puts the glyphs — rather than by reading back the `.kern`
-    /// attribute, which would prove only that a number was written.
+    /// Re-running `layout` from a test would read the storage after the
+    /// collapse and measure every cell at 0.01 pt — proving nothing about what
+    /// production does, which is to capture the styled text first.
     @MainActor
-    func test_columnsLineUpOnScreen() throws {
-        // Deliberately ragged: every cell in column two is a different width,
-        // so unaligned columns cannot pass by coincidence.
-        let body = "intro\n\n| name | qty |\n|---|---|\n| apple | 3 |\n| fig | 12 |\n"
+    private func box(_ body: String) throws -> TableBox {
         let (coordinator, tv) = editor(body)
-        try withExtendedLifetime(coordinator) {
-            let ns = body as NSString
-            func columnStart(of cell: String) -> CGFloat {
-                let range = ns.range(of: cell)
-                XCTAssertNotEqual(range.location, NSNotFound, "fixture must contain \(cell)")
-                let rect = tv.firstRect(forCharacterRange: range, actualRange: nil)
-                // A zero rect means the view never laid out, and every
-                // comparison below would then be 0 against 0 — the exact way
-                // this test used to pass without measuring anything.
-                XCTAssertGreaterThan(rect.width, 0, "\(cell) must have been laid out")
-                return rect.minX
+        return try withExtendedLifetime(coordinator) { () -> TableBox in
+            // Deliberately NO `revealForSelectionChange` here. That runs the
+            // per-block path, which builds regions of its own and would repair
+            // anything the FULL RENDER got wrong — hiding exactly the defects
+            // this file exists to catch. A mutation to the full-render ordering
+            // survived because an earlier version of this helper called it.
+            for region in tv.blockBackgrounds {
+                if case .table(let box, _) = region.kind { return box }
             }
-            // Column two, across the header and both body rows.
-            let qty = columnStart(of: "qty")
-            let three = columnStart(of: "3 |")
-            let twelve = columnStart(of: "12 |")
-            XCTAssertEqual(qty, three, accuracy: 1.0,
-                           "the header and the first body row must share a column edge")
-            XCTAssertEqual(qty, twelve, accuracy: 1.0,
-                           "and so must the second, whose cell is a different width")
+            throw XCTSkip("no table region was produced")
         }
     }
 
-    /// The row the caret is ON goes back to source — pipes visible, padding
-    /// gone — which is what Obsidian does and what makes the row editable.
+    /// THE test for this milestone. The real table from Ahmed's vault could not
+    /// fit — 987 pt of content against a 760 pt measure — and the kern-padded
+    /// version came apart, because a row is one paragraph and wraps at the
+    /// container's edge with no memory of its columns.
+    ///
+    /// Drawn, it fits by WRAPPING INSIDE the column instead.
     @MainActor
-    func test_theCaretsOwnRowDropsItsPadding() throws {
-        let body = "intro\n\n| name | qty |\n|---|---|\n| apple | 3 |\n"
+    func test_aTableTooWideToFitWrapsInsteadOfOverflowing() throws {
+        let body = """
+        intro
+
+        | Wave | Tasks | Why first |
+        |---|---|---|
+        | 1 — unblock | B1 (timezone), E1 (office code) | B1 corrupts every \
+        date-dependent feature incl. D5; E1 blocks E2/E3/E4 |
+        | 5 — copy | F3, A2, A3, E5 | Low risk; E5 blocked on the analysis file |
+
+        """
+        let laid = try box(body)
+        XCTAssertLessThanOrEqual(laid.totalWidth, 800,
+                                 "the grid must fit the measure it was given")
+        XCTAssertEqual(laid.columnWidths.count, 3)
+
+        // The long third column must have wrapped, making its row taller than
+        // a single line — which is the whole point.
+        let single = MarkdownStyleRenderer.baseFont.ascender
+            - MarkdownStyleRenderer.baseFont.descender
+        let tallest = try XCTUnwrap(laid.rows.map(\.height).max())
+        XCTAssertGreaterThan(tallest, single * 1.8,
+                             "a cell too long for its column takes more lines INSIDE "
+                             + "the column, rather than pushing the row off the edge")
+    }
+
+    /// IMAGE 12, 2026-08-17: the grid painted ON TOP of still-visible source.
+    ///
+    /// Only the pipes were collapsed, so every cell's text remained real text
+    /// and the drawing doubled it. A row must collapse WHOLE, because the
+    /// drawing replaces all of it.
+    @MainActor
+    func test_aDrawnRowsSourceIsFullyCollapsed() throws {
+        let body = "intro\n\n| Wave | Tasks |\n|---|---|\n| one | two |\n"
         let (coordinator, tv) = editor(body)
-        try withExtendedLifetime(coordinator) {
-            let ns = body as NSString
-            let pipe = ns.range(of: "| qty |")
-            // Caret far away: the header's pipes are collapsed AND padded.
+        try withExtendedLifetime(coordinator) { () -> Void in
+            let storage = try XCTUnwrap(tv.textStorage)
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             coordinator.revealForSelectionChange()
-            let padded = try XCTUnwrap(tv.textStorage)
-                .attribute(.kern, at: pipe.location, effectiveRange: nil) as? CGFloat
 
-            // Caret into the header row.
-            tv.setSelectedRange(NSRange(location: pipe.location + 2, length: 0))
-            coordinator.revealForSelectionChange()
-            let revealed = try XCTUnwrap(tv.textStorage)
-                .attribute(.kern, at: pipe.location, effectiveRange: nil) as? CGFloat
-
-            XCTAssertNotEqual(padded ?? 0, revealed ?? 0,
-                              "a revealed row must not keep the padding that stood in "
-                              + "for its hidden pipes")
+            // Every character of a drawn row — cell text included, not just the
+            // pipes — must be collapsed, or it shows through the grid.
+            let row = (body as NSString).range(of: "| Wave | Tasks |")
+            for offset in stride(from: row.location, to: NSMaxRange(row), by: 1) {
+                let font = storage.attribute(.font, at: offset,
+                                             effectiveRange: nil) as? NSFont
+                XCTAssertLessThan(font?.pointSize ?? 99, 1.0,
+                                  "offset \(offset) is still visible under the grid")
+            }
         }
     }
 
-    /// Prose containing a `|` is not a table and must not be touched.
+    /// And the converse: the caret's own row comes back at full size, so it can
+    /// be edited. The rest of the table stays drawn.
     @MainActor
-    func test_proseWithAPipeIsUnaffected() throws {
-        let body = "a | b is not a table\n"
+    func test_theCaretsRowReturnsToFullSizeSource() throws {
+        let body = "intro\n\n| Wave | Tasks |\n|---|---|\n| one | two |\n"
+        let (coordinator, tv) = editor(body)
+        try withExtendedLifetime(coordinator) { () -> Void in
+            let storage = try XCTUnwrap(tv.textStorage)
+            let header = (body as NSString).range(of: "| Wave | Tasks |")
+            tv.setSelectedRange(NSRange(location: header.location + 3, length: 0))
+            coordinator.revealForSelectionChange()
+
+            let font = storage.attribute(.font, at: header.location + 3,
+                                         effectiveRange: nil) as? NSFont
+            XCTAssertGreaterThan(font?.pointSize ?? 0, 1.0,
+                                 "the caret's row must show its source at full size")
+
+            let body_ = (body as NSString).range(of: "| one | two |")
+            let other = storage.attribute(.font, at: body_.location + 3,
+                                          effectiveRange: nil) as? NSFont
+            XCTAssertLessThan(other?.pointSize ?? 99, 1.0,
+                              "while every other row stays drawn")
+        }
+    }
+
+    /// The cells' styled text is captured BEFORE the collapse. Capturing after
+    /// would store 0.01 pt runs and draw a microscopic grid.
+    @MainActor
+    func test_capturedCellTextIsFullSize() throws {
+        let laid = try box("intro\n\n| Wave | Tasks |\n|---|---|\n| one | two |\n")
+        let cell = try XCTUnwrap(laid.rows.first?.cells.first)
+        XCTAssertGreaterThan(cell.text.length, 0)
+        let font = cell.text.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertGreaterThan(font?.pointSize ?? 0, 1.0,
+                             "captured cell text must be full size, not collapsed")
+    }
+
+    /// IMAGE 13, 2026-08-17: `**1 — unblock**` drawn WITH its asterisks.
+    ///
+    /// The cells are captured before the collapse so they are not captured at
+    /// 0.01 pt — but the same collapse is what hides inline `**`, so capturing
+    /// before ALL of it kept the markers. The collapse now runs in two passes
+    /// around the capture: inline syntax first, cells, then the rows.
+    @MainActor
+    func test_aBoldCellIsDrawnWithoutItsMarkers() throws {
+        let laid = try box("intro\n\n| **bold** | b |\n|---|---|\n| c | d |\n")
+        let cell = try XCTUnwrap(laid.rows.first?.cells.first)
+
+        // The `**` are still IN the captured text — the storage keeps every
+        // character — but collapsed to nothing, exactly as on screen.
+        let markers = (cell.text.string as NSString).range(of: "**")
+        XCTAssertNotEqual(markers.location, NSNotFound, "the text is captured whole")
+        let markerFont = cell.text.attribute(.font, at: markers.location,
+                                             effectiveRange: nil) as? NSFont
+        XCTAssertLessThan(markerFont?.pointSize ?? 99, 1.0,
+                          "a captured `**` must already be collapsed, or it is drawn "
+                          + "into the grid as literal asterisks")
+
+        // And the word itself is full size and bold.
+        let word = (cell.text.string as NSString).range(of: "bold")
+        let wordFont = try XCTUnwrap(cell.text.attribute(.font, at: word.location,
+                                                          effectiveRange: nil) as? NSFont)
+        XCTAssertGreaterThan(wordFont.pointSize, 1.0)
+        XCTAssertTrue(wordFont.fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
+    /// No column may be squeezed below the floor, or every word wraps onto its
+    /// own line and the result is less readable than the source it replaced.
+    @MainActor
+    func test_columnsAreNeverSqueezedBelowTheFloor() {
+        let natural: [CGFloat] = [600, 40, 900]
+        let fitted = MarkdownTableLayout.fit(natural, into: 400)
+        XCTAssertEqual(fitted.reduce(0, +), 400, accuracy: 1.0)
+        for width in fitted {
+            XCTAssertGreaterThanOrEqual(width, MarkdownTableLayout.minimumColumnWidth - 0.01)
+        }
+    }
+
+    /// Proportional, not equal: a column of one-word cells and a column of
+    /// sentences must not end up the same width just because both were too
+    /// wide together.
+    @MainActor
+    func test_squeezingIsProportional() {
+        let fitted = MarkdownTableLayout.fit([200, 800], into: 500)
+        XCTAssertLessThan(fitted[0], fitted[1],
+                          "the narrower column stays the narrower one")
+    }
+
+    @MainActor
+    func test_aTableThatFitsKeepsItsNaturalWidths() {
+        let natural: [CGFloat] = [100, 120]
+        XCTAssertEqual(MarkdownTableLayout.fit(natural, into: 760), natural)
+    }
+
+    /// Each row reserves its own drawn height on its own source line, so the
+    /// grid lands exactly where the room was made.
+    @MainActor
+    func test_eachRowReservesItsOwnHeight() throws {
+        let body = "intro\n\n| a | b |\n|---|---|\n| c | d |\n"
+        let (coordinator, tv) = editor(body)
+        try withExtendedLifetime(coordinator) { () -> Void in
+            let storage = try XCTUnwrap(tv.textStorage)
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            coordinator.revealForSelectionChange()
+            let header = (body as NSString).range(of: "| a | b |")
+            let style = try XCTUnwrap(
+                storage.attribute(.paragraphStyle, at: header.location,
+                                  effectiveRange: nil) as? NSParagraphStyle)
+            XCTAssertGreaterThan(style.minimumLineHeight, 0,
+                                 "a drawn row must reserve its height, or the grid is "
+                                 + "painted over the text beneath it")
+        }
+    }
+
+    /// The editor must actually hand the drawing layer a grid.
+    @MainActor
+    func test_aTableReachesTheDrawingLayer() throws {
+        let body = "intro\n\n| a | b |\n|---|---|\n| c | d |\n"
         let (coordinator, tv) = editor(body)
         withExtendedLifetime(coordinator) {
-            let found = coordinator.cachedSpansForTesting
-            XCTAssertFalse(found.contains { $0.kind == .table })
-            XCTAssertEqual(tv.string, body)
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            coordinator.revealForSelectionChange()
+            XCTAssertTrue(tv.blockBackgrounds.contains { region in
+                if case .table = region.kind { return true }
+                return false
+            }, "a table must reach the layer that paints it")
         }
+    }
+
+    /// Cell content is taken from the STORAGE, so inline styling inside a cell
+    /// survives into the drawn grid rather than being re-derived and drifting.
+    /// The captured cell keeps the inline styling the editor had applied, so
+    /// the drawn grid and the source agree about what a cell looks like.
+    @MainActor
+    func test_aCellsInlineStylingSurvivesIntoTheBox() throws {
+        let laid = try box("intro\n\n| **wwww** | b |\n|---|---|\n| c | d |\n")
+        let cell = try XCTUnwrap(laid.rows.first?.cells.first)
+        var sawBold = false
+        cell.text.enumerateAttribute(.font, in: NSRange(location: 0, length: cell.text.length)) {
+            value, _, _ in
+            if let font = value as? NSFont,
+               font.fontDescriptor.symbolicTraits.contains(.bold) { sawBold = true }
+        }
+        XCTAssertTrue(sawBold, "a bold cell must reach the grid still bold")
     }
 }

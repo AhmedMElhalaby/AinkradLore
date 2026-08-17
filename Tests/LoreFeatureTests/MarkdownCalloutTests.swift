@@ -302,6 +302,69 @@ final class MarkdownCalloutTests: XCTestCase {
                              + "quote=\(plainQuote))")
     }
 
+    /// The text indent and the drawn decoration must agree about where the
+    /// text starts.
+    ///
+    /// They were computed apart — the indent as `listIndentStep * 2` (44 pt),
+    /// the decoration as bar + gap + icon + gap (29 pt) — so a callout carried
+    /// 15 pt of dead space. Invisible while the icon covered it, and an obvious
+    /// empty gutter the moment the caret revealed the header and the icon
+    /// stopped being drawn (2026-08-17, image 9).
+    @MainActor
+    func test_theTextIndentIsExactlyWhatTheDecorationNeeds() {
+        let indent = MarkdownBlockBackgrounds.calloutTextIndent
+        let needed = MarkdownBlockBackgrounds.barWidth
+            + MarkdownBlockBackgrounds.calloutIconGap
+            + MarkdownStyleRenderer.baseSize
+            + MarkdownBlockBackgrounds.calloutIconGap
+        XCTAssertEqual(indent, needed, accuracy: 0.001,
+                       "the indent must be the decoration's own width, not a guess")
+
+        let style = MarkdownParagraphStyles.style(
+            for: .callout(.note), theme: MarkdownTheme(tokens: TestTokens.make()))
+        XCTAssertEqual(style.firstLineHeadIndent, indent, accuracy: 0.001,
+                       "and the paragraph must use that same number")
+        XCTAssertEqual(style.headIndent, indent, accuracy: 0.001)
+    }
+
+    /// The indent does NOT change with reveal. Shrinking it when the icon stops
+    /// being drawn would shift every line of the callout sideways as the caret
+    /// entered it — trading a small gap for a visible jump.
+    @MainActor
+    func test_theIndentIsTheSameWhetherOrNotTheIconIsDrawn() throws {
+        let body = "intro\n\n> [!note]\n> body text\n"
+        var stored = body
+        let binding = Binding<String>(get: { stored }, set: { stored = $0 })
+        let coordinator = MarkdownEditor.Coordinator(text: binding, tokens: TestTokens.make())
+        let tv = LinkTextView(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        tv.isRichText = false
+        tv.delegate = coordinator
+        let window = NSWindow(contentRect: tv.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = tv
+        window.makeFirstResponder(tv)
+        tv.string = body
+        coordinator.textView = tv
+        coordinator.applyStyles()
+
+        try withExtendedLifetime((coordinator, window)) { () -> Void in
+            let storage = try XCTUnwrap(tv.textStorage)
+            let header = (body as NSString).range(of: "> [!note]")
+            func indent() -> CGFloat {
+                (storage.attribute(.paragraphStyle, at: header.location,
+                                   effectiveRange: nil) as? NSParagraphStyle)?
+                    .headIndent ?? -1
+            }
+            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            coordinator.revealForSelectionChange()
+            let hidden = indent()
+            tv.setSelectedRange(NSRange(location: header.location + 3, length: 0))
+            coordinator.revealForSelectionChange()
+            XCTAssertEqual(hidden, indent(), accuracy: 0.001,
+                           "the callout must not shift sideways as the caret enters it")
+        }
+    }
+
     // MARK: - Colour
 
     /// Every type must resolve a tint, in both a light and a dark theme, and
