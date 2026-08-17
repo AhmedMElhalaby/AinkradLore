@@ -227,14 +227,7 @@ extension MarkdownEditor.Coordinator {
         // same pass, so the decoration can never describe older text than
         // the attributes do. Clipped to the SAME window the attributes were,
         // so a panel is never painted behind text that was left unstyled.
-        if let linkView = tv as? LinkTextView {
-            linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
-            linkView.blockBackgrounds =
-                MarkdownBlockBackgrounds.regions(for: styleCache.spans,
-                                                 length: storage.length,
-                                                 limitedTo: window,
-                                                 in: storage.string as NSString)
-        }
+        refreshBlockBackgrounds(in: storage, window: window)
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
         // LAST, and only here: what is on screen now, and what produced it.
@@ -255,36 +248,6 @@ extension MarkdownEditor.Coordinator {
         guard let tv = textView else { return false }
         guard let window = tv.window else { return true }
         return window.firstResponder === tv
-    }
-
-    /// Hides the markers of every block the selection is NOT in, and records
-    /// the reveal state that `revealForSelectionChange` compares against.
-    ///
-    /// The whole-document version, run only as part of a full render. See
-    /// `renderStyles`'s doc comment for `forcedFocus`.
-    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?,
-                                       forcedFocus: Bool? = nil) {
-        guard let tv = textView else { return }
-        let selection = tv.selectedRange()
-        let focused = forcedFocus ?? isTextViewFocused
-        lastRevealFocus = focused
-        revealedRange = MarkdownReveal.revealedRange(in: tv.string, selection: selection,
-                                                     spans: styleCache.spans,
-                                                     isFocused: focused)
-        var hidden = MarkdownReveal.hiddenMarkers(spans: styleCache.spans,
-                                                  selection: selection,
-                                                  text: tv.string,
-                                                  isFocused: focused)
-        if let window {
-            hidden = hidden.filter {
-                $0.lowerBound < NSMaxRange(window) && $0.upperBound > window.location
-            }
-        }
-        MarkdownStyleRenderer.collapse(hidden, in: storage)
-        // AFTER the collapse, which writes `.kern = 0` over every hidden
-        // marker — including the table pipes the alignment rides on. See
-        // `MarkdownTableStyling`.
-        MarkdownTableStyling.align(styleCache.spans, revealed: revealedRange, in: storage)
     }
 
     /// Called from `textViewDidChangeSelection` — i.e. on every arrow key.
@@ -462,13 +425,38 @@ extension MarkdownEditor.Coordinator {
             let range = styleCache.spans[index].range
             return MarkdownReveal.isRevealed(range, in: revealed) ? nil : range
         }
-        if !hidden.isEmpty { MarkdownStyleRenderer.collapse(hidden, in: storage) }
+        let blockSpans = revealIndex.spansByBlock[block].compactMap {
+            $0 < styleCache.spans.count ? styleCache.spans[$0] : nil
+        }
+        // The same two-pass ordering as the full render — see its comment. Only
+        // when this block holds a table: a caret move into one changes every
+        // row's reserved height, but that is rare, and re-measuring on every
+        // arrow key would put an O(document) cost back on the path that exists
+        // not to have one.
+        let holdsTable = blockSpans.contains {
+            if case .table = $0.kind { return true }
+            return false
+        }
+        if let tv = textView, holdsTable {
+            let rowMarkers = MarkdownTableStyling.rowMarkerRanges(styleCache.spans)
+            MarkdownStyleRenderer.collapse(hidden.filter { !rowMarkers.contains($0) },
+                                           in: storage)
+            tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
+                                                        revealed: revealed,
+                                                        maxWidth: textColumnWidth(of: tv),
+                                                        in: storage)
+            MarkdownStyleRenderer.collapse(hidden.filter { rowMarkers.contains($0) },
+                                           in: storage)
+            refreshBlockBackgrounds(in: storage, window: nil)
+        } else if !hidden.isEmpty {
+            MarkdownStyleRenderer.collapse(hidden, in: storage)
+        }
         // Unconditional, unlike the collapse above: a row that just became
         // REVEALED hides nothing and still has to lose its padding, which is
         // this same call reaching the opposite answer.
-        MarkdownTableStyling.align(revealIndex.spansByBlock[block].compactMap {
-            $0 < styleCache.spans.count ? styleCache.spans[$0] : nil
-        }, revealed: revealed, in: storage)
+        MarkdownMathStyling.reserveSpace(blockSpans, revealed: revealed,
+                                         font: MarkdownStyleRenderer.baseFont,
+                                         in: storage)
     }
 
     // Container geometry and the off-actor parse pipeline (the debounce,

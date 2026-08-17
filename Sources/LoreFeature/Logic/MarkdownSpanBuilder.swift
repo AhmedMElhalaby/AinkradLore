@@ -28,8 +28,6 @@ public struct StyleSpan: Equatable, Sendable {
         /// something this editor cannot render exactly, in which case the
         /// source stays visible and is merely tinted — see `MarkdownMath`.
         case math(isRendered: Bool)
-        /// Script content, raised or lowered.
-        case mathScript(isSuperscript: Bool)
         case checkbox(Bool)
         /// An `![[target]]` embed's TARGET text — same convention as
         /// `.wikilink`'s content span: the brackets (and the leading `!`)
@@ -67,7 +65,7 @@ public struct StyleSpan: Equatable, Sendable {
             case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
-                 .table, .tableHeader, .mathScript, .checkbox, .marker:
+                 .table, .tableHeader, .checkbox, .marker:
                 return false
             // A `$…$` expression is delimited by ONE pair, so it reveals
             // whole rather than splitting across a line break.
@@ -172,11 +170,20 @@ extension MarkdownASTCollector {
                     styleSpans.append(StyleSpan(range: delimiter.range,
                                                 kind: .marker(of: .tableDelimiter)))
                 }
+                // Each ROW collapses WHOLE, not just its pipes. The grid is
+                // drawn, so every character of the row is replaced by the
+                // drawing — collapsing only the notation left the cell text
+                // visible underneath and the grid painted on top of it
+                // (2026-08-17, image 12).
+                //
+                // Per row rather than per table, because reveal is line-scoped:
+                // a marker spanning several lines could never be contained in
+                // the revealed range, so the caret could never bring the source
+                // back. One marker per row means the row you are editing shows
+                // its source while the rest stay drawn.
                 for row in parsed.rows {
-                    for pipe in row.pipes {
-                        styleSpans.append(StyleSpan(range: pipe,
-                                                    kind: .marker(of: .tablePipe)))
-                    }
+                    styleSpans.append(StyleSpan(range: row.range,
+                                                kind: .marker(of: .tablePipe)))
                 }
             }
         }

@@ -135,11 +135,17 @@ enum MarkdownParagraphStyles {
             s.headIndent = theme.listIndentStep
 
         case .callout:
-            // Wider than a quote: the bar, plus the icon drawn beside the
-            // title. One indent for every line, so the body sits under the
-            // title rather than under the icon.
-            s.firstLineHeadIndent = theme.listIndentStep * 2
-            s.headIndent = theme.listIndentStep * 2
+            // Exactly the room the decoration occupies — bar, gap, icon, gap —
+            // read from the drawing's own constant so the two cannot disagree.
+            // A guessed multiple of the list indent left 15 pt of dead space,
+            // which showed as an empty gutter whenever the caret revealed the
+            // header and the icon stopped being drawn.
+            //
+            // Constant whether or not the icon is currently drawn: shrinking it
+            // on reveal would shift every line of the callout sideways as the
+            // caret entered it, trading a small gap for a visible jump.
+            s.firstLineHeadIndent = MarkdownBlockBackgrounds.calloutTextIndent
+            s.headIndent = MarkdownBlockBackgrounds.calloutTextIndent
             s.paragraphSpacing = theme.paragraphSpacing * 0.5
 
         case .codeBlock:

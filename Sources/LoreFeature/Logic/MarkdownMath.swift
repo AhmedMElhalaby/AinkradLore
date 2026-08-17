@@ -11,19 +11,22 @@ import Foundation
 /// it. That rules out the whole substitution family: `\alpha` cannot become
 /// `α`, because `α` is a character the document does not contain.
 ///
-/// What CAN be rendered correctly with attributes alone is scripts:
-/// `x^2` becomes x² by shrinking the `2` and lifting its baseline, with the `^`
-/// collapsed — no character added, none removed, and the result is exactly what
-/// the expression means.
+/// So the expression is COLLAPSED and DRAWN instead. `MathParser` turns the
+/// source into a tree, `MathLayout` turns the tree into a box of positioned
+/// glyphs, `.kern` on the collapsed run reserves exactly the box's width, and
+/// the box is painted into the gap. Every one of those techniques is already
+/// load-bearing elsewhere in this editor — marker collapse, table alignment,
+/// the drawn list marker and callout heading — and none of them touches a
+/// character of the document.
 ///
-/// ## So the rule is all-or-nothing per expression
+/// ## The rule is all-or-nothing per expression
 ///
-/// An expression is rendered only when EVERY part of it can be. Anything
-/// containing a command this cannot honour is left as source and merely tinted,
-/// so it still reads as mathematics rather than as prose. Half-rendering —
-/// `α` shown but `\frac{a}{b}` left raw inside the same expression — would be
-/// worse than either, because the reader could no longer tell which parts are
-/// notation and which are content.
+/// An expression is drawn only when EVERY part of it parses. Anything
+/// containing a construct the parser refuses is left as source and merely
+/// tinted, so it still reads as mathematics rather than as prose.
+/// Half-rendering — `α` drawn but `\frac{a}{b}` left raw inside the same
+/// expression — would be worse than either, because the reader could no longer
+/// tell which parts are notation and which are content.
 enum MarkdownMath {
 
     struct Span: Equatable {
@@ -32,20 +35,12 @@ enum MarkdownMath {
         /// Between the delimiters.
         let content: Range<Int>
         let isBlock: Bool
-        /// Whether every part of this expression can be rendered exactly. When
-        /// false the source is shown, tinted, and nothing is collapsed.
-        let isRenderable: Bool
-        /// `^`/`_` and any braces, to collapse. Empty unless renderable.
-        let markers: [Range<Int>]
-        /// Script content, with whether it is raised or lowered.
-        let scripts: [(range: Range<Int>, isSuperscript: Bool)]
+        /// The parsed tree, or `nil` when this expression contains something
+        /// that cannot be drawn exactly. `nil` means the source is shown and
+        /// merely tinted — see the type comment.
+        let tree: MathNode?
 
-        static func == (a: Span, b: Span) -> Bool {
-            a.range == b.range && a.content == b.content && a.isBlock == b.isBlock
-                && a.isRenderable == b.isRenderable && a.markers == b.markers
-                && a.scripts.map(\.range) == b.scripts.map(\.range)
-                && a.scripts.map(\.isSuperscript) == b.scripts.map(\.isSuperscript)
-        }
+        var isRenderable: Bool { tree != nil }
     }
 
     /// Finds every math expression in `text`.
@@ -72,14 +67,10 @@ enum MarkdownMath {
             }
             let content = (index + width)..<close
             let whole = index..<(close + width)
-            if let rendered = render(content: content, in: text) {
-                out.append(Span(range: whole, content: content, isBlock: isBlock,
-                                isRenderable: true,
-                                markers: rendered.markers, scripts: rendered.scripts))
-            } else {
-                out.append(Span(range: whole, content: content, isBlock: isBlock,
-                                isRenderable: false, markers: [], scripts: []))
-            }
+            let source = text.substring(with: NSRange(location: content.lowerBound,
+                                                      length: content.count))
+            out.append(Span(range: whole, content: content, isBlock: isBlock,
+                            tree: MathParser.parse(source)))
             index = close + width
         }
         return out
@@ -114,100 +105,38 @@ enum MarkdownMath {
         return nil
     }
 
-    /// Whether this content can be rendered exactly, and how.
-    ///
-    /// `nil` means "leave it as source". Everything not explicitly handled
-    /// lands there — a backslash command, a bracket, anything unfamiliar — so
-    /// the failure direction is always "show what the author wrote".
-    private static func render(content: Range<Int>, in text: NSString)
-        -> (markers: [Range<Int>], scripts: [(range: Range<Int>, isSuperscript: Bool)])? {
-        guard content.lowerBound < content.upperBound else { return nil }
-        var markers: [Range<Int>] = []
-        var scripts: [(range: Range<Int>, isSuperscript: Bool)] = []
-        var index = content.lowerBound
-        var sawScript = false
-
-        while index < content.upperBound {
-            let unit = text.character(at: index)
-            if unit == 0x5E || unit == 0x5F {                       // ^ _
-                let isSuper = unit == 0x5E
-                guard index + 1 < content.upperBound else { return nil }
-                markers.append(index..<(index + 1))
-                let next = index + 1
-                if text.character(at: next) == 0x7B {                // {
-                    guard let close = matchingBrace(from: next, limit: content.upperBound,
-                                                    in: text) else { return nil }
-                    guard close > next + 1 else { return nil }       // `^{}` renders nothing
-                    markers.append(next..<(next + 1))
-                    markers.append(close..<(close + 1))
-                    scripts.append(((next + 1)..<close, isSuper))
-                    index = close + 1
-                } else {
-                    guard isPlain(text.character(at: next)) else { return nil }
-                    scripts.append((next..<(next + 1), isSuper))
-                    index = next + 1
-                }
-                sawScript = true
-                continue
-            }
-            // Anything that is not a script and not plain content — a
-            // backslash command above all — means this expression is not one
-            // this renderer can honour.
-            guard isPlain(unit) else { return nil }
-            index += 1
-        }
-        // An expression with no scripts has nothing to render, so rendering it
-        // would only hide its `$` delimiters and leave the text looking like
-        // prose. Better to keep the delimiters and tint it.
-        // Written out rather than as a ternary: `sawScript ? (markers, scripts)
-        // : nil` made Swift's type checker give up entirely — "failed to
-        // produce diagnostic for expression", which is a compiler crash and
-        // says nothing about the cause. A labelled tuple inside an optional
-        // inside a ternary is apparently one inference step too many.
-        guard sawScript else { return nil }
-        return (markers: markers, scripts: scripts)
-    }
-
-    private static func matchingBrace(from open: Int, limit: Int, in text: NSString) -> Int? {
-        var depth = 0
-        var index = open
-        while index < limit {
-            switch text.character(at: index) {
-            case 0x7B: depth += 1
-            case 0x7D:
-                depth -= 1
-                if depth == 0 { return index }
-            default: break
-            }
-            index += 1
-        }
-        return nil
-    }
-
-    /// Characters an expression may contain and still be rendered exactly:
-    /// letters, digits, spaces and ordinary arithmetic. Deliberately a short
-    /// allow-list — every character NOT on it sends the expression down the
-    /// "show the source" path, which is always safe.
-    private static func isPlain(_ unit: unichar) -> Bool {
-        // Written as a switch rather than one boolean chain: the chain made
-        // Swift's type checker give up outright ("failed to produce diagnostic
-        // for expression"), which is a compiler crash rather than a build
-        // error and says nothing about what is wrong.
-        switch unit {
-        case 0x41...0x5A, 0x61...0x7A, 0x30...0x39:      // A-Z a-z 0-9
-            return true
-        case 0x20:                                        // space
-            return true
-        case 0x2B, 0x2D, 0x2A, 0x2F, 0x3D:                // + - * / =
-            return true
-        case 0x28, 0x29, 0x2E, 0x2C:                      // ( ) . ,
-            return true
-        default:
-            return false
-        }
-    }
-
     private static func isSpace(_ unit: unichar) -> Bool {
         unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
+    }
+}
+
+
+/// The editor's math spans.
+///
+/// An extension rather than a member of `MarkdownDocumentModel`: math is not
+/// CommonMark, the model never saw it, and that file reached its length ceiling
+/// carrying something that was never really its subject.
+extension MarkdownDocumentModel {
+    /// `$…$` spans, derived on demand for the same reason `wikilinkSpans` is:
+    /// math is not CommonMark, so the AST never saw it.
+    ///
+    /// Code regions are handed over so a `$PATH` in a shell fence cannot open
+    /// an expression — the same suppression the link scanner uses, for the same
+    /// class of false positive.
+    public var mathSpans: [StyleSpan] {
+        let text = fullText as NSString
+        var out: [StyleSpan] = []
+        for span in MarkdownMath.spans(in: text, isSuppressed: { isInsideCode(utf16Offset: $0) }) {
+            out.append(StyleSpan(range: span.range,
+                                 kind: .math(isRendered: span.isRenderable)))
+            // A drawable expression collapses WHOLE — delimiters, commands and
+            // all — because the drawn box stands in for the entire thing.
+            // Collapsing only the syntax would leave `frac` and its braces on
+            // screen underneath the fraction.
+            if span.isRenderable {
+                out.append(StyleSpan(range: span.range, kind: .marker(of: .math)))
+            }
+        }
+        return out
     }
 }

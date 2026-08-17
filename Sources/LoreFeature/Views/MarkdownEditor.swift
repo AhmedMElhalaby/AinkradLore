@@ -177,6 +177,12 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// paragraph now flips this where it used to be a no-op; the work that
         /// buys is one block restyled, not one document.
         var revealedRange: Range<Int>?
+        /// Drawing regions for pipe tables, rebuilt whenever their reserved row
+        /// heights are. Held here rather than recomputed at assembly time
+        /// because measuring a grid and reserving room for it must come from
+        /// ONE layout — a table measured one way and reserved another is drawn
+        /// over the paragraph beneath it.
+        var tableRegions: [MarkdownBlockBackgrounds.Region] = []
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip
