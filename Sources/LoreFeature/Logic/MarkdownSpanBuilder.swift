@@ -11,6 +11,9 @@ public struct StyleSpan: Equatable, Sendable {
         /// node — not from `MarkdownExtensions`, because wherever the AST has
         /// a node the AST stays the single source of truth.
         case strikethrough
+        /// `==text==`. From `MarkdownExtensions`, not the AST — CommonMark has
+        /// no highlight node.
+        case highlight
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -66,7 +69,7 @@ public struct StyleSpan: Equatable, Sendable {
         /// revealing them together is the block-scoped behaviour being replaced.
         var isDelimitedByASinglePair: Bool {
             switch self {
-            case .strong, .emphasis, .strikethrough, .inlineCode, .codeBlock, .link, .wikilink, .embed:
+            case .strong, .emphasis, .strikethrough, .highlight, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:

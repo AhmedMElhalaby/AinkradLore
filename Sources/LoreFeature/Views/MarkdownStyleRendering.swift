@@ -198,6 +198,14 @@ enum MarkdownStyleRenderer {
                                  value: NSUnderlineStyle.single.rawValue,
                                  range: r)
 
+        case .highlight:
+            // A tinted BACKGROUND, not a foreground change: highlighted text
+            // must stay as readable as the prose around it, which a colour
+            // swap does not guarantee against every theme.
+            storage.addAttribute(.backgroundColor,
+                                 value: NSColor(tokens.accentSecondary).withAlphaComponent(0.28),
+                                 range: r)
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),

@@ -230,7 +230,33 @@ public struct MarkdownDocumentModel: Sendable {
     /// document is not styled", not a slow one.
     public var styleSpans: [StyleSpan] {
         guard !isOverStylingHardCap else { return [] }
-        return astStyleSpans + wikilinkSpans + mathSpans
+        return astStyleSpans + wikilinkSpans + mathSpans + Self.styleSpans(from: extensionSpans)
+    }
+
+    /// Turns scanner spans into the `StyleSpan`s the renderer reads.
+    ///
+    /// One function, extended per syntax, rather than a conversion scattered
+    /// across the scanners: the CONTENT span and its MARKER spans have to be
+    /// emitted together or Live Preview collapses markers around text it has
+    /// no span for.
+    private static func styleSpans(
+        from extensions: [MarkdownExtensions.Span]) -> [StyleSpan] {
+        extensions.flatMap { span -> [StyleSpan] in
+            switch span.kind {
+            case .highlight:
+                return [StyleSpan(range: span.content, kind: .highlight),
+                        StyleSpan(range: span.range.lowerBound..<span.content.lowerBound,
+                                  kind: .marker(of: .highlight)),
+                        StyleSpan(range: span.content.upperBound..<span.range.upperBound,
+                                  kind: .marker(of: .highlight))]
+            case .footnoteReference, .footnoteDefinition, .tag, .blockID:
+                // Each replaced by its own arm in Tasks 4, 5 and 6. Listed
+                // explicitly rather than behind a `default:` so that adding a
+                // sixth Kind later breaks THIS switch and forces the question,
+                // exactly as `isDelimitedByASinglePair` does.
+                return []
+            }
+        }
     }
 
     /// UTF-16 length, which is what every style offset is measured in.
