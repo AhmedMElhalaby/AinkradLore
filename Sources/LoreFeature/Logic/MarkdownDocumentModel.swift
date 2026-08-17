@@ -249,8 +249,23 @@ public struct MarkdownDocumentModel: Sendable {
                                   kind: .marker(of: .highlight)),
                         StyleSpan(range: span.content.upperBound..<span.range.upperBound,
                                   kind: .marker(of: .highlight))]
-            case .footnoteReference, .footnoteDefinition, .tag, .blockID:
-                // Each replaced by its own arm in Tasks 4, 5 and 6. Listed
+            case .footnoteReference(let label):
+                return [StyleSpan(range: span.content, kind: .footnoteReference(label: label)),
+                        StyleSpan(range: span.range.lowerBound..<span.content.lowerBound,
+                                  kind: .marker(of: .footnote)),
+                        StyleSpan(range: span.content.upperBound..<span.range.upperBound,
+                                  kind: .marker(of: .footnote))]
+            case .footnoteDefinition(let label):
+                // No closing-pair marker: a definition is line-scoped and has
+                // no closing half, so its ENTIRE `[^`…`]:` is one marker span
+                // in front of the label content.
+                return [StyleSpan(range: span.content, kind: .footnoteDefinition(label: label)),
+                        StyleSpan(range: span.range.lowerBound..<span.content.lowerBound,
+                                  kind: .marker(of: .footnote)),
+                        StyleSpan(range: span.content.upperBound..<span.range.upperBound,
+                                  kind: .marker(of: .footnote))]
+            case .tag, .blockID:
+                // Each replaced by its own arm in Tasks 5 and 6. Listed
                 // explicitly rather than behind a `default:` so that adding a
                 // sixth Kind later breaks THIS switch and forces the question,
                 // exactly as `isDelimitedByASinglePair` does.

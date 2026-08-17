@@ -10,6 +10,8 @@ public enum MarkerOwner: Equatable, Sendable {
     case strikethrough
     /// A `==` pair.
     case highlight
+    /// A footnote's `[^`…`]` (reference) or `[^`…`]:` (definition).
+    case footnote
     /// A callout's `[!type]` header, which collapses like any other syntax
     /// so the rendered block shows a title rather than its own declaration.
     case callout

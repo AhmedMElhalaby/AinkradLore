@@ -206,6 +206,19 @@ enum MarkdownStyleRenderer {
                                  value: NSColor(tokens.accentSecondary).withAlphaComponent(0.28),
                                  range: r)
 
+        case .footnoteReference:
+            // Superscript, at the same size reduction Obsidian uses. The
+            // baseline offset is a DRAWING change, not a text change.
+            storage.addAttribute(.baselineOffset, value: 4.0, range: r)
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentPrimary), range: r)
+
+        case .footnoteDefinition:
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground)
+                                     .withAlphaComponent(LoreMetrics.secondaryText),
+                                 range: r)
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),

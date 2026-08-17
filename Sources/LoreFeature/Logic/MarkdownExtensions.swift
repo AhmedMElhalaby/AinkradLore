@@ -68,7 +68,61 @@ public enum MarkdownExtensions {
         // the precedence in `isClaimed` a decision rather than an accident.
         // Tasks 4-7 fill the rest in.
         scanHighlights(text, masked: index, found: &found)
+        scanFootnotes(text, masked: index, found: &found)
         return found.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    /// `[^label]` and, at line start, `[^label]:`.
+    ///
+    /// The definition is checked FIRST at each candidate, because `[^1]:` at
+    /// line start is a definition and the same characters mid-line are a
+    /// reference — the two differ only by position, so one scan decides both
+    /// rather than two scans racing.
+    private static func scanFootnotes(_ text: NSString, masked: CodeRegionIndex,
+                                      found: inout [Span]) {
+        var i = 0
+        while i + 2 < text.length {
+            guard text.character(at: i) == 0x5B,          // [
+                  text.character(at: i + 1) == 0x5E,      // ^
+                  !isClaimed(i, masked: masked, found: found) else { i += 1; continue }
+            // A preceding `!` makes this an embed, never a footnote.
+            if i > 0, text.character(at: i - 1) == 0x21 { i += 1; continue }
+            var j = i + 2
+            var label = ""
+            var valid = true
+            while j < text.length, text.character(at: j) != 0x5D {   // ]
+                let u = text.character(at: j)
+                // No whitespace in a label — that is what separates a footnote
+                // from a bracketed aside the author wrote by hand.
+                if u == 0x20 || u == 0x09 || u == 0x0A { valid = false; break }
+                label.append(Character(UnicodeScalar(u) ?? "?"))
+                j += 1
+            }
+            guard valid, j < text.length, !label.isEmpty else { i += 1; continue }
+            let closeEnd = j + 1
+            let atLineStart = isAtLineStart(i, text: text)
+            let isDefinition = atLineStart && closeEnd < text.length
+                && text.character(at: closeEnd) == 0x3A          // :
+            let end = isDefinition ? closeEnd + 1 : closeEnd
+            found.append(Span(range: i..<end, content: (i + 2)..<j,
+                              kind: isDefinition ? .footnoteDefinition(label: label)
+                                                 : .footnoteReference(label: label)))
+            i = end
+        }
+    }
+
+    /// Whether `offset` starts a line, allowing up to three leading spaces —
+    /// CommonMark's own indent tolerance.
+    private static func isAtLineStart(_ offset: Int, text: NSString) -> Bool {
+        var k = offset - 1
+        var spaces = 0
+        while k >= 0, spaces <= 3 {
+            let u = text.character(at: k)
+            if u == 0x0A { return true }
+            if u == 0x20 { spaces += 1; k -= 1; continue }
+            return false
+        }
+        return k < 0
     }
 
     /// `==text==`. Paired, equal delimiters, SINGLE LINE — Obsidian's own

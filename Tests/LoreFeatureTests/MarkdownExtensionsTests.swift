@@ -55,4 +55,48 @@ final class MarkdownExtensionsTests: XCTestCase {
         let spans = scan("🎈 ==lit==")
         XCTAssertEqual(spans.first?.range, 3..<10)
     }
+
+    func test_footnoteReference_wellFormed() {
+        let spans = scan("claim[^1] more")
+        XCTAssertEqual(spans.count, 1)
+        XCTAssertEqual(spans.first?.kind, .footnoteReference(label: "1"))
+        XCTAssertEqual(spans.first?.range, 5..<9)
+    }
+
+    func test_footnoteReference_namedLabel() {
+        XCTAssertEqual(scan("x[^why-it-matters]").first?.kind,
+                       .footnoteReference(label: "why-it-matters"))
+    }
+
+    func test_footnoteReference_emptyLabelEmitsNothing() {
+        XCTAssertTrue(scan("x[^]").isEmpty)
+    }
+
+    func test_footnoteReference_whitespaceInLabelEmitsNothing() {
+        XCTAssertTrue(scan("x[^not a label]").isEmpty)
+    }
+
+    func test_footnoteReference_embedIsNotAFootnote() {
+        // `![[...]]` is an embed. The `!` must disqualify it.
+        XCTAssertTrue(scan("![^1]").isEmpty)
+    }
+
+    func test_footnoteReference_ordinaryLinkIsNotAFootnote() {
+        XCTAssertTrue(scan("[text](url)").isEmpty)
+    }
+
+    func test_footnoteDefinition_atLineStart() {
+        let spans = scan("[^1]: the note")
+        XCTAssertEqual(spans.first?.kind, .footnoteDefinition(label: "1"))
+        XCTAssertEqual(spans.first?.range, 0..<5)     // `[^1]:`
+    }
+
+    func test_footnoteDefinition_midLineIsAReferenceNotADefinition() {
+        XCTAssertEqual(scan("see [^1]: here").first?.kind,
+                       .footnoteReference(label: "1"))
+    }
+
+    func test_footnote_insideCodeEmitsNothing() {
+        XCTAssertTrue(scan("```\n[^1]: no\n```").isEmpty)
+    }
 }

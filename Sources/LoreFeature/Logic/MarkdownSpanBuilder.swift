@@ -14,6 +14,10 @@ public struct StyleSpan: Equatable, Sendable {
         /// `==text==`. From `MarkdownExtensions`, not the AST — CommonMark has
         /// no highlight node.
         case highlight
+        /// `[^label]` inline.
+        case footnoteReference(label: String)
+        /// `[^label]:` at line start.
+        case footnoteDefinition(label: String)
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -71,6 +75,10 @@ public struct StyleSpan: Equatable, Sendable {
             switch self {
             case .strong, .emphasis, .strikethrough, .highlight, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
+            case .footnoteReference:
+                return true
+            case .footnoteDefinition:
+                return false
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:
                 return false
