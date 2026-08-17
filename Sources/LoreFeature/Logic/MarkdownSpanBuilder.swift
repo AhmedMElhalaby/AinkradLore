@@ -7,6 +7,10 @@ public struct StyleSpan: Equatable, Sendable {
         case heading(Int)
         case strong
         case emphasis
+        /// `~~text~~`. From the AST — `swift-markdown` has a `Strikethrough`
+        /// node — not from `MarkdownExtensions`, because wherever the AST has
+        /// a node the AST stays the single source of truth.
+        case strikethrough
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -62,7 +66,7 @@ public struct StyleSpan: Equatable, Sendable {
         /// revealing them together is the block-scoped behaviour being replaced.
         var isDelimitedByASinglePair: Bool {
             switch self {
-            case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
+            case .strong, .emphasis, .strikethrough, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:
@@ -135,6 +139,22 @@ extension MarkdownASTCollector {
                           .emphasis)
         }
         descendInto(emphasis)
+    }
+
+    mutating func visitStrikethrough(_ strikethrough: Strikethrough) {
+        // cmark-gfm's strikethrough extension accepts a single `~` as well as
+        // `~~` — Obsidian does not, so a single-tilde node (no `~~` at both
+        // ends) is dropped rather than styled. "Emit nothing rather than
+        // guess": `paired` is the same check `.strong`/`.emphasis` trust, so
+        // reusing its emptiness as the gate keeps this one rule in one place.
+        if let ns = resolve(strikethrough.range) {
+            let markers = MarkdownMarkers.paired("~~", in: ns, text: text)
+            if !markers.isEmpty {
+                styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .strikethrough))
+                appendMarkers(markers, .strikethrough)
+            }
+        }
+        descendInto(strikethrough)
     }
 
     mutating func visitLink(_ link: Link) {

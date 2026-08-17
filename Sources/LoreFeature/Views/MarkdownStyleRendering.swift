@@ -193,6 +193,11 @@ enum MarkdownStyleRenderer {
                               to: .systemFont(ofSize: current.pointSize))
             }
 
+        case .strikethrough:
+            storage.addAttribute(.strikethroughStyle,
+                                 value: NSUnderlineStyle.single.rawValue,
+                                 range: r)
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),

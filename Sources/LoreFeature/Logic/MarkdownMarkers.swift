@@ -6,6 +6,8 @@ import Foundation
 /// inside a `Kind`.
 public enum MarkerOwner: Equatable, Sendable {
     case heading, strong, emphasis, inlineCode, codeFence, link, wikilink, blockQuote, listBullet
+    /// A `~~` pair.
+    case strikethrough
     /// A callout's `[!type]` header, which collapses like any other syntax
     /// so the rendered block shows a title rather than its own declaration.
     case callout
