@@ -191,7 +191,7 @@ final class MarkdownCalloutTests: XCTestCase {
                 if case .callout = region.kind { return true }
                 return false
             }, "the editor must hand the drawing layer a callout region")
-            guard case .callout(let kind, let title) = callout.kind else {
+            guard case .callout(let kind, let title, _) = callout.kind else {
                 return XCTFail("unreachable")
             }
             XCTAssertEqual(kind, .danger)
@@ -222,7 +222,7 @@ final class MarkdownCalloutTests: XCTestCase {
                 if case .callout = region.kind { return true }
                 return false
             })
-            guard case .callout(let kind, let title) = callout.kind else {
+            guard case .callout(let kind, let title, _) = callout.kind else {
                 return XCTFail("unreachable")
             }
             XCTAssertEqual(kind, .note)

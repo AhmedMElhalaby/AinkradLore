@@ -43,7 +43,18 @@ enum MarkdownBlockBackgrounds {
         /// `.calloutTitle` — and the type's name when they did not, since a
         /// callout whose `[!note]` has collapsed would otherwise show an empty
         /// heading line.
-        case callout(MarkdownCallout.Kind, title: String?)
+        /// `marker` is the `[!type]` declaration's range, and the icon and
+        /// heading are drawn only while it is COLLAPSED.
+        ///
+        /// Measured at draw time rather than stored, and that is the whole
+        /// point: `blockBackgrounds` is rebuilt only on a full render, while
+        /// reveal changes on every caret move. A stored flag therefore goes
+        /// stale the instant the caret enters the callout, and the icon and
+        /// heading get painted on top of the `> [!note]` the reader can now
+        /// see — the overlap Ahmed photographed on 2026-08-17. `listMarker`
+        /// has always decided this the same way, from geometry, which
+        /// self-corrects because the geometry IS the reveal state.
+        case callout(MarkdownCallout.Kind, title: String?, marker: NSRange)
     }
 
     /// A stretch of text to decorate. UTF-16, into the view's own string.
@@ -146,9 +157,14 @@ enum MarkdownBlockBackgrounds {
                 // the author wrote a title.
                 guard let text, NSMaxRange(r) <= text.length else { return nil }
                 let header = MarkdownCallout.header(ofQuoteAt: span.range, in: text)
+                let marker = header.map {
+                    NSRange(location: $0.markerRange.lowerBound,
+                            length: $0.markerRange.count)
+                } ?? NSRange(location: span.range.lowerBound, length: 0)
                 kind = .callout(callout,
                                 title: header?.titleRange == nil
-                                    ? callout.displayTitle : nil)
+                                    ? callout.displayTitle : nil,
+                                marker: marker)
             case .marker(of: .listBullet):
                 // NOT clipped to the window: a marker is two or three
                 // characters, so intersecting it would draw half a `10.`. It is
@@ -254,8 +270,14 @@ enum MarkdownBlockBackgrounds {
                                origin: origin, dirtyRect: dirtyRect)
                 continue
             }
-            if case .callout(let kind, let title) = region.kind {
-                drawCallout(kind, title: title, at: region.range, columnX: x,
+            if case .callout(let kind, let title, let marker) = region.kind {
+                // Collapsed marker means the source is hidden, so the icon and
+                // heading stand in for it. Visible marker means the caret is
+                // on the header line and they must not be drawn at all.
+                let drawsHeader = drawsCalloutHeader(marker: marker, in: textView)
+                drawCallout(kind, title: drawsHeader ? title : nil,
+                            drawsIcon: drawsHeader,
+                            at: region.range, columnX: x,
                             columnWidth: width, tokens: palette.tokens,
                             in: textView, origin: origin, dirtyRect: dirtyRect)
                 continue
@@ -370,6 +392,20 @@ enum MarkdownBlockBackgrounds {
         return manager.boundingRect(forGlyphRange: glyphs, in: container)
     }
 
+    /// Whether a callout's icon and heading should be drawn: only while its
+    /// `[!type]` declaration is collapsed.
+    ///
+    /// A zero-length marker (a callout whose header could not be re-read)
+    /// answers `true`, which keeps the heading — the same direction every
+    /// other guard in this file takes when it is unsure.
+    @MainActor
+    static func drawsCalloutHeader(marker: NSRange, in textView: NSTextView) -> Bool {
+        guard marker.length > 0 else { return true }
+        let rect = boundingRect(of: marker, in: textView)
+        guard !rect.isNull else { return true }
+        return rect.width < collapsedMarkerWidth
+    }
+
     /// Draws a callout: the tinted panel, the coloured bar, the icon on the
     /// first line, and — only when the author wrote no title — the type's name.
     ///
@@ -379,6 +415,7 @@ enum MarkdownBlockBackgrounds {
     /// exists to honour.
     @MainActor
     private static func drawCallout(_ kind: MarkdownCallout.Kind, title: String?,
+                                    drawsIcon: Bool,
                                     at range: NSRange, columnX x: CGFloat,
                                     columnWidth width: CGFloat,
                                     tokens: HostThemeTokens,
@@ -413,7 +450,8 @@ enum MarkdownBlockBackgrounds {
         let font = MarkdownStyleRenderer.boldBaseFont
         let iconSize = font.pointSize
         let iconX = x + barWidth + 6
-        if let icon = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil) {
+        if drawsIcon,
+           let icon = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil) {
             let configured = icon.withSymbolConfiguration(
                 .init(pointSize: iconSize, weight: .semibold)) ?? icon
             let box = NSRect(x: iconX,

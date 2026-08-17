@@ -536,19 +536,26 @@ final class MarkdownEditFastPathTests: XCTestCase {
         }
     }
 
-    /// A link reference definition anywhere in the document bars the block
-    /// parse: `[label]` means "link" only because a line elsewhere says so, and
-    /// a block parsed alone cannot see it.
-    func test_bails_whenTheDocumentHasALinkReferenceDefinition() {
+    /// A block that could USE a link reference definition cannot be parsed
+    /// alone: `[label]` means "link" only because a line elsewhere says so.
+    ///
+    /// The question is asked of the BLOCK, not of the document. It was once
+    /// asked of the document — "does anything anywhere look like a definition"
+    /// — and that is how Ahmed's original "styling lands late" complaint came
+    /// back on 2026-08-17: a footnote (`[^1]: …`) has a definition's shape, so
+    /// one footnote disabled the block parse for every paragraph in the note.
+    /// The companion case, that a bracket-free paragraph in the SAME document
+    /// still takes the fast path, is in `ReportedDefectsTests`.
+    func test_bails_whenTheEditedBlockCouldUseAReferenceDefinition() {
         let body = "[label]: https://example.com\n\nsee [label] for more\n\ntail here\n"
         let (coordinator, tv) = makeEditor(body)
         withExtendedLifetime(coordinator) {
-            let found = (tv.string as NSString).range(of: "tail here")
+            let found = (tv.string as NSString).range(of: "see [label] for more")
             tv.insertText("x", replacementRange: NSRange(location: found.location + 2,
                                                         length: 0))
             XCTAssertFalse(coordinator.lastEditTookFastPath,
-                           "a block cannot be parsed alone when a definition "
-                           + "elsewhere decides what its links mean")
+                           "this block contains a bracket and the document holds a "
+                           + "definition, so it cannot be parsed in isolation")
         }
     }
 

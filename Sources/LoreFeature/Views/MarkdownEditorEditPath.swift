@@ -315,8 +315,20 @@ extension MarkdownEditor.Coordinator {
         // A link reference definition is the one thing that would make that
         // false, because it gives a block a meaning that is written elsewhere.
         // Refuse rather than reason about it; see `hasReferenceDefinitions`.
-        guard !styleCache.hasReferenceDefinitions,
-              let blockSpans = MarkdownStyleCache.deriveBlock(of: tv.string, range: blockRange)
+        // A link reference definition gives a block a meaning written elsewhere,
+        // so a block that could USE one cannot be parsed alone. That is a
+        // property of the block, not of the document.
+        //
+        // This used to refuse whenever the document held a definition ANYWHERE,
+        // which is how Ahmed's "styling lands late" came back on 2026-08-17: a
+        // footnote (`[^1]: …`) has the shape of a definition, and one footnote
+        // in a note disabled the block parse for every paragraph in it — every
+        // keystroke, straight back to shifted spans. A block with no `[` in it
+        // cannot contain a reference link of any kind, so the far narrower
+        // question is the right one to ask.
+        guard !(styleCache.hasReferenceDefinitions && blockContainsBracket(blockRange, in: tv))
+        else { return false }
+        guard let blockSpans = MarkdownStyleCache.deriveBlock(of: tv.string, range: blockRange)
         else { return false }
 
         // Proven. Everything below is the full render's whole-document
@@ -436,6 +448,20 @@ extension MarkdownEditor.Coordinator {
         // change dirties, so it has to be asked for explicitly.
         tv.needsDisplay = true
         return true
+    }
+
+    /// Whether this block contains a `[`, and so could hold a reference link
+    /// whose meaning lives in a definition elsewhere.
+    ///
+    /// A character scan of ONE block, on the keystroke path — cheap, and the
+    /// answer is almost always no, which is what restores the fast path for
+    /// ordinary prose in a note that happens to carry footnotes.
+    func blockContainsBracket(_ block: Range<Int>, in tv: NSTextView) -> Bool {
+        let ns = tv.string as NSString
+        guard block.lowerBound >= 0, block.upperBound <= ns.length else { return true }
+        for offset in block.lowerBound..<block.upperBound
+        where ns.character(at: offset) == 0x5B { return true }
+        return false
     }
 
     /// `MarkdownStyleCache.shift`'s offset rule, applied to block bounds.
