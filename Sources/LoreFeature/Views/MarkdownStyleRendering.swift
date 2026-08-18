@@ -193,6 +193,58 @@ enum MarkdownStyleRenderer {
                               to: .systemFont(ofSize: current.pointSize))
             }
 
+        case .strikethrough:
+            storage.addAttribute(.strikethroughStyle,
+                                 value: NSUnderlineStyle.single.rawValue,
+                                 range: r)
+
+        case .highlight:
+            // A tinted BACKGROUND, not a foreground change: highlighted text
+            // must stay as readable as the prose around it, which a colour
+            // swap does not guarantee against every theme.
+            storage.addAttribute(.backgroundColor,
+                                 value: NSColor(tokens.accentSecondary).withAlphaComponent(0.28),
+                                 range: r)
+
+        case .footnoteReference:
+            // Superscript, via baseline offset only — a DRAWING change, not
+            // a text change. NOT at "the same size reduction Obsidian uses":
+            // no font-size attribute is applied here, so the glyph stays
+            // full size, just raised. See the M6 final review, Finding 5 —
+            // that gap is a design decision left for the owner to make, not
+            // fixed here; only the comment overclaiming it was wrong.
+            storage.addAttribute(.baselineOffset, value: 4.0, range: r)
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentPrimary), range: r)
+
+        case .footnoteDefinition:
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground)
+                                     .withAlphaComponent(LoreMetrics.secondaryText),
+                                 range: r)
+
+        case .tag:
+            // The `#` STAYS VISIBLE — Obsidian keeps it, and without it a tag
+            // chip is indistinguishable from a link chip.
+            //
+            // `theme.renderTagsAsChips`, not `settings` — `settings` is never
+            // in scope here; `MarkdownTheme` resolves it at construction. See
+            // `EditorSettings.renderTagsAsChips`.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentPrimary), range: r)
+            if theme.renderTagsAsChips {
+                storage.addAttribute(.backgroundColor,
+                                     value: NSColor(tokens.accentPrimary).withAlphaComponent(0.14),
+                                     range: r)
+            }
+
+        case .blockID:
+            // Near-invisible when the caret is elsewhere. It is machinery the
+            // author needs to be able to find, not something to read past.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.25),
+                                 range: r)
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),

@@ -80,11 +80,16 @@ public final class MarkdownEngine: DocumentEngine {
         let model = MarkdownDocumentModel(body: note.body)
         return IndexPayload(title: note.title,
                             plaintext: note.body,
-                            tags: note.tags,
+                            // Frontmatter tags AND inline `#tags`, deduplicated.
+                            // A note tagged both ways must count once, or
+                            // `LoreStore.tagCounts` double-counts it in the
+                            // sidebar chip row.
+                            tags: Array(Set(note.tags + model.inlineTags)).sorted(),
                             properties: note.extra,
                             outline: model.outline,
                             links: model.links,
                             aliases: note.aliases,
+                            blocks: model.blockAnchors,
                             id: note.id)
     }
 
@@ -181,7 +186,9 @@ private struct MarkdownDocumentEditor: View {
                            settings: ctx.editorSettings,
                            headingCompletions: ctx.headingCompletions,
                            createLinkedNote: ctx.createLinkedNote,
-                           completions: ctx.completions, onOpenLink: ctx.openLink,
+                           completions: ctx.completions, tagCompletions: ctx.tagCompletions,
+                           onOpenLink: ctx.openLink,
+                           onTagClick: ctx.onTagClick,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
                            // Task checkboxes are markdown, and only a session

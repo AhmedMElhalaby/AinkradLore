@@ -42,6 +42,7 @@ final class RootViewSmokeTests: XCTestCase {
                              theme: HostTheme(TestTokens.make()),
                              ops: SidebarOperations(store: store),
                              onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                             onTagClick: { _ in },
                              mentionsRequest: .constant(false),
                              showingActions: .constant(false), actionItems: [])
         }
@@ -87,6 +88,7 @@ final class RootViewSmokeTests: XCTestCase {
                          theme: HostTheme(TestTokens.make()),
                          ops: SidebarOperations(store: store),
                          onOutlineChange: { _ in }, onScrollHandler: { _ in },
+                         onTagClick: { _ in },
                          mentionsRequest: .constant(false),
                          showingActions: .constant(false), actionItems: [])
     }

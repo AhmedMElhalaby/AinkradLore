@@ -177,8 +177,12 @@ final class LoreIndexTests: XCTestCase {
         XCTAssertEqual(row.byteSize, 4096)
     }
 
-    func test_schemaVersion_isSeven() {
-        XCTAssertEqual(LoreIndex.schemaVersion, 7)
+    // A bare pin, deliberately: it exists to fail the moment anyone bumps
+    // `schemaVersion`, so a bump is always a deliberate, acknowledged act —
+    // changing this assertion means accepting a full index rebuild on next
+    // launch for every existing vault, not an incidental edit.
+    func test_schemaVersion_isEight() {
+        XCTAssertEqual(LoreIndex.schemaVersion, 8)
     }
 
     func test_isTruncated_roundTrips() throws {

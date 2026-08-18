@@ -33,6 +33,16 @@ public struct OutlineEntry: Sendable, Equatable {
 /// The shell never re-reads a document's file to index it. That indirection is
 /// what lets a PDF or a `.lore` package contribute searchable text it does not
 /// literally contain as bytes.
+/// A `^block-id` anchor and where it sits.
+///
+/// `offset` is a UTF-16 offset into the document BODY, matching every other
+/// offset the index holds.
+public struct BlockAnchor: Sendable, Equatable {
+    public let id: String
+    public let offset: Int
+    public init(id: String, offset: Int) { self.id = id; self.offset = offset }
+}
+
 public struct IndexPayload: Sendable {
     /// Stable document identity, when the format has one of its own (markdown's
     /// `id:` frontmatter key). `nil` means "no intrinsic identity" and the
@@ -48,14 +58,18 @@ public struct IndexPayload: Sendable {
     public var links: [DocumentLink]
     /// Alternate names this document answers to, from frontmatter `aliases`.
     public var aliases: [String]
+    /// `^block-id` anchors this document defines. Populated by M6.
+    public var blocks: [BlockAnchor]
 
     public init(title: String, plaintext: String, tags: [String] = [],
                 properties: [FrontmatterPair] = [], outline: [OutlineEntry] = [],
-                links: [DocumentLink] = [], aliases: [String] = [], id: String? = nil) {
+                links: [DocumentLink] = [], aliases: [String] = [],
+                blocks: [BlockAnchor] = [], id: String? = nil) {
         self.id = id
         self.title = title; self.plaintext = plaintext; self.tags = tags
         self.properties = properties; self.outline = outline; self.links = links
         self.aliases = aliases
+        self.blocks = blocks
     }
 }
 
@@ -94,8 +108,19 @@ public struct EditorContext {
     /// link layer to offer — an engine that ignores it behaves exactly as
     /// before.
     public let completions: @MainActor (String) -> [IndexRow]
+    /// Tag names matching a `#` prefix, for `#` completion. Defaulted to "no
+    /// candidates" — same shape as `completions` — so an engine or call site
+    /// that has not been updated behaves exactly as before.
+    public let tagCompletions: @MainActor (String) -> [String]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// A `#tag` the user clicked in the editor. Wired to the SAME
+    /// `activeTag` filter the sidebar's `TagChipRow`/`NoteListView` share, so
+    /// a click in the body does exactly what a click in the sidebar does.
+    /// Defaulted to a no-op, matching every other closure added since this
+    /// struct was written, so an engine or call site that ignores tags
+    /// behaves exactly as before.
+    public let onTagClick: @MainActor (String) -> Void
     /// Resolves an `![[target]]` embed's raw target to a file, for inline
     /// image / chip rendering (`EmbedRendering`). Defaulted to "nothing
     /// resolves", the same "no link layer" default `completions` and
@@ -152,7 +177,9 @@ public struct EditorContext {
                 reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
                 onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
+                tagCompletions: @escaping @MainActor (String) -> [String] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                onTagClick: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
@@ -168,7 +195,9 @@ public struct EditorContext {
         self.createLinkedNote = createLinkedNote
         self.reportCaretOffset = reportCaretOffset
         self.onChange = onChange
-        self.completions = completions; self.openLink = openLink
+        self.completions = completions; self.tagCompletions = tagCompletions
+        self.openLink = openLink
+        self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler

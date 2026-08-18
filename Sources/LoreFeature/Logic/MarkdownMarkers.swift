@@ -6,6 +6,16 @@ import Foundation
 /// inside a `Kind`.
 public enum MarkerOwner: Equatable, Sendable {
     case heading, strong, emphasis, inlineCode, codeFence, link, wikilink, blockQuote, listBullet
+    /// A `~~` pair.
+    case strikethrough
+    /// A `==` pair.
+    case highlight
+    /// A footnote's `[^`…`]` (reference) or `[^`…`]:` (definition).
+    case footnote
+    /// A `#tag`'s own `#`. Unused by the reveal machinery — the `#` never
+    /// collapses — but present so a future syntax that DOES want to
+    /// distinguish "this marker belongs to a tag" from the other owners can.
+    case tag
     /// A callout's `[!type]` header, which collapses like any other syntax
     /// so the rendered block shows a title rather than its own declaration.
     case callout

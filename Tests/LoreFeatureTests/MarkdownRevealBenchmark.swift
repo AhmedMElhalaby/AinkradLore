@@ -40,6 +40,22 @@ final class MarkdownRevealBenchmark: XCTestCase {
         let body = largeBody()
         measure { _ = MarkdownReveal.blocks(in: body) }
     }
+
+    /// M6's worst case for the extension scanner: every one of the five new
+    /// syntaxes on every line, ~500 repeats of a paragraph dense in
+    /// `==highlight==`, `#tag`, `[^1]`, `~~strike~~` and `^anchor`. This is the
+    /// document shape that would expose an `isClaimed`-style quadratic — a
+    /// scanner that restarts from the beginning of a claimed span instead of
+    /// advancing `i` past it would show up here as a wall-clock outlier
+    /// against `test_blockSegmentationOfALargeDocumentIsFast` above, which
+    /// covers a same-order document with none of the new syntaxes.
+    func test_benchmark_extensionHeavyDocument() {
+        let paragraph = "Prose with ==highlight==, a #tag, a [^1] note and ~~struck~~ text. ^anchor\n\n"
+        let body = String(repeating: paragraph, count: 500)
+        measure {
+            _ = MarkdownDocumentModel(body: body).extensionSpans
+        }
+    }
 }
 
 /// The editor-level half: the bounds this task exists to pin, asserted on the

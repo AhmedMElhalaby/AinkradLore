@@ -95,6 +95,18 @@ struct LoreSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            AinkradFormRow(title: "Render tags as chips",
+                           help: "Draw inline #tags with a tinted background. "
+                               + "Off leaves them as tinted text.") {
+                AinkradToggle(isOn: Binding(
+                    get: { store.editorSettings.renderTagsAsChips },
+                    set: { on in
+                        var next = store.editorSettings
+                        next.renderTagsAsChips = on
+                        store.setEditorSettings(next)
+                    }))
+            }
+
             // The editor's OWN settings — not inherited from the host theme.
             // The host owns hue; how large the text is and how wide the column
             // runs are properties of the document and the person reading it.

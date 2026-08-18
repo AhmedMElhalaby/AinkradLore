@@ -21,6 +21,12 @@ struct MarkdownTheme: Equatable {
     /// tiring to read, which is what an unbounded editor gives you on a wide
     /// window.
     let maxMeasure: CGFloat?
+    /// See `EditorSettings.renderTagsAsChips`. Resolved here rather than read
+    /// from `settings` at the styling call site — `MarkdownStyleRendering
+    /// .add(_:in:to:storage:tokens:theme:)` never has `settings` in scope,
+    /// only `tokens` and `theme`, and `MarkdownTheme` exists precisely to be
+    /// "settings resolved for rendering".
+    let renderTagsAsChips: Bool
 
     /// `settings` defaults to `.default`, whose values are exactly the numbers
     /// this initializer used to hard-code — so every call site that has no
@@ -39,6 +45,7 @@ struct MarkdownTheme: Equatable {
         listIndentStep = 22 * settings.zoomFactor
         contentInset = 28 * settings.zoomFactor
         maxMeasure = settings.maxMeasure
+        renderTagsAsChips = settings.renderTagsAsChips
     }
 
     /// h1…h6. Clamped so an out-of-range level from a malformed document

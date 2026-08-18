@@ -152,4 +152,29 @@ final class EditorSettingsTests: XCTestCase {
                               indexPath: root.appendingPathComponent(".idx.sqlite"))
         XCTAssertEqual(store.editorSettings, .default)
     }
+
+    // MARK: - Render tags as chips
+
+    func test_renderTagsAsChips_defaultsToOn() {
+        // The brief's version of this test called `EditorSettings()` — there
+        // is no parameterless initializer anywhere in this codebase, only
+        // `.default` and the explicit member-wise one. Using `.default`.
+        XCTAssertTrue(EditorSettings.default.renderTagsAsChips)
+    }
+
+    func test_renderTagsAsChips_roundTripsThroughCodable() throws {
+        var settings = EditorSettings.default
+        settings.renderTagsAsChips = false
+        let decoded = try JSONDecoder().decode(
+            EditorSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertFalse(decoded.renderTagsAsChips)
+    }
+
+    func test_renderTagsAsChips_absentFromStoredJSONDecodesToOn() throws {
+        // Someone upgrading has settings JSON written before this key existed.
+        // It must decode, not throw, and must land on the default.
+        let old = Data(#"{"density":"standard","measure":"standard"}"#.utf8)
+        let decoded = try JSONDecoder().decode(EditorSettings.self, from: old)
+        XCTAssertTrue(decoded.renderTagsAsChips)
+    }
 }

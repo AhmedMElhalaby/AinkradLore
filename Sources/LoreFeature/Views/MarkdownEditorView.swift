@@ -74,7 +74,7 @@ extension MarkdownEditor {
             coordinator?.openLink(atUTF16: index) ?? false
         }
         tv.onPlainClick = { [weak coordinator = context.coordinator] index in
-            coordinator?.toggleTask(atUTF16: index) ?? false
+            coordinator?.handlePlainClick(atUTF16: index) ?? false
         }
         // Losing first responder INSIDE the same window — clicking the title
         // field, the sidebar, another pane — is not covered by
@@ -127,6 +127,7 @@ extension MarkdownEditor {
         context.coordinator.writeDroppedFile = writeDroppedFile
         context.coordinator.stylingNotice = Self.addStylingNotice(to: scroll, tokens: tokens)
         context.coordinator.onSelectionChange = onSelectionChange
+        context.coordinator.onTagClick = onTagClick
         tv.string = text
         context.coordinator.applyStyles()
         // The text view exists now, so the closures that need it (cut, copy,
@@ -167,7 +168,9 @@ extension MarkdownEditor {
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tv = context.coordinator.textView else { return }
         context.coordinator.completions = completions
+        context.coordinator.tagCompletions = tagCompletions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.onTagClick = onTagClick
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
         context.coordinator.createLinkedNote = createLinkedNote
@@ -190,6 +193,19 @@ extension MarkdownEditor {
         if context.coordinator.settings != settings {
             context.coordinator.settings = settings
             context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
+            // `applyStyles()` below is a no-op unless `isRenderStale` says the
+            // ON-SCREEN render is out of date, and that guard compares only
+            // `tokens` and the text — never `settings` (see
+            // `MarkdownEditorEditPath.isRenderStale`). Without this, a
+            // settings-only change (e.g. the "Render tags as chips" toggle,
+            // or text size / line width) would update the geometry above but
+            // leave every span's ATTRIBUTES exactly as `MarkdownTheme`
+            // computed them under the OLD settings, until some unrelated
+            // edit or token change happened to invalidate the cache. Forcing
+            // the snapshot stale here is what makes a settings change apply
+            // to the document already on screen, not only the next one
+            // opened.
+            context.coordinator.renderedSnapshot = nil
         }
         context.coordinator.applyStyles()
         if let offset = scrollTarget.wrappedValue {

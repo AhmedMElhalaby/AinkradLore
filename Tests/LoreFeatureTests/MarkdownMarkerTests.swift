@@ -184,4 +184,26 @@ final class MarkdownMarkerTests: XCTestCase {
         XCTAssertEqual(text(.wikilink), ["W"])
         XCTAssertEqual(text(.checkbox(false)), ["[ ]"])
     }
+
+    func test_strikethrough_emitsSpanAndBothMarkers() {
+        let model = MarkdownDocumentModel(body: "a ~~gone~~ b")
+        let spans = model.styleSpans
+
+        XCTAssertTrue(spans.contains { $0.kind == .strikethrough && $0.range == 2..<10 },
+                      "expected a strikethrough span covering `~~gone~~`, got \(spans)")
+        let markers = spans.filter { $0.kind == .marker(of: .strikethrough) }.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
+        XCTAssertEqual(markers, [2..<4, 8..<10])
+    }
+
+    func test_strikethrough_nestedEmphasisStillStyles() {
+        // Proves `descendInto` was not forgotten.
+        let model = MarkdownDocumentModel(body: "~~a **b** c~~")
+        XCTAssertTrue(model.styleSpans.contains { $0.kind == .strong },
+                      "nested strong was not visited — did visitStrikethrough call descendInto?")
+    }
+
+    func test_strikethrough_singleTildeIsNotStrikethrough() {
+        let model = MarkdownDocumentModel(body: "a ~gone~ b")
+        XCTAssertFalse(model.styleSpans.contains { $0.kind == .strikethrough })
+    }
 }

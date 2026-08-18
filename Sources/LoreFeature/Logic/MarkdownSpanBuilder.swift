@@ -7,6 +7,23 @@ public struct StyleSpan: Equatable, Sendable {
         case heading(Int)
         case strong
         case emphasis
+        /// `~~text~~`. From the AST — `swift-markdown` has a `Strikethrough`
+        /// node — not from `MarkdownExtensions`, because wherever the AST has
+        /// a node the AST stays the single source of truth.
+        case strikethrough
+        /// `==text==`. From `MarkdownExtensions`, not the AST — CommonMark has
+        /// no highlight node.
+        case highlight
+        /// `[^label]` inline.
+        case footnoteReference(label: String)
+        /// `[^label]:` at line start.
+        case footnoteDefinition(label: String)
+        /// `#tag`, `#nested/tag`. `name` excludes the `#` and any trailing
+        /// `/`. From `MarkdownExtensions` — CommonMark has no tag node.
+        case tag(name: String)
+        /// `^block-id` at the end of a block. An anchor, not a control. From
+        /// `MarkdownExtensions` — CommonMark has no block-reference node.
+        case blockID(id: String)
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -62,8 +79,19 @@ public struct StyleSpan: Equatable, Sendable {
         /// revealing them together is the block-scoped behaviour being replaced.
         var isDelimitedByASinglePair: Bool {
             switch self {
-            case .strong, .emphasis, .inlineCode, .codeBlock, .link, .wikilink, .embed:
+            case .strong, .emphasis, .strikethrough, .highlight, .inlineCode, .codeBlock, .link, .wikilink, .embed:
                 return true
+            case .footnoteReference:
+                return true
+            case .footnoteDefinition:
+                return false
+            // No closing delimiter at all — there is nothing to split across
+            // a line break, and no pair to reveal together.
+            case .tag:
+                return false
+            // Line-scoped, with no closing half — same shape as `.tag`.
+            case .blockID:
+                return false
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:
                 return false
@@ -135,6 +163,22 @@ extension MarkdownASTCollector {
                           .emphasis)
         }
         descendInto(emphasis)
+    }
+
+    mutating func visitStrikethrough(_ strikethrough: Strikethrough) {
+        // cmark-gfm's strikethrough extension accepts a single `~` as well as
+        // `~~` — Obsidian does not, so a single-tilde node (no `~~` at both
+        // ends) is dropped rather than styled. "Emit nothing rather than
+        // guess": `paired` is the same check `.strong`/`.emphasis` trust, so
+        // reusing its emptiness as the gate keeps this one rule in one place.
+        if let ns = resolve(strikethrough.range) {
+            let markers = MarkdownMarkers.paired("~~", in: ns, text: text)
+            if !markers.isEmpty {
+                styleSpans.append(StyleSpan(range: swiftRange(ns), kind: .strikethrough))
+                appendMarkers(markers, .strikethrough)
+            }
+        }
+        descendInto(strikethrough)
     }
 
     mutating func visitLink(_ link: Link) {

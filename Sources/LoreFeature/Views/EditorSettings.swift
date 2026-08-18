@@ -107,6 +107,11 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// Keep the caret at a fixed height rather than letting it walk to the
     /// bottom edge.
     public var typewriterMode: Bool
+    /// Whether inline `#tags` draw as tinted chips or as plain tinted text.
+    ///
+    /// On by default — chips are what makes a tag scannable. Off exists
+    /// because some people want the `#` typographically quiet in long prose.
+    public var renderTagsAsChips: Bool = true
 
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
     /// line-height 1.5, paragraph spacing 12, measure 760). That is not
@@ -120,12 +125,46 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// page should behave, and an editor that dims most of the document the
     /// first time it is opened reads as broken rather than as focused.
     public init(density: Density, measure: Measure, zoomStep: Int,
-                focusMode: Bool = false, typewriterMode: Bool = false) {
+                focusMode: Bool = false, typewriterMode: Bool = false,
+                renderTagsAsChips: Bool = true) {
         self.density = density
         self.measure = measure
         self.zoomStep = Self.clampZoom(zoomStep)
         self.focusMode = focusMode
         self.typewriterMode = typewriterMode
+        self.renderTagsAsChips = renderTagsAsChips
+    }
+
+    /// Custom `Decodable` rather than the synthesised one: `EditorSettings` is
+    /// persisted, so its on-disk JSON was written by whatever version the
+    /// user last ran. ANY key here — not just the newest one — is absent
+    /// from JSON written before that key existed, so EVERY property decodes
+    /// with `decodeIfPresent` and falls back to its own default. A
+    /// synthesised decoder (or one that hand-picks which keys are optional)
+    /// treats the rest as required regardless of their declared defaults,
+    /// which throws on an old install and falls back to `.default` for the
+    /// WHOLE struct — silently discarding density, measure, zoom and
+    /// everything else the user had actually set, to avoid defaulting the
+    /// one key that is genuinely missing. Sparse, old JSON must still decode
+    /// into "everything it specifies, defaults for the rest" — never an
+    /// all-or-nothing failure.
+    private enum CodingKeys: String, CodingKey {
+        case density, measure, zoomStep, focusMode, typewriterMode, renderTagsAsChips
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        density = try container.decodeIfPresent(Density.self, forKey: .density)
+            ?? EditorSettings.default.density
+        measure = try container.decodeIfPresent(Measure.self, forKey: .measure)
+            ?? EditorSettings.default.measure
+        zoomStep = Self.clampZoom(
+            try container.decodeIfPresent(Int.self, forKey: .zoomStep)
+                ?? EditorSettings.default.zoomStep)
+        focusMode = try container.decodeIfPresent(Bool.self, forKey: .focusMode) ?? false
+        typewriterMode = try container.decodeIfPresent(Bool.self, forKey: .typewriterMode) ?? false
+        renderTagsAsChips = try container.decodeIfPresent(Bool.self, forKey: .renderTagsAsChips)
+            ?? true
     }
 
     /// Font FAMILY is deliberately not modelled here.
@@ -163,13 +202,15 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     public func zoomed(by step: Int) -> EditorSettings {
         EditorSettings(density: density, measure: measure,
                        zoomStep: Self.clampZoom(zoomStep + step),
-                       focusMode: focusMode, typewriterMode: typewriterMode)
+                       focusMode: focusMode, typewriterMode: typewriterMode,
+                       renderTagsAsChips: renderTagsAsChips)
     }
 
     /// Zoom reset to the density's own size (⌘0).
     public func zoomReset() -> EditorSettings {
         EditorSettings(density: density, measure: measure, zoomStep: 0,
-                       focusMode: focusMode, typewriterMode: typewriterMode)
+                       focusMode: focusMode, typewriterMode: typewriterMode,
+                       renderTagsAsChips: renderTagsAsChips)
     }
 }
 

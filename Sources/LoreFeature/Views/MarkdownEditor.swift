@@ -17,9 +17,18 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
     /// entirely — which is how plain-text documents get no link affordances.
     let completions: (@MainActor (String) -> [IndexRow])?
+    /// Tag names matching the current `#` prefix, for `#` completion. `nil`
+    /// disables it entirely — same "no capability supplied" shape as
+    /// `completions` above, so a document type with no tag pipeline (or a
+    /// call site that has not been updated) behaves exactly as before.
+    let tagCompletions: (@MainActor (String) -> [String])?
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Called with a `#tag`'s name when clicked in the body. `nil` disables
+    /// tag-click-to-filter entirely, matching `onOpenLink`'s "no capability
+    /// supplied" shape.
+    let onTagClick: (@MainActor (String) -> Void)?
     /// Resolves an `![[target]]` embed's raw target to a file, for
     /// `EmbedRendering`. `nil` — the default — makes every embed render
     /// `.unresolved` (plain wikilink colouring), which is the right answer
@@ -60,7 +69,9 @@ public struct MarkdownEditor: NSViewRepresentable {
                 headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)? = nil,
                 createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
+                tagCompletions: (@MainActor (String) -> [String])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                onTagClick: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
@@ -73,7 +84,9 @@ public struct MarkdownEditor: NSViewRepresentable {
         self._text = text; self.tokens = tokens; self.settings = settings
         self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
-        self.completions = completions; self.onOpenLink = onOpenLink
+        self.completions = completions; self.tagCompletions = tagCompletions
+        self.onOpenLink = onOpenLink
+        self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
@@ -120,7 +133,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// one they open.
         var settings: EditorSettings
         var completions: (@MainActor (String) -> [IndexRow])?
+        /// See `MarkdownEditor.tagCompletions`.
+        var tagCompletions: (@MainActor (String) -> [String])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.onTagClick`.
+        var onTagClick: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
         /// practice — `makeNSView`/`updateNSView` always install at least the
         /// "no candidates" closure, matching how `completions` degrades.
@@ -327,7 +344,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onSelectionChange?(tv.string, tv.selectedRange(), tv.spellCheckerDocumentTag)
             }
             guard completionPanel.isVisible, let tv = textView else { return }
-            if activePrefix(in: tv) == nil { completionPanel.hide() }
+            if activeTrigger(in: tv) == nil { completionPanel.hide() }
         }
 
         /// Focus left the editor. Nothing the list offers can be accepted from
@@ -394,6 +411,82 @@ public struct MarkdownEditor: NSViewRepresentable {
             else { return false }
             onOpenLink(target)
             return true
+        }
+
+        // MARK: - Plain click: footnote jump and tag filter
+
+        /// Dispatches a plain (unmodified, single) click to whichever of the
+        /// three navigation affordances owns the clicked offset, in the same
+        /// fall-through spirit as `toggleTask` — `false` means "not mine",
+        /// and the caret lands exactly where the user clicked.
+        ///
+        /// All three work in a READ-ONLY session: they navigate, they never
+        /// write, so none of them consults `allowsTaskToggle` or any
+        /// read-only gate the way `toggleTask` does.
+        @MainActor func handlePlainClick(atUTF16 index: Int) -> Bool {
+            if toggleTask(atUTF16: index) { return true }
+            if jumpFootnote(atUTF16: index) { return true }
+            // `selectTag` always returns `false` — see its doc comment
+            // (Finding 7): it fires `onTagClick` as a side effect but never
+            // claims the click, so the caret still lands where the user
+            // clicked and `#tagg` stays editable.
+            _ = selectTag(atUTF16: index)
+            // `.blockID` is an anchor, not a control — deliberately no case
+            // for it here. A click on one falls through to ordinary caret
+            // placement, same as clicking any other plain text.
+            return false
+        }
+
+        /// A click on a `[^label]` reference lands on its `[^label]:`
+        /// definition; a click on the definition's own label lands back on
+        /// the FIRST reference sharing that label. Located via
+        /// `MarkdownNavigation.footnoteJumpTarget`, which filters
+        /// `styleCache.spans` to the footnote KINDS before matching offsets —
+        /// a plain `first(where: { $0.range.contains(index) })` over the
+        /// whole array (AST spans first, extension spans last — see
+        /// `MarkdownDocumentModel.styleSpans`) would return whatever
+        /// CONTAINING span got there first: a list item, a blockquote, a
+        /// callout — and never reach the footnote at all. See the M6 final
+        /// review, Finding 1. A stale cache can only pick a stale
+        /// destination, never an out-of-bounds one, since `scrollToOffset`
+        /// clamps to `[0, length]`.
+        @MainActor private func jumpFootnote(atUTF16 index: Int) -> Bool {
+            guard let target = MarkdownNavigation.footnoteJumpTarget(
+                in: styleCache.spans, at: index) else { return false }
+            scrollToOffset(target)
+            return true
+        }
+
+        /// A click on a `#tag` sets `activeTag` — the SAME filter
+        /// `TagChipRow`/`NoteListView` share via `EditorContext.onTagClick` —
+        /// so a tag clicked in the body does exactly what one clicked in the
+        /// sidebar does. No new channel: this rides the existing binding all
+        /// the way up through `DocumentPane`/`DocumentPaneColumn`.
+        ///
+        /// Located via `MarkdownNavigation.tagSpan`, which filters to `.tag`
+        /// spans before matching offsets — see `jumpFootnote`'s comment for
+        /// why a plain `first(where:)` over the whole span array cannot
+        /// reach a tag nested in a list item or blockquote (Finding 1).
+        ///
+        /// ALWAYS returns `false`. The filter fires as a side effect, but the
+        /// click itself is never swallowed: `toggleTask` deliberately
+        /// preserves "the caret goes here", and a swallowed click on `#tagg`
+        /// would make the typo the one span the user cannot click into to
+        /// fix — see Finding 7. `jumpFootnote` above is the opposite case on
+        /// purpose: it swallows, because a footnote click is about to scroll
+        /// the caret elsewhere anyway.
+        @MainActor private func selectTag(atUTF16 index: Int) -> Bool {
+            guard let onTagClick, let hit = MarkdownNavigation.tagSpan(in: styleCache.spans, at: index),
+                  let tv = textView,
+                  // Finding 12: the cached span's associated `name` is a
+                  // CANDIDATE, never an authority — re-derive it from the
+                  // live text the way `toggleTask` re-reads `tv.string`
+                  // rather than trusting `styleCache`, which may lag by up
+                  // to one styling debounce.
+                  let name = MarkdownNavigation.liveTagName(forSpan: hit.range, in: tv.string as NSString)
+            else { return false }
+            onTagClick(name)
+            return false
         }
 
         // The styling pipeline — parse debounce, render, reveal, container
