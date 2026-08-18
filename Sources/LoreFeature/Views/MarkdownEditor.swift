@@ -25,6 +25,10 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Called with a `#tag`'s name when clicked in the body. `nil` disables
+    /// tag-click-to-filter entirely, matching `onOpenLink`'s "no capability
+    /// supplied" shape.
+    let onTagClick: (@MainActor (String) -> Void)?
     /// Resolves an `![[target]]` embed's raw target to a file, for
     /// `EmbedRendering`. `nil` — the default — makes every embed render
     /// `.unresolved` (plain wikilink colouring), which is the right answer
@@ -67,6 +71,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 tagCompletions: (@MainActor (String) -> [String])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                onTagClick: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
@@ -81,6 +86,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.createLinkedNote = createLinkedNote
         self.completions = completions; self.tagCompletions = tagCompletions
         self.onOpenLink = onOpenLink
+        self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
@@ -130,6 +136,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// See `MarkdownEditor.tagCompletions`.
         var tagCompletions: (@MainActor (String) -> [String])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.onTagClick`.
+        var onTagClick: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
         /// practice — `makeNSView`/`updateNSView` always install at least the
         /// "no candidates" closure, matching how `completions` degrades.
@@ -402,6 +410,69 @@ public struct MarkdownEditor: NSViewRepresentable {
             guard let target = LinkCompletionContext.target(in: text, at: offset)
             else { return false }
             onOpenLink(target)
+            return true
+        }
+
+        // MARK: - Plain click: footnote jump and tag filter
+
+        /// Dispatches a plain (unmodified, single) click to whichever of the
+        /// three navigation affordances owns the clicked offset, in the same
+        /// fall-through spirit as `toggleTask` — `false` means "not mine",
+        /// and the caret lands exactly where the user clicked.
+        ///
+        /// All three work in a READ-ONLY session: they navigate, they never
+        /// write, so none of them consults `allowsTaskToggle` or any
+        /// read-only gate the way `toggleTask` does.
+        @MainActor func handlePlainClick(atUTF16 index: Int) -> Bool {
+            if toggleTask(atUTF16: index) { return true }
+            if jumpFootnote(atUTF16: index) { return true }
+            if selectTag(atUTF16: index) { return true }
+            // `.blockID` is an anchor, not a control — deliberately no case
+            // for it here. A click on one falls through to ordinary caret
+            // placement, same as clicking any other plain text.
+            return false
+        }
+
+        /// A click on a `[^label]` reference lands on its `[^label]:`
+        /// definition; a click on the definition's own label lands back on
+        /// the FIRST reference sharing that label. Located against
+        /// `styleCache.spans` — a stale cache can only pick a stale
+        /// destination, never an out-of-bounds one, since `scrollToOffset`
+        /// clamps to `[0, length]`.
+        @MainActor private func jumpFootnote(atUTF16 index: Int) -> Bool {
+            guard let hit = styleCache.spans.first(where: { $0.range.contains(index) })
+            else { return false }
+            switch hit.kind {
+            case .footnoteReference(let label):
+                guard let definition = styleCache.spans.first(where: {
+                    if case .footnoteDefinition(let defLabel) = $0.kind { return defLabel == label }
+                    return false
+                }) else { return false }
+                scrollToOffset(definition.range.lowerBound)
+                return true
+            case .footnoteDefinition(let label):
+                guard let reference = styleCache.spans.first(where: {
+                    if case .footnoteReference(let refLabel) = $0.kind { return refLabel == label }
+                    return false
+                }) else { return false }
+                scrollToOffset(reference.range.lowerBound)
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// A click on a `#tag` sets `activeTag` — the SAME filter
+        /// `TagChipRow`/`NoteListView` share via `EditorContext.onTagClick` —
+        /// so a tag clicked in the body does exactly what one clicked in the
+        /// sidebar does. No new channel: this rides the existing binding all
+        /// the way up through `DocumentPane`/`DocumentPaneColumn`.
+        @MainActor private func selectTag(atUTF16 index: Int) -> Bool {
+            guard let onTagClick,
+                  let hit = styleCache.spans.first(where: { $0.range.contains(index) }),
+                  case .tag(let name) = hit.kind
+            else { return false }
+            onTagClick(name)
             return true
         }
 

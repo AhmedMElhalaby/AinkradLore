@@ -292,6 +292,10 @@ struct LoreRootView: View {
             onFocus: { store.focusPane(secondary: isSecondary) },
             onOutlineChange: { outline = $0 },
             onScrollHandler: { jumpToOffset = $0 },
+            // The SAME `activeTag` the sidebar's `TagChipRow`/`NoteListView`
+            // already filter on — a tag clicked in the editor does exactly
+            // what one clicked in the sidebar does.
+            onTagClick: { tag in activeTag = tag },
             mentionsRequest: $mentionsRequest)
     }
 

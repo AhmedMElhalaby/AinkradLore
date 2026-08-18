@@ -223,13 +223,12 @@ enum MarkdownStyleRenderer {
             // The `#` STAYS VISIBLE — Obsidian keeps it, and without it a tag
             // chip is indistinguishable from a link chip.
             //
-            // `true` unconditionally for now: `settings` is not in scope
-            // here and `MarkdownTheme.renderTagsAsChips` does not exist yet.
-            // Task 11 adds it and swaps this literal for `theme.renderTagsAsChips`.
-            let renderTagsAsChips = true
+            // `theme.renderTagsAsChips`, not `settings` — `settings` is never
+            // in scope here; `MarkdownTheme` resolves it at construction. See
+            // `EditorSettings.renderTagsAsChips`.
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.accentPrimary), range: r)
-            if renderTagsAsChips {
+            if theme.renderTagsAsChips {
                 storage.addAttribute(.backgroundColor,
                                      value: NSColor(tokens.accentPrimary).withAlphaComponent(0.14),
                                      range: r)

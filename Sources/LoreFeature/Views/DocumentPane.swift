@@ -56,6 +56,10 @@ struct DocumentPane: View {
     /// the palette can jump. Same channel `OutlineSection` already uses, just
     /// forwarded one level further.
     let onScrollHandler: (((Int) -> Void)?) -> Void
+    /// A `#tag` clicked in the editor. Forwarded straight to `LoreRootView`'s
+    /// `activeTag`, the same binding `TagChipRow`/`NoteListView` already
+    /// share — see `EditorContext.onTagClick`.
+    let onTagClick: @MainActor (String) -> Void
     /// The raw target of a Cmd-clicked link that resolved to nothing. Non-nil
     /// only while the "create it?" prompt is up — clicking a dead link must
     /// never create a file silently.
@@ -310,6 +314,7 @@ struct DocumentPane: View {
                                   let name = LinkCompletionContext.documentName(of: target)
                                   if !store.openLink(name) { unresolved = name }
                               },
+                              onTagClick: onTagClick,
                               resolveEmbedTarget: { store.resolveLink($0) },
                               linkTarget: { store.linkTarget(for: $0) },
                               registerScrollHandler: { handler in

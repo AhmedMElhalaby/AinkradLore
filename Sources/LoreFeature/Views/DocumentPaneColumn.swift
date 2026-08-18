@@ -23,6 +23,9 @@ struct DocumentPaneColumn: View {
     let onFocus: () -> Void
     let onOutlineChange: ([OutlineEntry]) -> Void
     let onScrollHandler: (((Int) -> Void)?) -> Void
+    /// A `#tag` clicked in the FOCUSED column's editor. See `DocumentPane
+    /// .onTagClick`.
+    let onTagClick: @MainActor (String) -> Void
 
     /// A request from ⇧⌘B, shared by both columns and consumed only by the
     /// FOCUSED one. Column-local state would leave the command with nothing to
@@ -39,6 +42,11 @@ struct DocumentPaneColumn: View {
             DocumentPane(store: store, session: session, theme: theme, ops: ops,
                          onOutlineChange: { if isFocused { onOutlineChange($0) } },
                          onScrollHandler: { if isFocused { onScrollHandler($0) } },
+                         // NOT gated on `isFocused` — a tag click is a direct
+                         // action in WHICHEVER column it landed in, not a
+                         // "what does the active pane show" question the way
+                         // the outline/scroll channels are.
+                         onTagClick: onTagClick,
                          mentionsRequest: isFocused ? $mentionsRequest : .constant(false),
                          showingActions: $showingActions,
                          actionItems: actionItems)

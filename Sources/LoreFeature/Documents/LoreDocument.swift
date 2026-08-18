@@ -114,6 +114,13 @@ public struct EditorContext {
     public let tagCompletions: @MainActor (String) -> [String]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// A `#tag` the user clicked in the editor. Wired to the SAME
+    /// `activeTag` filter the sidebar's `TagChipRow`/`NoteListView` share, so
+    /// a click in the body does exactly what a click in the sidebar does.
+    /// Defaulted to a no-op, matching every other closure added since this
+    /// struct was written, so an engine or call site that ignores tags
+    /// behaves exactly as before.
+    public let onTagClick: @MainActor (String) -> Void
     /// Resolves an `![[target]]` embed's raw target to a file, for inline
     /// image / chip rendering (`EmbedRendering`). Defaulted to "nothing
     /// resolves", the same "no link layer" default `completions` and
@@ -172,6 +179,7 @@ public struct EditorContext {
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 tagCompletions: @escaping @MainActor (String) -> [String] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                onTagClick: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
@@ -189,6 +197,7 @@ public struct EditorContext {
         self.onChange = onChange
         self.completions = completions; self.tagCompletions = tagCompletions
         self.openLink = openLink
+        self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler
