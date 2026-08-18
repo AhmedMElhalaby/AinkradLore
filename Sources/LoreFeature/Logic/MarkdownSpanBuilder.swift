@@ -18,6 +18,9 @@ public struct StyleSpan: Equatable, Sendable {
         case footnoteReference(label: String)
         /// `[^label]:` at line start.
         case footnoteDefinition(label: String)
+        /// `#tag`, `#nested/tag`. `name` excludes the `#` and any trailing
+        /// `/`. From `MarkdownExtensions` — CommonMark has no tag node.
+        case tag(name: String)
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -78,6 +81,10 @@ public struct StyleSpan: Equatable, Sendable {
             case .footnoteReference:
                 return true
             case .footnoteDefinition:
+                return false
+            // No closing delimiter at all — there is nothing to split across
+            // a line break, and no pair to reveal together.
+            case .tag:
                 return false
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:

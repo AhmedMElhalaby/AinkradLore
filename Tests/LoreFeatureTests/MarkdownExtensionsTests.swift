@@ -99,4 +99,77 @@ final class MarkdownExtensionsTests: XCTestCase {
     func test_footnote_insideCodeEmitsNothing() {
         XCTAssertTrue(scan("```\n[^1]: no\n```").isEmpty)
     }
+
+    // MARK: - #tags
+
+    func test_tag_simple() {
+        let spans = scan("a #idea b")
+        XCTAssertEqual(spans.first?.kind, .tag(name: "idea"))
+        XCTAssertEqual(spans.first?.range, 2..<7)
+    }
+
+    func test_tag_nested() {
+        XCTAssertEqual(scan("#project/ainkrad").first?.kind,
+                       .tag(name: "project/ainkrad"))
+    }
+
+    func test_tag_withHyphenAndUnderscore() {
+        XCTAssertEqual(scan("#well-known_thing").first?.kind,
+                       .tag(name: "well-known_thing"))
+    }
+
+    func test_tag_headingIsNotATag() {
+        // `#` at line start followed by a space is a heading. It belongs to the AST.
+        XCTAssertTrue(scan("# Heading").isEmpty)
+    }
+
+    func test_tag_atLineStartWithoutSpaceIsATag() {
+        XCTAssertEqual(scan("#idea").first?.kind, .tag(name: "idea"))
+    }
+
+    func test_tag_allDigitsIsNotATag() {
+        // Keeps issue references (`#1234`) out. Obsidian's own rule: a tag needs
+        // at least one non-digit.
+        XCTAssertTrue(scan("see #1234").isEmpty)
+    }
+
+    func test_tag_mixedDigitsAndLettersIsATag() {
+        XCTAssertEqual(scan("#v2release").first?.kind, .tag(name: "v2release"))
+    }
+
+    func test_tag_bareHashEmitsNothing() {
+        XCTAssertTrue(scan("a # b").isEmpty)
+    }
+
+    func test_tag_insideCodeFenceEmitsNothing() {
+        XCTAssertTrue(scan("```\n#!/bin/sh\n#idea\n```").isEmpty)
+    }
+
+    func test_tag_insideWikilinkEmitsNothing() {
+        // `[[Note#Heading]]` — the `#` is a fragment separator, not a tag.
+        XCTAssertTrue(scan("[[Note#Heading]]").isEmpty)
+    }
+
+    func test_tag_insideMarkdownLinkTargetEmitsNothing() {
+        XCTAssertTrue(scan("[text](https://x.test/page#anchor)").isEmpty)
+    }
+
+    func test_tag_trailingSlashIsTrimmedFromName() {
+        let span = scan("#project/")
+        XCTAssertEqual(span.first?.kind, .tag(name: "project"))
+    }
+
+    func test_tag_trailingPunctuationIsNotPartOfIt() {
+        let spans = scan("about #idea.")
+        XCTAssertEqual(spans.first?.kind, .tag(name: "idea"))
+        XCTAssertEqual(spans.first?.range, 6..<11)   // excludes the full stop
+    }
+
+    func test_tag_astralCharacterSurvivesInName() {
+        // A surrogate pair must not be mangled into "?" — a tag name reaches the
+        // index, the sidebar chip row and the MCP tools, so two different emoji
+        // tags collapsing to the same string is a real collision, not a cosmetic
+        // one.
+        XCTAssertEqual(scan("#🎈idea").first?.kind, .tag(name: "🎈idea"))
+    }
 }

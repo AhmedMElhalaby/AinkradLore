@@ -219,6 +219,22 @@ enum MarkdownStyleRenderer {
                                      .withAlphaComponent(LoreMetrics.secondaryText),
                                  range: r)
 
+        case .tag:
+            // The `#` STAYS VISIBLE — Obsidian keeps it, and without it a tag
+            // chip is indistinguishable from a link chip.
+            //
+            // `true` unconditionally for now: `settings` is not in scope
+            // here and `MarkdownTheme.renderTagsAsChips` does not exist yet.
+            // Task 11 adds it and swaps this literal for `theme.renderTagsAsChips`.
+            let renderTagsAsChips = true
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.accentPrimary), range: r)
+            if renderTagsAsChips {
+                storage.addAttribute(.backgroundColor,
+                                     value: NSColor(tokens.accentPrimary).withAlphaComponent(0.14),
+                                     range: r)
+            }
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),

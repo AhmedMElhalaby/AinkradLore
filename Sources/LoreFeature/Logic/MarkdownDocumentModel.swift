@@ -264,11 +264,17 @@ public struct MarkdownDocumentModel: Sendable {
                                   kind: .marker(of: .footnote)),
                         StyleSpan(range: span.content.upperBound..<span.range.upperBound,
                                   kind: .marker(of: .footnote))]
-            case .tag, .blockID:
-                // Each replaced by its own arm in Tasks 5 and 6. Listed
-                // explicitly rather than behind a `default:` so that adding a
-                // sixth Kind later breaks THIS switch and forces the question,
-                // exactly as `isDelimitedByASinglePair` does.
+            case .tag(let name):
+                // The WHOLE range, `#` included, and NO marker span: Obsidian
+                // keeps the `#` visible (a tag chip without it would be
+                // indistinguishable from a link chip), so there is nothing
+                // for `MarkdownReveal` to collapse.
+                return [StyleSpan(range: span.range, kind: .tag(name: name))]
+            case .blockID:
+                // Replaced by its own arm in Task 6. Listed explicitly rather
+                // than behind a `default:` so that adding a sixth Kind later
+                // breaks THIS switch and forces the question, exactly as
+                // `isDelimitedByASinglePair` does.
                 return []
             }
         }
@@ -373,7 +379,55 @@ public struct MarkdownDocumentModel: Sendable {
         let text = fullText as NSString
         let mathRanges = MarkdownMath.spans(in: text, isSuppressed: { allKindsIndex.contains($0) })
             .map(\.range)
-        self.extensionSpans = MarkdownExtensions.scan(text, masked: codeRanges + mathRanges)
+        // Link ranges a `#` must never become a tag inside. Two different
+        // sources, because no single existing scan covers both link syntaxes:
+        //
+        // - Markdown links `[text](target)`, WHOLE range (brackets, parens
+        //   and target all included) — from `self.astStyleSpans`, the AST
+        //   pass already run above. `LinkParser` was tried here first and
+        //   rejected: it deliberately excludes any target containing "://"
+        //   (an external URL is not a vault link), so
+        //   `[text](https://x.test/page#anchor)` never appeared in its
+        //   results and the `#` inside it was wrongly scanned as a tag.
+        //   `self.astStyleSpans` has no such filter — swift-markdown parses
+        //   a `Link` node whatever its target — so it is used instead of a
+        //   second, narrower parse.
+        // - Wikilink TARGETS `[[Target#fragment]]` — the AST has no node for
+        //   these at all (`[[…]]` is not CommonMark), so `LinkParser` is
+        //   still needed for this half. This is the same seam
+        //   `wikilinkSpans` reads, filtered to `.wikilink` syntax only:
+        //   markdown-link coverage now comes from `astStyleSpans` above, so
+        //   asking `LinkParser` for markdown spans here would be redundant
+        //   work for no wider a result.
+        //
+        // Neither is a NEW parse: `astStyleSpans` is this init's own AST
+        // walk, already assigned above; `LinkParser.scan` here mirrors
+        // exactly what `wikilinkSpans` already calls, so this stays "one
+        // parse of the document, plus one bracket-only scan for the one
+        // syntax the AST cannot see" — not a second full parse.
+        //
+        // Inlined rather than calling `injectableSuppressionIndex`: `self`
+        // is not fully initialized until `extensionSpans` itself is
+        // assigned, so a computed property that reads `self` cannot be
+        // called here — same reason `mathRanges` above calls
+        // `MarkdownMath.spans` directly instead of going through `self`.
+        let markdownLinkRanges = astStyleSpans.compactMap { $0.kind == .link ? $0.range : nil }
+        let linkSuppression: CodeRegionIndex? = fullText.contains("\r\n")
+            ? nil : self.linkSuppressionIndex
+        let linkScan = LinkParser.scan(fullText, suppression: linkSuppression)
+        let linkUTF16Offsets = linkScan.normalised
+            ? CharacterOffsetMap.make(for: fullText) : linkScan.offsets
+        let wikilinkTargetRanges: [Range<Int>] = linkScan.spans.compactMap { span in
+            guard span.link.syntax == .wikilink,
+                  span.targetRange.lowerBound >= 0,
+                  span.targetRange.upperBound < linkUTF16Offsets.count else { return nil }
+            let lower = linkUTF16Offsets[span.targetRange.lowerBound]
+            let upper = linkUTF16Offsets[span.targetRange.upperBound]
+            return lower..<upper
+        }
+        self.extensionSpans = MarkdownExtensions.scan(
+            text, masked: codeRanges + mathRanges,
+            linkRanges: markdownLinkRanges + wikilinkTargetRanges)
     }
 
     /// True if `offset` is inside ANY code region. Semantics unchanged: callers
