@@ -204,6 +204,20 @@ public struct MarkdownDocumentModel: Sendable {
         WikilinkSpanBuilder.spans(in: fullText, suppression: injectableSuppressionIndex)
     }
 
+    /// Tag names written inline in the body, deduplicated, in document order.
+    ///
+    /// Derived from `extensionSpans`, which the initializer already computed —
+    /// a second scan here would be a second parse, which is the disagreement
+    /// this type exists to remove.
+    public var inlineTags: [String] {
+        var seen = Set<String>()
+        return extensionSpans.compactMap { span in
+            guard case let .tag(name) = span.kind, seen.insert(name).inserted
+            else { return nil }
+            return name
+        }
+    }
+
     /// Every link this document contributes to the graph, from THIS parse.
     ///
     /// The index-building half of `indexPayload` used to call

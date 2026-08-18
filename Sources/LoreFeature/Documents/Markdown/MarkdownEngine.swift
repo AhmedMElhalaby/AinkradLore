@@ -80,7 +80,11 @@ public final class MarkdownEngine: DocumentEngine {
         let model = MarkdownDocumentModel(body: note.body)
         return IndexPayload(title: note.title,
                             plaintext: note.body,
-                            tags: note.tags,
+                            // Frontmatter tags AND inline `#tags`, deduplicated.
+                            // A note tagged both ways must count once, or
+                            // `LoreStore.tagCounts` double-counts it in the
+                            // sidebar chip row.
+                            tags: Array(Set(note.tags + model.inlineTags)).sorted(),
                             properties: note.extra,
                             outline: model.outline,
                             links: model.links,
