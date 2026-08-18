@@ -31,9 +31,40 @@ extension MarkdownEditor.Coordinator {
         func activeTrigger(in tv: NSTextView) -> LinkCompletionContext.Trigger? {
             guard tv.selectedRange().length == 0 else { return nil }
             let text = tv.string
-            guard let caret = Range(NSRange(location: tv.selectedRange().location, length: 0),
+            let caretOffset = tv.selectedRange().location
+            guard let caret = Range(NSRange(location: caretOffset, length: 0),
                                     in: text)?.lowerBound else { return nil }
-            return LinkCompletionContext.trigger(in: text, at: caret)
+            guard let trigger = LinkCompletionContext.trigger(in: text, at: caret) else { return nil }
+            // Finding 11 (M6 final review): `LinkCompletionContext.tagTrigger`
+            // scans the LIVE text char-by-char and knows nothing of code
+            // fences or math — unlike `scanTags`, which never emits a `.tag`
+            // span inside either (`isClaimed` against the code+math mask).
+            // Without this check, typing `#idea` inside a fenced code block
+            // opened the tag completion panel for a span the editor would
+            // never actually style as a tag. Gated on `.tag` only —
+            // `[[wikilink` completion had no such gap to begin with.
+            //
+            // Checked against `styleCache.spans` from the LAST full parse,
+            // same staleness budget `hasReferenceDefinitions` already
+            // accepts elsewhere: up to one debounce behind the live text,
+            // which only matters for the one keystroke that opens or closes
+            // a fence, and self-corrects at the next parse.
+            if trigger.kind == .tag, isOffsetMaskedForTagCompletion(caretOffset) { return nil }
+            return trigger
+        }
+
+        /// Whether `offset` sits inside a fenced/inline code span or a
+        /// `$…$` math expression, per `styleCache`'s last parse — see
+        /// `activeTrigger`'s Finding 11 comment.
+        private func isOffsetMaskedForTagCompletion(_ offset: Int) -> Bool {
+            styleCache.spans.contains { span in
+                switch span.kind {
+                case .inlineCode, .codeBlock, .math:
+                    return span.range.contains(offset)
+                default:
+                    return false
+                }
+            }
         }
 
         /// Internal for the same cross-file reason as `pendingEdit`: its one

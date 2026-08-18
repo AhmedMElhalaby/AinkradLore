@@ -278,9 +278,20 @@ public struct MarkdownDocumentModel: Sendable {
                         StyleSpan(range: span.content.upperBound..<span.range.upperBound,
                                   kind: .marker(of: .footnote))]
             case .footnoteDefinition(let label):
-                // No closing-pair marker: a definition is line-scoped and has
-                // no closing half, so its ENTIRE `[^`…`]:` is one marker span
-                // in front of the label content.
+                // The SAME two-marker-span shape as `.footnoteReference`
+                // above: one marker in front of the label, one after —
+                // `isDelimitedByASinglePair` answering `false` for this kind
+                // (see `MarkdownSpanBuilder`) is not about how many marker
+                // spans this emits. It is about whether the REVEAL machinery
+                // must show the whole thing together across a line break,
+                // and a definition's markers structurally never can: a
+                // definition only exists at line start (`scanFootnotes`
+                // requires it) and both its markers sit on that one line, so
+                // there is no closing half on a later line to reveal in
+                // tandem with. Both spans are inert for the same reason —
+                // neither a reference's nor a definition's span can cross a
+                // line — noted here so the `true`/`false` split does not
+                // read as arbitrary.
                 return [StyleSpan(range: span.content, kind: .footnoteDefinition(label: label)),
                         StyleSpan(range: span.range.lowerBound..<span.content.lowerBound,
                                   kind: .marker(of: .footnote)),

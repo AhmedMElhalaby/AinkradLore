@@ -207,8 +207,12 @@ enum MarkdownStyleRenderer {
                                  range: r)
 
         case .footnoteReference:
-            // Superscript, at the same size reduction Obsidian uses. The
-            // baseline offset is a DRAWING change, not a text change.
+            // Superscript, via baseline offset only — a DRAWING change, not
+            // a text change. NOT at "the same size reduction Obsidian uses":
+            // no font-size attribute is applied here, so the glyph stays
+            // full size, just raised. See the M6 final review, Finding 5 —
+            // that gap is a design decision left for the owner to make, not
+            // fixed here; only the comment overclaiming it was wrong.
             storage.addAttribute(.baselineOffset, value: 4.0, range: r)
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.accentPrimary), range: r)

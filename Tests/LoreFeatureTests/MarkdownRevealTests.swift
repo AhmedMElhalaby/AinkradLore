@@ -269,6 +269,65 @@ final class MarkdownRevealTests: XCTestCase {
         // must reveal too, because CRLF must not fracture the block.
         XCTAssertTrue(hidden(body, selection: NSRange(location: 2, length: 0)).isEmpty)
     }
+
+    // MARK: - M6 syntax reveal (Finding 6 / spec §9)
+
+    /// `==highlight==` is delimited by a single pair, exactly like `**bold**`
+    /// — focused with the caret inside reveals both markers.
+    func test_highlightMarkersRevealWhenFocusedInsideTheSpan() {
+        let body = "before ==lit== after"
+        XCTAssertTrue(hidden(body, selection: NSRange(location: 9, length: 0)).isEmpty)
+    }
+
+    func test_highlightMarkersHideWhenUnfocused() {
+        let body = "before ==lit== after"
+        XCTAssertFalse(hidden(body, selection: NSRange(location: 9, length: 0),
+                              isFocused: false).isEmpty)
+    }
+
+    /// `[^1]` inline reference.
+    func test_footnoteReferenceMarkersRevealWhenFocusedInsideTheSpan() {
+        let body = "claim[^1] more"
+        XCTAssertTrue(hidden(body, selection: NSRange(location: 7, length: 0)).isEmpty)
+    }
+
+    func test_footnoteReferenceMarkersHideWhenUnfocused() {
+        let body = "claim[^1] more"
+        XCTAssertFalse(hidden(body, selection: NSRange(location: 7, length: 0),
+                              isFocused: false).isEmpty)
+    }
+
+    /// `[^1]:` definition at line start.
+    func test_footnoteDefinitionMarkersRevealWhenFocusedInsideTheSpan() {
+        let body = "[^1]: the note"
+        XCTAssertTrue(hidden(body, selection: NSRange(location: 2, length: 0)).isEmpty)
+    }
+
+    func test_footnoteDefinitionMarkersHideWhenUnfocused() {
+        let body = "[^1]: the note"
+        XCTAssertFalse(hidden(body, selection: NSRange(location: 2, length: 0),
+                              isFocused: false).isEmpty)
+    }
+
+    /// `#tag` carries no `.marker` span at all — see
+    /// `MarkdownDocumentModel.styleSpans(from:)`: the `#` stays visible on
+    /// purpose, so there is nothing for reveal to collapse in EITHER focus
+    /// state. Pinned so a future marker span added for tags is forced to
+    /// update this pair.
+    func test_tagHasNoMarkersToRevealOrHideInEitherFocusState() {
+        let body = "before #idea after"
+        let caret = NSRange(location: 10, length: 0)
+        XCTAssertTrue(hidden(body, selection: caret).isEmpty)
+        XCTAssertTrue(hidden(body, selection: caret, isFocused: false).isEmpty)
+    }
+
+    /// `^block-id` — same shape as `.tag`, same "nothing to collapse" answer.
+    func test_blockIDHasNoMarkersToRevealOrHideInEitherFocusState() {
+        let body = "A paragraph. ^abc123"
+        let caret = NSRange(location: 15, length: 0)
+        XCTAssertTrue(hidden(body, selection: caret).isEmpty)
+        XCTAssertTrue(hidden(body, selection: caret, isFocused: false).isEmpty)
+    }
 }
 
 @MainActor

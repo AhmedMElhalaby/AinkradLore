@@ -24,7 +24,35 @@ final class MarkdownExtensionsPrecedenceTests: XCTestCase {
     }
 
     func test_math_beatsBlockID() {
-        XCTAssertTrue(scan("$x ^2$").isEmpty)
+        // `$x ^2$` on its own cannot pin this: the block ID's `atLineEnd`
+        // check already fails there (`^2` is followed by `$`, not a line
+        // terminator), so it would pass even with the math mask removed
+        // entirely. Block math CAN cross a line boundary, so `^id` here
+        // genuinely satisfies both the "preceded by whitespace" and "at
+        // line end" guards on its own — only the math mask (which claims
+        // the WHOLE `$$…$$` range, including the `^`'s own offset) stops it.
+        // The closing `$$` sits after "more", not right after the newline —
+        // `MarkdownMath.closingDelimiter` refuses a closer preceded by
+        // whitespace, and a bare `\n` counts as whitespace there.
+        XCTAssertTrue(scan("$$\na ^id\nmore$$").isEmpty)
+    }
+
+    /// `==#tag==`: `scanHighlights` claims the whole `==…==` range before
+    /// `scanTags` ever runs, so the `#` inside is never a candidate. Removing
+    /// the highlight scan (or reordering it after tags) turns this red —
+    /// genuinely pins the order, unlike the old blockID pair above.
+    func test_highlight_beatsTag() {
+        XCTAssertEqual(scan("==#tag==").map(\.kind), [.highlight])
+    }
+
+    /// `==text ^id==`: same shape, for `scanBlockIDs`. Included per the M6
+    /// final review even though — as with the old `test_math_beatsBlockID`
+    /// — the block ID's own `atLineEnd` guard already fails here (`^id` is
+    /// followed by `==`, not a line terminator), so this one is honest about
+    /// NOT being a mask-dependent pin; it documents that a highlighted block
+    /// ID still resolves to exactly one span, the highlight.
+    func test_highlight_beatsBlockID() {
+        XCTAssertEqual(scan("==text ^id==").map(\.kind), [.highlight])
     }
 
     func test_highlight_beatsFootnote() {

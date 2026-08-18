@@ -426,7 +426,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         @MainActor func handlePlainClick(atUTF16 index: Int) -> Bool {
             if toggleTask(atUTF16: index) { return true }
             if jumpFootnote(atUTF16: index) { return true }
-            if selectTag(atUTF16: index) { return true }
+            // `selectTag` always returns `false` — see its doc comment
+            // (Finding 7): it fires `onTagClick` as a side effect but never
+            // claims the click, so the caret still lands where the user
+            // clicked and `#tagg` stays editable.
+            _ = selectTag(atUTF16: index)
             // `.blockID` is an anchor, not a control — deliberately no case
             // for it here. A click on one falls through to ordinary caret
             // placement, same as clicking any other plain text.
@@ -435,31 +439,22 @@ public struct MarkdownEditor: NSViewRepresentable {
 
         /// A click on a `[^label]` reference lands on its `[^label]:`
         /// definition; a click on the definition's own label lands back on
-        /// the FIRST reference sharing that label. Located against
-        /// `styleCache.spans` — a stale cache can only pick a stale
+        /// the FIRST reference sharing that label. Located via
+        /// `MarkdownNavigation.footnoteJumpTarget`, which filters
+        /// `styleCache.spans` to the footnote KINDS before matching offsets —
+        /// a plain `first(where: { $0.range.contains(index) })` over the
+        /// whole array (AST spans first, extension spans last — see
+        /// `MarkdownDocumentModel.styleSpans`) would return whatever
+        /// CONTAINING span got there first: a list item, a blockquote, a
+        /// callout — and never reach the footnote at all. See the M6 final
+        /// review, Finding 1. A stale cache can only pick a stale
         /// destination, never an out-of-bounds one, since `scrollToOffset`
         /// clamps to `[0, length]`.
         @MainActor private func jumpFootnote(atUTF16 index: Int) -> Bool {
-            guard let hit = styleCache.spans.first(where: { $0.range.contains(index) })
-            else { return false }
-            switch hit.kind {
-            case .footnoteReference(let label):
-                guard let definition = styleCache.spans.first(where: {
-                    if case .footnoteDefinition(let defLabel) = $0.kind { return defLabel == label }
-                    return false
-                }) else { return false }
-                scrollToOffset(definition.range.lowerBound)
-                return true
-            case .footnoteDefinition(let label):
-                guard let reference = styleCache.spans.first(where: {
-                    if case .footnoteReference(let refLabel) = $0.kind { return refLabel == label }
-                    return false
-                }) else { return false }
-                scrollToOffset(reference.range.lowerBound)
-                return true
-            default:
-                return false
-            }
+            guard let target = MarkdownNavigation.footnoteJumpTarget(
+                in: styleCache.spans, at: index) else { return false }
+            scrollToOffset(target)
+            return true
         }
 
         /// A click on a `#tag` sets `activeTag` — the SAME filter
@@ -467,13 +462,31 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// so a tag clicked in the body does exactly what one clicked in the
         /// sidebar does. No new channel: this rides the existing binding all
         /// the way up through `DocumentPane`/`DocumentPaneColumn`.
+        ///
+        /// Located via `MarkdownNavigation.tagSpan`, which filters to `.tag`
+        /// spans before matching offsets — see `jumpFootnote`'s comment for
+        /// why a plain `first(where:)` over the whole span array cannot
+        /// reach a tag nested in a list item or blockquote (Finding 1).
+        ///
+        /// ALWAYS returns `false`. The filter fires as a side effect, but the
+        /// click itself is never swallowed: `toggleTask` deliberately
+        /// preserves "the caret goes here", and a swallowed click on `#tagg`
+        /// would make the typo the one span the user cannot click into to
+        /// fix — see Finding 7. `jumpFootnote` above is the opposite case on
+        /// purpose: it swallows, because a footnote click is about to scroll
+        /// the caret elsewhere anyway.
         @MainActor private func selectTag(atUTF16 index: Int) -> Bool {
-            guard let onTagClick,
-                  let hit = styleCache.spans.first(where: { $0.range.contains(index) }),
-                  case .tag(let name) = hit.kind
+            guard let onTagClick, let hit = MarkdownNavigation.tagSpan(in: styleCache.spans, at: index),
+                  let tv = textView,
+                  // Finding 12: the cached span's associated `name` is a
+                  // CANDIDATE, never an authority — re-derive it from the
+                  // live text the way `toggleTask` re-reads `tv.string`
+                  // rather than trusting `styleCache`, which may lag by up
+                  // to one styling debounce.
+                  let name = MarkdownNavigation.liveTagName(forSpan: hit.range, in: tv.string as NSString)
             else { return false }
             onTagClick(name)
-            return true
+            return false
         }
 
         // The styling pipeline — parse debounce, render, reveal, container

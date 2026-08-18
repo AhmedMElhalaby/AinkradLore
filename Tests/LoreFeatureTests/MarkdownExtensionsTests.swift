@@ -96,6 +96,15 @@ final class MarkdownExtensionsTests: XCTestCase {
                        .footnoteReference(label: "1"))
     }
 
+    func test_footnoteReference_astralCharacterSurvivesInLabel() {
+        // Mirrors `test_tag_astralCharacterSurvivesInName`: a surrogate pair
+        // must not be mangled into "?" — the label is the key `jumpFootnote`
+        // matches on, so two different astral labels collapsing to the same
+        // string would jump to the wrong footnote.
+        XCTAssertEqual(scan("x[^🎈label]").first?.kind,
+                       .footnoteReference(label: "🎈label"))
+    }
+
     func test_footnote_insideCodeEmitsNothing() {
         XCTAssertTrue(scan("```\n[^1]: no\n```").isEmpty)
     }
@@ -198,7 +207,16 @@ final class MarkdownExtensionsTests: XCTestCase {
 
     func test_blockID_insideMathEmitsNothing() {
         // `^` is superscript in math and is masked before this scanner runs.
-        XCTAssertTrue(scan("$x^2$").isEmpty)
+        // `$x^2$` cannot pin this on its own — `^2` there is preceded by
+        // `x`, not whitespace, so the whitespace guard already rejects it
+        // with no mask involved. Block math crosses a line boundary, so
+        // `^id` here genuinely satisfies "preceded by whitespace" and "at
+        // line end" without the mask; only the mask (which claims the
+        // caret's own offset via the whole `$$…$$` range) suppresses it.
+        // The closing `$$` sits after "more" rather than right after the
+        // newline, because `MarkdownMath.closingDelimiter` refuses a closer
+        // preceded by whitespace and a bare `\n` counts as whitespace there.
+        XCTAssertTrue(scan("$$\na ^id\nmore$$").isEmpty)
     }
 
     func test_blockID_insideCodeEmitsNothing() {
@@ -207,5 +225,59 @@ final class MarkdownExtensionsTests: XCTestCase {
 
     func test_blockID_bareCaretEmitsNothing() {
         XCTAssertTrue(scan("text ^").isEmpty)
+    }
+
+    // MARK: - CRLF consistency (Finding 6)
+
+    func test_highlight_doesNotCrossLines_CRLF() {
+        // Mirrors `test_highlight_doesNotCrossLines`, but with a CRLF break.
+        // Before the fix `scanHighlights` only checked for `0x0A`, so a
+        // stray `\r` right before it let the scan run one unit further than
+        // it should — harmless here because `0x0A` still stops it one unit
+        // later, but the guard itself must recognise `0x0D` too.
+        XCTAssertTrue(scan("a ==lit\r\nmore== b").isEmpty)
+    }
+
+    func test_tag_headingIsNotATag_afterCRLF() {
+        // `isAtLineStart` walking back over a CRLF-terminated previous line
+        // must still recognise the `#` as heading-positioned.
+        XCTAssertTrue(scan("intro\r\n# Heading").isEmpty)
+    }
+
+    func test_tag_atLineStartWithoutSpaceIsATag_afterCRLF() {
+        XCTAssertEqual(scan("intro\r\n#idea").last?.kind, .tag(name: "idea"))
+    }
+
+    func test_tag_headingIsNotATag_afterLoneCarriageReturn() {
+        // A LONE `\r` (old Mac line ending, no `\n`) walked directly by
+        // `isAtLineStart` — this is what actually exercises the `0x0D`
+        // branch: the CRLF tests above already pass via the existing
+        // `0x0A` check, since the character immediately before the `#` is
+        // always the `\n` half of the pair.
+        XCTAssertTrue(scan("intro\r# Heading").isEmpty)
+    }
+
+    func test_tag_atLineStartWithoutSpaceIsATag_afterLoneCarriageReturn() {
+        XCTAssertEqual(scan("intro\r#idea").last?.kind, .tag(name: "idea"))
+    }
+
+    func test_footnoteReference_carriageReturnInLabelEmitsNothing() {
+        // The label guard rejected `0x0A` but not `0x0D` — a lone `\r`
+        // (or the first half of a CRLF pair) inside `[^…]` must still
+        // invalidate the label.
+        XCTAssertTrue(scan("x[^a\rb]").isEmpty)
+    }
+
+    func test_footnoteDefinition_atLineStart_afterCRLF() {
+        XCTAssertEqual(scan("intro\r\n[^1]: the note").last?.kind,
+                       .footnoteDefinition(label: "1"))
+    }
+
+    func test_blockID_atEndOfLine_CRLF() {
+        // Already consistent before this pass — `scanBlockIDs` checked both
+        // `0x0A` and `0x0D` — pinned here alongside the others rather than
+        // left as the only scanner without a CRLF test.
+        let spans = scan("A paragraph. ^abc123\r\nnext line")
+        XCTAssertEqual(spans.first?.kind, .blockID(id: "abc123"))
     }
 }

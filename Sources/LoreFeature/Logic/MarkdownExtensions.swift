@@ -242,17 +242,28 @@ public enum MarkdownExtensions {
             // A preceding `!` makes this an embed, never a footnote.
             if i > 0, text.character(at: i - 1) == 0x21 { i += 1; continue }
             var j = i + 2
-            var label = ""
             var valid = true
             while j < text.length, text.character(at: j) != 0x5D {   // ]
                 let u = text.character(at: j)
                 // No whitespace in a label — that is what separates a footnote
-                // from a bracketed aside the author wrote by hand.
-                if u == 0x20 || u == 0x09 || u == 0x0A { valid = false; break }
-                label.append(Character(UnicodeScalar(u) ?? "?"))
+                // from a bracketed aside the author wrote by hand. `0x0D`
+                // alongside `0x0A`: "\r\n" is two UTF-16 units and either half
+                // alone still means "not a label" — see `scanHighlights` and
+                // `isAtLineStart`, which the same CRLF consistency pass fixed.
+                if u == 0x20 || u == 0x09 || u == 0x0A || u == 0x0D { valid = false; break }
                 j += 1
             }
-            guard valid, j < text.length, !label.isEmpty else { i += 1; continue }
+            guard valid, j < text.length, j > i + 2 else { i += 1; continue }
+            // The label is sliced from the SOURCE over the matched UTF-16
+            // range in one operation, not built scalar-by-scalar — the exact
+            // bug this branch already fixed for `scanTags`' `name` and
+            // `scanBlockIDs`' `id`, see their comments. Building it one
+            // `UnicodeScalar(u)` at a time turned a surrogate pair (an
+            // astral label character) into `"?"` per unit, so `[^🎈]` and
+            // `[^🎉]` both produced the label `"??"` and collided — and the
+            // label is the key `jumpFootnote` matches on, so the jump landed
+            // on the wrong footnote.
+            let label = text.substring(with: NSRange(location: i + 2, length: j - (i + 2)))
             let closeEnd = j + 1
             let atLineStart = isAtLineStart(i, text: text)
             let isDefinition = atLineStart && closeEnd < text.length
@@ -273,7 +284,12 @@ public enum MarkdownExtensions {
         var spaces = 0
         while k >= 0, spaces <= 3 {
             let u = text.character(at: k)
-            if u == 0x0A { return true }
+            // `0x0D` alongside `0x0A`: a lone `"\r"` (old Mac line ending)
+            // terminates a line exactly as `"\n"` does, and treating only
+            // `0x0A` as a terminator was the one inconsistency left between
+            // this and `scanBlockIDs`' `atLineEnd`, which already checks
+            // both.
+            if u == 0x0A || u == 0x0D { return true }
             if u == 0x20 { spaces += 1; k -= 1; continue }
             return false
         }
@@ -292,8 +308,12 @@ public enum MarkdownExtensions {
             let contentStart = i + 2
             var j = contentStart
             // Stop at the line end: an unclosed `==` must emit nothing, not
-            // run on.
-            while j + 1 < text.length, text.character(at: j) != 0x0A {
+            // run on. Both halves of a CRLF terminator stop the scan, not
+            // just `0x0A` — `"\r\n"` is two UTF-16 units, and checking only
+            // one of them left a highlight free to run across a CRLF break
+            // it should have stopped at, inconsistent with `scanBlockIDs`
+            // and `isAtLineStart`, which already check both.
+            while j + 1 < text.length, text.character(at: j) != 0x0A, text.character(at: j) != 0x0D {
                 if text.character(at: j) == 0x3D, text.character(at: j + 1) == 0x3D { break }
                 j += 1
             }
