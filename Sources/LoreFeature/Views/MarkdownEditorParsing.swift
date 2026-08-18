@@ -35,6 +35,70 @@ extension MarkdownEditor.Coordinator {
         // The drawn decoration is positioned from the container, so it has to
         // be repainted when the container moves.
         tv.needsDisplay = true
+        // Every transcluded embed's measured height is a function of THIS
+        // width — see `TransclusionMeasurement`. A stale height self-corrects
+        // on the very next render (the geometry travels with the number), so
+        // dropping it here is purely an optimisation: it stops the next pass
+        // from carrying around a measurement it already knows it cannot use,
+        // rather than discovering that one geometry check at a time.
+        transclusionCache.invalidateMeasurements()
+    }
+
+    // MARK: - Live transclusion updates
+
+    /// Compares every currently-embedded transclusion target's on-disk mtime
+    /// against what the last check saw, and invalidates the cache for any
+    /// that changed.
+    ///
+    /// Exists because `applyStyles()`'s redundant-redraw guard
+    /// (`isRenderStale`) compares only `tokens` and this document's own text
+    /// — neither of which changes when a DIFFERENT file, embedded here via
+    /// `![[…]]`, is edited on disk (in Obsidian, or the same file open in
+    /// another split pane). Without this check, such an edit would sit
+    /// invisible until some unrelated change to THIS document happened to
+    /// force a render.
+    ///
+    /// `cache.invalidate(path:)` is called proactively rather than relying on
+    /// `TransclusionKey`'s mtime alone: that key is already self-correcting
+    /// for an ordinary mtime bump (a new mtime is simply a new key — see
+    /// `TransclusionMeasurement`'s doc comment for the same property on
+    /// measurements), but a same-second edit on a filesystem with coarse
+    /// mtime resolution can leave the mtime unchanged (see
+    /// `DocumentSession.baseline`'s doc comment on the identical limit), and
+    /// only an explicit invalidation catches that case.
+    ///
+    /// Called from `applyStyles()`, on every call — including ones the
+    /// redundant-redraw guard would otherwise skip — so it is cheap by
+    /// construction: a handful of `stat` calls for a document's (usually
+    /// zero, rarely more than a few) transcluded targets, never a re-parse or
+    /// a re-measure by itself.
+    /// - Returns: whether any target changed, so `applyStyles()` knows to
+    ///   force a render even when nothing else about this document did.
+    @discardableResult
+    func detectExternalTransclusionChanges() -> Bool {
+        var changed = false
+        var seen: Set<URL> = []
+        for span in styleCache.spans {
+            guard case .embed(let target, _) = span.kind else { continue }
+            guard case .transclusion(let url) = EmbedRendering.kind(for: resolveEmbedTarget(target))
+            else { continue }
+            seen.insert(url)
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let mtime = (attributes?[.modificationDate] as? Date) ?? .distantPast
+            if let known = embeddedTargetMTimes[url], known != mtime {
+                transclusionCache.invalidate(path: url)
+                changed = true
+            }
+            embeddedTargetMTimes[url] = mtime
+        }
+        // Targets no longer embedded (the `![[…]]` was removed or edited to
+        // point elsewhere) are dropped, so a later re-embed of the same path
+        // is compared against a fresh baseline rather than one from before it
+        // was removed.
+        if embeddedTargetMTimes.count != seen.count {
+            embeddedTargetMTimes = embeddedTargetMTimes.filter { seen.contains($0.key) }
+        }
+        return changed
     }
 
     // MARK: - Parsing

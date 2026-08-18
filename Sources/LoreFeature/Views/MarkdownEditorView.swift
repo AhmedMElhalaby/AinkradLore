@@ -193,6 +193,15 @@ extension MarkdownEditor {
         if context.coordinator.settings != settings {
             context.coordinator.settings = settings
             context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
+            // Called explicitly, not left to `applyContainerGeometry`'s own
+            // call: that one only fires when the CONTAINER'S width or inset
+            // actually moved, but `bodySize` (density) can change under a
+            // settings edit — a text-size or density change — without either
+            // one moving. Every transcluded embed's measured height is a
+            // function of `bodySize`/`lineHeightMultiple` too (see
+            // `TransclusionMeasurement`), so it must drop on ANY settings
+            // change, not only the ones that happen to move the geometry.
+            context.coordinator.transclusionCache.invalidateMeasurements()
             // `applyStyles()` below is a no-op unless `isRenderStale` says the
             // ON-SCREEN render is out of date, and that guard compares only
             // `tokens` and the text — never `settings` (see

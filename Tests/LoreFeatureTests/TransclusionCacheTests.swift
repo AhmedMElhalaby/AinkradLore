@@ -79,6 +79,30 @@ final class TransclusionCacheTests: XCTestCase {
         XCTAssertEqual(made, 4, "B was least-recently-used and should have been evicted")
     }
 
+    func test_anExternalChangeToATargetInvalidatesItsEntries() {
+        let cache = TransclusionCache()
+        var made = 0
+        let make: () -> TransclusionContent = { made += 1; return .content("x") }
+        let a = URL(fileURLWithPath: "/vault/a.md")
+        let k = TransclusionKey(path: a, mtime: Date(timeIntervalSince1970: 0), fragment: nil)
+        _ = cache.content(for: k, make: make)
+        cache.invalidate(path: a)
+        _ = cache.content(for: k, make: make)
+        XCTAssertEqual(made, 2, "an external edit served stale embed content")
+    }
+
+    func test_measureWidthChangeDropsHeightsButKeepsContent() {
+        let cache = TransclusionCache()
+        var made = 0
+        let make: () -> TransclusionContent = { made += 1; return .content("x") }
+        let k = TransclusionKey(path: URL(fileURLWithPath: "/vault/a.md"),
+                                mtime: Date(timeIntervalSince1970: 0), fragment: nil)
+        _ = cache.content(for: k, make: make)
+        cache.invalidateMeasurements()
+        _ = cache.content(for: k, make: make)
+        XCTAssertEqual(made, 1, "a width change re-parsed content it already had")
+    }
+
     func test_cacheHitDoesNotItselfTriggerEviction() {
         let cache = TransclusionCache(capacity: 2)
         var made = 0

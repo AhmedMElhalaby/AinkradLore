@@ -213,6 +213,14 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// typing free of embed measurement; see
         /// `MarkdownRevealBenchmark.test_typingInHostDoesNotRemeasureEmbeds`.
         let transclusionCache = TransclusionCache()
+        /// Every currently-embedded transclusion target's on-disk mtime, as of
+        /// the last time `detectExternalTransclusionChanges()` checked it —
+        /// see that function (`MarkdownEditorParsing.swift`) for why this
+        /// exists: it is what lets an edit to a note THIS document embeds,
+        /// made in Obsidian or the same file open in another pane, force a
+        /// re-render instead of sitting invisible until some unrelated change
+        /// happens to touch this document.
+        var embeddedTargetMTimes: [URL: Date] = [:]
         /// Set by `restyleBlock` when a block it just re-attributed holds a
         /// transcluded embed, and drained ONCE per pass by
         /// `prepareTransclusionsIfNeeded`. A flag rather than the work itself
