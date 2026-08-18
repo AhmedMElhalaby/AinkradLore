@@ -57,19 +57,48 @@ extension MarkdownEditor.Coordinator {
     /// sits idle, so an Obsidian edit would sit invisible until the user
     /// typed a character).
     ///
-    /// Invalidates unconditionally — `url` is not filtered against this
-    /// document's own embedded targets first, because that filter is exactly
-    /// what `TransclusionCache.invalidate(path:)` already does internally
-    /// (a no-op for a path with no entries), and computing it twice would
-    /// cost more than the no-op it is guarding.
+    /// `cache.invalidate(path:)` is called UNCONDITIONALLY — it is a cheap
+    /// no-op for a path with no entries, and computing the membership check
+    /// twice (once to guard this, once to guard the render below) would cost
+    /// more than the no-op it would be guarding.
+    ///
+    /// `renderStyles()` is NOT unconditional (fix round 2, Important #4): it
+    /// is a full render pass (span apply, `revealIndex` rebuild, embed index
+    /// rebuild, writing-direction scan, embed application, block-background
+    /// refresh) — cheap for `invalidate(path:)` to be a no-op over, but not
+    /// cheap to run unfiltered. Every open editor registers a handler
+    /// against the SAME sink, and `VaultIndexCoordinator.indexDocument`
+    /// fires it on every save of ANY document — so an unfiltered render here
+    /// meant every open pane paid for a full render on every save anywhere
+    /// in the vault, whether or not it embedded the saved file. Filtered by
+    /// `isEmbeddedTarget(url)`, a cheap scan of the CURRENT spans with no
+    /// filesystem access — no `stat`, unlike the mtime backstop below — so
+    /// it costs far less than the render it decides whether to run.
     func handleExternalChange(to url: URL) {
         transclusionCache.invalidate(path: url)
+        guard isEmbeddedTarget(url) else { return }
         // `applyStyles()`'s `isRenderStale` guard has no way to know a
         // DIFFERENT file changed, so it is bypassed by forcing a render
         // directly — the render itself re-derives `transclusionRegions` from
         // the (now-invalidated, so freshly re-resolved) cache and repaints,
         // exactly what Task 6's drain invariant requires.
         renderStyles()
+    }
+
+    /// Whether `url` is one of THIS document's currently-transcluded targets
+    /// — a scan of `styleCache.spans` for `.embed` spans that resolve to a
+    /// `.transclusion` matching `url`. No filesystem access: this exists to
+    /// be cheap enough to run before deciding whether a real render is
+    /// warranted, not to detect whether the file's content actually changed
+    /// (that is `TransclusionKey`'s mtime, and the backstop's `stat` calls).
+    private func isEmbeddedTarget(_ url: URL) -> Bool {
+        for span in styleCache.spans {
+            guard case .embed(let target, _) = span.kind else { continue }
+            guard case .transclusion(let resolved) = EmbedRendering.kind(for: resolveEmbedTarget(target))
+            else { continue }
+            if resolved == url { return true }
+        }
+        return false
     }
 
     /// Compares every currently-embedded transclusion target's on-disk mtime

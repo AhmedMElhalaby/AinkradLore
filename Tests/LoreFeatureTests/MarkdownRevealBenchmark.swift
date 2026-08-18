@@ -321,6 +321,36 @@ final class MarkdownRevealBenchmark: XCTestCase {
         }
     }
 
+    /// Fix round 2, Important #4: `handleExternalChange(to:)` must not force
+    /// a full `renderStyles()` for a path this document does not embed.
+    /// `TransclusionCache.invalidate(path:)` is a cheap no-op for an
+    /// unrelated path, but `renderStyles()` is not — with every open editor
+    /// registered against the SAME sink, and `VaultIndexCoordinator
+    /// .indexDocument` firing on every save of ANY document, an unfiltered
+    /// render here means every open pane pays for a full render on every
+    /// save anywhere in the vault, whether or not it embeds the saved file.
+    @MainActor
+    func test_externalChangeToAnUnembeddedFileTriggersNoRender() throws {
+        let (coordinator, _, vault) = try makeTransclusionEditor()
+        withExtendedLifetime(coordinator) {
+            coordinator.applyStyles()
+            coordinator.renderStyles()
+
+            let unrelated = vault.appendingPathComponent("not-embedded.md")
+            coordinator.blockBackgroundRefreshes = 0
+            TransclusionMeasureCounter.reset()
+
+            coordinator.handleExternalChange(to: unrelated)
+
+            XCTAssertEqual(coordinator.blockBackgroundRefreshes, 0,
+                           "a change to a file this document does not embed "
+                           + "must not force a decoration rebuild")
+            XCTAssertEqual(TransclusionMeasureCounter.count, 0,
+                           "a change to a file this document does not embed "
+                           + "must not re-measure anything")
+        }
+    }
+
     /// Fix round 1, Important #2: `detectExternalTransclusionChanges()` — the
     /// mtime backstop — must cost ZERO filesystem calls on the per-keystroke
     /// path. It is wired to `makeNSView` (on-appear) and
