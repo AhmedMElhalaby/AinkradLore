@@ -114,6 +114,13 @@ public struct EditorContext {
     public let tagCompletions: @MainActor (String) -> [String]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// ⌥-click on a transclusion's rendered content: open its source note
+    /// BESIDE what is showing, rather than replacing it — the same gesture
+    /// `LoreRootView.openRow` already gives an ⌥-clicked sidebar row.
+    /// Defaulted to a no-op, the same "no capability supplied" shape every
+    /// other closure added to this struct since it was written uses, so an
+    /// engine or call site with no split-view story needs no changes.
+    public let openLinkBeside: @MainActor (String) -> Void
     /// A `#tag` the user clicked in the editor. Wired to the SAME
     /// `activeTag` filter the sidebar's `TagChipRow`/`NoteListView` share, so
     /// a click in the body does exactly what a click in the sidebar does.
@@ -193,6 +200,7 @@ public struct EditorContext {
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 tagCompletions: @escaping @MainActor (String) -> [String] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                openLinkBeside: @escaping @MainActor (String) -> Void = { _ in },
                 onTagClick: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
@@ -216,6 +224,7 @@ public struct EditorContext {
         self.onChange = onChange
         self.completions = completions; self.tagCompletions = tagCompletions
         self.openLink = openLink
+        self.openLinkBeside = openLinkBeside
         self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget

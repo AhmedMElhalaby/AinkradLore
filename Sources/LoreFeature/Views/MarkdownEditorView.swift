@@ -76,6 +76,9 @@ extension MarkdownEditor {
         tv.onPlainClick = { [weak coordinator = context.coordinator] index in
             coordinator?.handlePlainClick(atUTF16: index) ?? false
         }
+        tv.onEmbedClick = { [weak coordinator = context.coordinator] index, optionHeld in
+            coordinator?.openTransclusion(atUTF16: index, beside: optionHeld) ?? false
+        }
         // Losing first responder INSIDE the same window — clicking the title
         // field, the sidebar, another pane — is not covered by
         // `hidesOnDeactivate`, and would otherwise leave a `.popUpMenu`-level
@@ -196,6 +199,7 @@ extension MarkdownEditor {
         context.coordinator.completions = completions
         context.coordinator.tagCompletions = tagCompletions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.onOpenLinkBeside = onOpenLinkBeside
         context.coordinator.onTagClick = onTagClick
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget

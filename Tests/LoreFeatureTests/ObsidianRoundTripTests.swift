@@ -93,4 +93,51 @@ final class ObsidianRoundTripTests: XCTestCase {
             XCTAssertFalse(insideFence, "\(span.kind) span emitted inside the code fence")
         }
     }
+
+    /// M7's headline claim, for embed-bearing documents specifically: adding
+    /// `![[…]]` transclusion syntax must not give the editor a new way to
+    /// write to the host document. If this fails, transclusion is mutating
+    /// the host text — a stop-the-world defect, not something to work
+    /// around.
+    func test_aDocumentWithEmbedsStillRoundTrips() {
+        let source = """
+        # Host
+
+        ![[target]]
+
+        ![[target#heading]]
+
+        ![[target#^anchor]]
+
+        Prose after.
+        """
+        let model = MarkdownDocumentModel(body: source)
+        _ = model.styleSpans
+        XCTAssertEqual(model.fullText, source)
+    }
+
+    /// Pins the code-fence suppression for embeds specifically: M6 built the
+    /// code mask, and this proves transclusion honours it rather than
+    /// re-deriving its own (possibly disagreeing) notion of "inside a fence".
+    func test_noTransclusionIsEmittedInsideACodeFence() {
+        let source = """
+        Real one:
+
+        ![[target]]
+
+        ```markdown
+        ![[not-an-embed]]
+        ```
+        """
+        let model = MarkdownDocumentModel(body: source)
+        let ns = source as NSString
+        let fenceStart = ns.range(of: "```markdown").location
+        let fenceEnd = ns.range(of: "```", options: .backwards).location + 3
+
+        for span in model.styleSpans where span.isTransclusionEmbed {
+            let inside = span.range.lowerBound >= fenceStart
+                && span.range.upperBound <= fenceEnd
+            XCTAssertFalse(inside, "a fenced ![[…]] was treated as a transclusion")
+        }
+    }
 }

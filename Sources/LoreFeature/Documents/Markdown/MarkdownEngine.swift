@@ -188,6 +188,7 @@ private struct MarkdownDocumentEditor: View {
                            createLinkedNote: ctx.createLinkedNote,
                            completions: ctx.completions, tagCompletions: ctx.tagCompletions,
                            onOpenLink: ctx.openLink,
+                           onOpenLinkBeside: ctx.openLinkBeside,
                            onTagClick: ctx.onTagClick,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
                            registerExternalChangeHandler: ctx.registerExternalChangeHandler,

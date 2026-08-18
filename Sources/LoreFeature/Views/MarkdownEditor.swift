@@ -25,6 +25,13 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Called with the raw target of a click that landed inside a rendered
+    /// transclusion (a `![[note]]` embed's drawn content, not its collapsed
+    /// source) while ⌥ was held. `nil` disables the beside-open affordance —
+    /// same "no capability supplied" shape `onOpenLink == nil` already has —
+    /// which is how a plain click still opens the embed in place even when
+    /// nothing wired the split-view path up.
+    let onOpenLinkBeside: (@MainActor (String) -> Void)?
     /// Called with a `#tag`'s name when clicked in the body. `nil` disables
     /// tag-click-to-filter entirely, matching `onOpenLink`'s "no capability
     /// supplied" shape.
@@ -79,6 +86,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 tagCompletions: (@MainActor (String) -> [String])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                onOpenLinkBeside: (@MainActor (String) -> Void)? = nil,
                 onTagClick: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 registerExternalChangeHandler:
@@ -97,6 +105,7 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.createLinkedNote = createLinkedNote
         self.completions = completions; self.tagCompletions = tagCompletions
         self.onOpenLink = onOpenLink
+        self.onOpenLinkBeside = onOpenLinkBeside
         self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.registerExternalChangeHandler = registerExternalChangeHandler
@@ -149,6 +158,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// See `MarkdownEditor.tagCompletions`.
         var tagCompletions: (@MainActor (String) -> [String])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.onOpenLinkBeside`.
+        var onOpenLinkBeside: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.onTagClick`.
         var onTagClick: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
@@ -484,6 +495,58 @@ public struct MarkdownEditor: NSViewRepresentable {
             guard let target = LinkCompletionContext.target(in: text, at: offset)
             else { return false }
             onOpenLink(target)
+            return true
+        }
+
+        /// A click inside a RENDERED transclusion (`transclusionRegions`,
+        /// built by `TransclusionStyling.prepare` every render pass — see
+        /// `MarkdownEditorDecoration`) opens the embed's source note; ⌥-click
+        /// opens it beside, through `onOpenLinkBeside` — the same
+        /// `store.openInSecondaryPane` path an ⌥-click already opens a
+        /// sidebar row beside (`LoreRootView.openRow`), not a second one.
+        ///
+        /// ALWAYS returns `true` once `index` falls inside a transclusion
+        /// region, whether or not a handler actually fires — the region is
+        /// COLLAPSED source (`TransclusionStyling.prepare` collapses it every
+        /// time it is not the one the caret is literally inside), so once a
+        /// click lands here it must never fall through to
+        /// `super.mouseDown`'s caret placement: doing so would be exactly the
+        /// "caret inside drawn content" the M6 rule forbids. The `defer`
+        /// parks the caret right after the embed instead — the same "caret
+        /// goes just past what the click activated" contract `toggleTask`
+        /// already keeps for a flipped checkbox.
+        @MainActor func openTransclusion(atUTF16 index: Int, beside: Bool) -> Bool {
+            guard let tv = textView else { return false }
+            guard let region = transclusionRegions.first(where: { region in
+                guard case .transclusion = region.kind else { return false }
+                return index >= region.range.location && index <= NSMaxRange(region.range)
+            }) else { return false }
+
+            defer {
+                tv.setSelectedRange(NSRange(location: NSMaxRange(region.range), length: 0))
+            }
+
+            let ns = tv.string as NSString
+            guard NSMaxRange(region.range) <= ns.length else { return true }
+            // Re-read the LIVE text at the region's own range rather than
+            // trusting a cached target string — the same "cached offset is a
+            // candidate, never an authority" rule `toggleTask`'s doc comment
+            // spells out. `region.range` is the WHOLE source form (`!`, both
+            // brackets, the target — see `StyleSpan.Kind.embed`'s doc
+            // comment), so stripping the fixed `![[`/`]]` delimiters is
+            // enough; anything else here means the live text no longer
+            // matches what this region was built from, and the click is
+            // simply absorbed rather than opening something stale.
+            let raw = ns.substring(with: region.range)
+            guard raw.hasPrefix("![["), raw.hasSuffix("]]") else { return true }
+            let target = String(raw.dropFirst(3).dropLast(2))
+            guard !target.isEmpty else { return true }
+
+            if beside {
+                onOpenLinkBeside?(target)
+            } else {
+                onOpenLink?(target)
+            }
             return true
         }
 
