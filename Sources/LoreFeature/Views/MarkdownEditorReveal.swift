@@ -157,18 +157,19 @@ extension MarkdownEditor.Coordinator {
     func applyStyles() {
         guard let tv = textView else { return }
         applyStylesCalls += 1
-        // Checked BEFORE the redundant-redraw guard below, and unconditionally
-        // (not `else`-short-circuited by it): `isRenderStale` compares only
-        // `tokens` and this document's own text, so an external edit to a
-        // note THIS document embeds — a different file entirely — would
-        // never flip it, and the embed would go on showing stale content
-        // until some unrelated change forced a render. See
-        // `detectExternalTransclusionChanges()`'s own doc comment.
-        let embedsChangedExternally = detectExternalTransclusionChanges()
         // The redundant-redraw guard — see `isRenderStale` in
         // `MarkdownEditorEditPath.swift` for what it checks and why a keystroke
         // reaches here at all.
-        if !isRenderStale(for: tv) && !embedsChangedExternally { return }
+        //
+        // Deliberately does NOT also poll `detectExternalTransclusionChanges()`
+        // here: this runs once per keystroke (`MarkdownEditorRedrawTests`), and
+        // stat-ing every embedded target's file on every character typed is
+        // real, synchronous, main-actor filesystem work with no gate covering
+        // it (fix round 1, Important #2). Live updates from an external edit
+        // arrive instead through `handleExternalChange(to:)`, pushed with no
+        // keystroke required; the poll here would only ever be a fallback for
+        // idle time, which `makeNSView`/`onBecomeFirstResponder` already cover.
+        if !isRenderStale(for: tv) { return }
         applyStylesRenders += 1
         if !styleCache.describes(tv.string) {
             if tv.string.utf16.count <= MarkdownStyleCache.synchronousParseCap {

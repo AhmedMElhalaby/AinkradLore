@@ -34,6 +34,14 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// `.unresolved` (plain wikilink colouring), which is the right answer
     /// for an engine with no link layer, exactly like `completions == nil`.
     let resolveEmbedTarget: (@MainActor (String) -> URL?)?
+    /// See `EditorContext.registerExternalChangeHandler`. `nil` disables live
+    /// transclusion updates entirely — the same "no capability supplied"
+    /// shape `resolveEmbedTarget == nil` already has, which is right for an
+    /// engine with no vault (and so no `![[…]]` targets that could ever
+    /// change out from under it).
+    let registerExternalChangeHandler: (@MainActor (@escaping @MainActor (URL) -> Void) -> UUID)?
+    /// Pairs with `registerExternalChangeHandler` — see its doc comment.
+    let unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)?
     /// What a picked row inserts. Defaults to the store-blind approximation.
     let linkTarget: @MainActor (IndexRow) -> String
     /// A UTF-16 offset (into `text`) to scroll the caret to and select. Set by
@@ -73,6 +81,9 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 onTagClick: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
+                registerExternalChangeHandler:
+                    (@MainActor (@escaping @MainActor (URL) -> Void) -> UUID)? = nil,
+                unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 scrollTarget: Binding<Int?> = .constant(nil),
@@ -88,6 +99,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.onOpenLink = onOpenLink
         self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
+        self.registerExternalChangeHandler = registerExternalChangeHandler
+        self.unregisterExternalChangeHandler = unregisterExternalChangeHandler
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
         self.allowsTaskToggle = allowsTaskToggle
@@ -215,12 +228,37 @@ public struct MarkdownEditor: NSViewRepresentable {
         let transclusionCache = TransclusionCache()
         /// Every currently-embedded transclusion target's on-disk mtime, as of
         /// the last time `detectExternalTransclusionChanges()` checked it —
-        /// see that function (`MarkdownEditorParsing.swift`) for why this
-        /// exists: it is what lets an edit to a note THIS document embeds,
-        /// made in Obsidian or the same file open in another pane, force a
-        /// re-render instead of sitting invisible until some unrelated change
-        /// happens to touch this document.
+        /// see that function (`MarkdownEditorParsing.swift`).
+        ///
+        /// This is the BACKSTOP, not the primary mechanism: the primary path
+        /// is `handleExternalChange(to:)`, invoked with NO editor interaction
+        /// whenever `EditorContext.registerExternalChangeHandler`'s sink
+        /// fires (a watcher-driven rescan, or another pane's save). This
+        /// mtime check exists for what that push can miss — a same-second
+        /// edit on a filesystem with coarse mtime resolution, where the
+        /// watcher fires but the row's `updated` timestamp does not actually
+        /// change (fix round 1, Critical #1's "belt and suspenders" ruling)
+        /// — and is checked only off the per-keystroke path: on-appear
+        /// (`makeNSView`) and on-focus (`onBecomeFirstResponder`), never from
+        /// `applyStyles()` (fix round 1, Important #2 — a keystroke used to
+        /// pay for one `stat()` per embed SPAN OCCURRENCE, synchronously, on
+        /// every character typed).
         var embeddedTargetMTimes: [URL: Date] = [:]
+        /// The token `EditorContext.registerExternalChangeHandler` handed
+        /// back, and the paired unregister closure — held so `tearDown()` can
+        /// unsubscribe, or the closure captured by the registration (which
+        /// captures this coordinator) would keep it alive for as long as the
+        /// vault stays open, well past this editor's own lifetime.
+        var externalChangeToken: UUID?
+        var unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)?
+        /// Counts `FileManager.attributesOfItem` calls made by
+        /// `detectExternalTransclusionChanges()` — ONE per distinct embedded
+        /// target per call, never per span occurrence. Exists so
+        /// `MarkdownRevealBenchmark`'s per-keystroke gate can assert this
+        /// backstop costs ZERO filesystem work on the typing path (fix round
+        /// 1, Important #2), the same shape `blockBackgroundRefreshes`
+        /// already asserts for decoration rebuilds.
+        var externalChangeStatCalls = 0
         /// Set by `restyleBlock` when a block it just re-attributed holds a
         /// transcluded embed, and drained ONCE per pass by
         /// `prepareTransclusionsIfNeeded`. A flag rather than the work itself
@@ -346,6 +384,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         }
 
         func tearDown() {
+            if let externalChangeToken {
+                unregisterExternalChangeHandler?(externalChangeToken)
+            }
+            externalChangeToken = nil
             completionPanel.hide()
             // The hover preview is a child window of the same host window, so
             // it must go with the editor — and its pending task must be

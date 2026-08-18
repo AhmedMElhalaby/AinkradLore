@@ -46,48 +46,67 @@ extension MarkdownEditor.Coordinator {
 
     // MARK: - Live transclusion updates
 
+    /// The PRIMARY live-update path: called with NO editor interaction
+    /// whatsoever, whenever `EditorContext.registerExternalChangeHandler`'s
+    /// sink fires for `url` — a watcher-driven vault rescan (an edit made in
+    /// Obsidian, or any external tool), or another split pane saving the
+    /// SAME file. See `MarkdownEditor.Coordinator.externalChangeToken`'s doc
+    /// comment for why this exists as a push rather than relying on
+    /// `detectExternalTransclusionChanges()` alone (fix round 1, Critical #1
+    /// — a poll driven only by `applyStyles()` never fires while the window
+    /// sits idle, so an Obsidian edit would sit invisible until the user
+    /// typed a character).
+    ///
+    /// Invalidates unconditionally — `url` is not filtered against this
+    /// document's own embedded targets first, because that filter is exactly
+    /// what `TransclusionCache.invalidate(path:)` already does internally
+    /// (a no-op for a path with no entries), and computing it twice would
+    /// cost more than the no-op it is guarding.
+    func handleExternalChange(to url: URL) {
+        transclusionCache.invalidate(path: url)
+        // `applyStyles()`'s `isRenderStale` guard has no way to know a
+        // DIFFERENT file changed, so it is bypassed by forcing a render
+        // directly — the render itself re-derives `transclusionRegions` from
+        // the (now-invalidated, so freshly re-resolved) cache and repaints,
+        // exactly what Task 6's drain invariant requires.
+        renderStyles()
+    }
+
     /// Compares every currently-embedded transclusion target's on-disk mtime
-    /// against what the last check saw, and invalidates the cache for any
-    /// that changed.
+    /// against what the last check saw, and invalidates the cache (and forces
+    /// a render) for any that changed.
     ///
-    /// Exists because `applyStyles()`'s redundant-redraw guard
-    /// (`isRenderStale`) compares only `tokens` and this document's own text
-    /// — neither of which changes when a DIFFERENT file, embedded here via
-    /// `![[…]]`, is edited on disk (in Obsidian, or the same file open in
-    /// another split pane). Without this check, such an edit would sit
-    /// invisible until some unrelated change to THIS document happened to
-    /// force a render.
+    /// The BACKSTOP, not the primary mechanism — see
+    /// `MarkdownEditor.Coordinator.embeddedTargetMTimes`'s doc comment.
+    /// Deliberately NOT called from `applyStyles()` (fix round 1, Important
+    /// #2): that runs once per keystroke, and stat-ing every embedded
+    /// target's file on every character typed is real, measured,
+    /// synchronous main-actor filesystem work the typing-path performance
+    /// gates do not cover. Called instead from `makeNSView` (on open) and
+    /// `onBecomeFirstResponder` (on focus) — an idle document that never
+    /// regains focus relies entirely on the watcher push in
+    /// `handleExternalChange(to:)` above, which is the common case this
+    /// backstop is not needed for.
     ///
-    /// `cache.invalidate(path:)` is called proactively rather than relying on
-    /// `TransclusionKey`'s mtime alone: that key is already self-correcting
-    /// for an ordinary mtime bump (a new mtime is simply a new key — see
-    /// `TransclusionMeasurement`'s doc comment for the same property on
-    /// measurements), but a same-second edit on a filesystem with coarse
-    /// mtime resolution can leave the mtime unchanged (see
-    /// `DocumentSession.baseline`'s doc comment on the identical limit), and
-    /// only an explicit invalidation catches that case.
-    ///
-    /// Called from `applyStyles()`, on every call — including ones the
-    /// redundant-redraw guard would otherwise skip — so it is cheap by
-    /// construction: a handful of `stat` calls for a document's (usually
-    /// zero, rarely more than a few) transcluded targets, never a re-parse or
-    /// a re-measure by itself.
-    /// - Returns: whether any target changed, so `applyStyles()` knows to
-    ///   force a render even when nothing else about this document did.
-    @discardableResult
-    func detectExternalTransclusionChanges() -> Bool {
-        var changed = false
+    /// Distinct URLs are stat'd once per call, not once per embed SPAN
+    /// occurrence — a target embedded five times in one document costs one
+    /// `stat`, not five.
+    func detectExternalTransclusionChanges() {
+        var stattedThisPass: [URL: Date] = [:]
         var seen: Set<URL> = []
+        var changedTargets: [URL] = []
         for span in styleCache.spans {
             guard case .embed(let target, _) = span.kind else { continue }
             guard case .transclusion(let url) = EmbedRendering.kind(for: resolveEmbedTarget(target))
             else { continue }
             seen.insert(url)
+            guard stattedThisPass[url] == nil else { continue }
+            externalChangeStatCalls += 1
             let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
             let mtime = (attributes?[.modificationDate] as? Date) ?? .distantPast
+            stattedThisPass[url] = mtime
             if let known = embeddedTargetMTimes[url], known != mtime {
-                transclusionCache.invalidate(path: url)
-                changed = true
+                changedTargets.append(url)
             }
             embeddedTargetMTimes[url] = mtime
         }
@@ -98,7 +117,8 @@ extension MarkdownEditor.Coordinator {
         if embeddedTargetMTimes.count != seen.count {
             embeddedTargetMTimes = embeddedTargetMTimes.filter { seen.contains($0.key) }
         }
-        return changed
+        for url in changedTargets { transclusionCache.invalidate(path: url) }
+        if !changedTargets.isEmpty { renderStyles() }
     }
 
     // MARK: - Parsing

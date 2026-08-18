@@ -276,6 +276,85 @@ final class MarkdownRevealBenchmark: XCTestCase {
                            "typing re-measured an embed")
         }
     }
+
+    /// Fix round 1, Critical #1: a watcher event must repaint the embed with
+    /// NO editor interaction — no keystroke, no focus change, nothing.
+    /// Simulates the sink `EditorContext.registerExternalChangeHandler`
+    /// exposes by calling `handleExternalChange(to:)` directly, exactly as
+    /// `MarkdownEditorView.makeNSView`'s registration callback does, and
+    /// asserts BOTH halves of "an edit … re-renders the embed": the content
+    /// is re-resolved (a fresh measurement, not the old cached one) AND a
+    /// repaint was actually requested (`blockBackgroundRefreshes` moved) —
+    /// invalidation alone, with no `blockBackgroundRefreshes` increment,
+    /// would be the exact failure this task exists to prevent.
+    @MainActor
+    func test_watcherEventRepaintsTheEmbedWithNoEditorInteraction() throws {
+        let (coordinator, tv, vault) = try makeTransclusionEditor()
+        try withExtendedLifetime(coordinator) {
+            coordinator.applyStyles()
+            coordinator.renderStyles()
+            let before = try XCTUnwrap(coordinator.transclusionRegions.first)
+
+            // The target changes ON DISK — no editor of it is open, exactly
+            // the "edited in Obsidian" scenario.
+            let a = vault.appendingPathComponent("target-a.md")
+            try String(repeating: "Freshly edited transcluded prose.\n\n", count: 60)
+                .write(to: a, atomically: true, encoding: .utf8)
+
+            coordinator.blockBackgroundRefreshes = 0
+            TransclusionMeasureCounter.reset()
+
+            // NO keystroke, no focus change, no `applyStyles()` call — only
+            // the sink firing, exactly as the watcher push does.
+            coordinator.handleExternalChange(to: a)
+
+            XCTAssertGreaterThan(TransclusionMeasureCounter.count, 0,
+                                 "the changed target must be re-resolved and re-measured, "
+                                 + "not served from the stale cache entry")
+            XCTAssertGreaterThan(coordinator.blockBackgroundRefreshes, 0,
+                                 "invalidation without a repaint is exactly the failure "
+                                 + "this task exists to prevent")
+            let after = try XCTUnwrap(coordinator.transclusionRegions.first)
+            XCTAssertNotEqual(before.kind, after.kind,
+                              "the drawn embed must reflect the new content, "
+                              + "not the box measured before the edit")
+        }
+    }
+
+    /// Fix round 1, Important #2: `detectExternalTransclusionChanges()` — the
+    /// mtime backstop — must cost ZERO filesystem calls on the per-keystroke
+    /// path. It is wired to `makeNSView` (on-appear) and
+    /// `onBecomeFirstResponder` (on-focus) only, never to `applyStyles()`,
+    /// which runs once per keystroke. Same shape as
+    /// `test_transclusionAddsNoDecorationRebuildsToAKeystroke`'s
+    /// `blockBackgroundRefreshes` gate, for `stat()` calls instead of
+    /// decoration rebuilds.
+    @MainActor
+    func test_typingDoesNotPollExternalTransclusionState() throws {
+        let (coordinator, tv, _) = try makeTransclusionEditor()
+        withExtendedLifetime(coordinator) {
+            coordinator.applyStyles()
+            coordinator.renderStyles()
+            let caret = (tv.string as NSString).range(of: "Some prose")
+            tv.setSelectedRange(NSRange(location: caret.location + 5, length: 0))
+
+            coordinator.externalChangeStatCalls = 0
+            for _ in 0..<10 {
+                tv.insertText("x", replacementRange: tv.selectedRange())
+            }
+            XCTAssertEqual(coordinator.externalChangeStatCalls, 0,
+                           "a keystroke must never stat an embedded target's file")
+
+            // The counter itself is real, not dead code: the on-focus
+            // backstop DOES use it, and stats each of the document's two
+            // DISTINCT targets exactly once even though nothing in this
+            // fixture repeats a target.
+            coordinator.detectExternalTransclusionChanges()
+            XCTAssertEqual(coordinator.externalChangeStatCalls, 2,
+                           "the on-focus backstop must stat each distinct embedded "
+                           + "target exactly once")
+        }
+    }
 }
 
 /// The editor-level half: the bounds this task exists to pin, asserted on the

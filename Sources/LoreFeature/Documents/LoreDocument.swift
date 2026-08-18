@@ -168,6 +168,20 @@ public struct EditorContext {
     /// "declined" shape as `writePastedImage` — so an engine with no
     /// title-field story, or a test that does not care, needs no changes.
     public let commitTitle: @MainActor (String) -> LoreStore.TitleCommitOutcome
+    /// Lets the editor learn, with no keystroke required, that a file changed
+    /// on disk — an edit made in Obsidian, a save from the same file open in
+    /// another split pane, or any other external tool. Rides the SAME sink
+    /// the index already uses (`VaultIndexCoordinator`'s watcher-driven
+    /// rescan and per-save `indexDocument`), rather than a second watcher:
+    /// this is what makes a transcluded `![[note]]` embed update live. The
+    /// returned token must be handed back to `unregisterExternalChangeHandler`
+    /// when the editor tears down, or the closure — and everything it
+    /// captures — outlives it. Defaulted to "never fires, token unused", so
+    /// an engine or test with no vault behind it needs no changes.
+    public let registerExternalChangeHandler:
+        @MainActor (@escaping @MainActor (URL) -> Void) -> UUID
+    /// Pairs with `registerExternalChangeHandler` — see its doc comment.
+    public let unregisterExternalChangeHandler: @MainActor (UUID) -> Void
 
     public init(theme: HostTheme,
                 editorSettings: EditorSettings = .default,
@@ -189,7 +203,12 @@ public struct EditorContext {
                 writePastedImage: @escaping @MainActor (Data, String) -> String? = { _, _ in nil },
                 writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil },
                 commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
-                    = { _ in .refused("Renaming is unavailable here.") }) {
+                    = { _ in .refused("Renaming is unavailable here.") },
+                registerExternalChangeHandler:
+                    @escaping @MainActor (@escaping @MainActor (URL) -> Void) -> UUID
+                    = { _ in UUID() },
+                unregisterExternalChangeHandler: @escaping @MainActor (UUID) -> Void
+                    = { _ in }) {
         self.theme = theme; self.editorSettings = editorSettings
         self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
@@ -205,5 +224,7 @@ public struct EditorContext {
         self.writePastedImage = writePastedImage
         self.writeDroppedFile = writeDroppedFile
         self.commitTitle = commitTitle
+        self.registerExternalChangeHandler = registerExternalChangeHandler
+        self.unregisterExternalChangeHandler = unregisterExternalChangeHandler
     }
 }

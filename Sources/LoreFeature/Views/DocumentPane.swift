@@ -368,6 +368,12 @@ struct DocumentPane: View {
                               },
                               commitTitle: { newTitle in
                                   store.commitTitleChange(for: session, to: newTitle)
+                              },
+                              registerExternalChangeHandler: { handler in
+                                  store.registerExternalChangeHandler(handler)
+                              },
+                              unregisterExternalChangeHandler: { token in
+                                  store.unregisterExternalChangeHandler(token)
                               }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so

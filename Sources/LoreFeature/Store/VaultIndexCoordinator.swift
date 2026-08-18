@@ -114,6 +114,49 @@ public final class VaultIndexCoordinator {
     /// A vault change arrived while a rescan was running — run once more after.
     private var rebuildRequestedAgain = false
 
+    /// Open editors' subscriptions to "a file changed on disk", keyed by the
+    /// token `registerExternalChangeHandler` handed back — see that method.
+    /// This is the SAME sink `LoreStore`/`EditorContext` route the watcher's
+    /// and every save's changes through already; a transcluded embed rides
+    /// it rather than a second watcher of its own.
+    private var externalChangeHandlers: [UUID: (URL) -> Void] = [:]
+
+    /// Subscribes to every file-changed notification this coordinator raises
+    /// — from a watcher-driven rescan (`performBackgroundRebuild`, `rebuild`)
+    /// or a single document being (re-)indexed after a save
+    /// (`indexDocument`). Returns a token; the caller MUST pass it to
+    /// `unregisterExternalChangeHandler` when it tears down, or `handler` —
+    /// and everything it captures — outlives whatever registered it.
+    func registerExternalChangeHandler(_ handler: @escaping (URL) -> Void) -> UUID {
+        let token = UUID()
+        externalChangeHandlers[token] = handler
+        return token
+    }
+
+    /// Pairs with `registerExternalChangeHandler` — see its doc comment.
+    func unregisterExternalChangeHandler(_ token: UUID) {
+        externalChangeHandlers.removeValue(forKey: token)
+    }
+
+    private func notifyExternalChange(to url: URL) {
+        for handler in externalChangeHandlers.values { handler(url) }
+    }
+
+    /// Tells every registered handler about each path whose `updated` (mtime)
+    /// differs between `oldRows` and `newRows` — the diff a whole-vault
+    /// rescan needs to turn "the index refreshed" into "THESE paths changed",
+    /// since `performBackgroundRebuild`/`rebuild` replace `rows` wholesale
+    /// rather than editing it in place.
+    private func notifyChangedPaths(from oldRows: [IndexRow], to newRows: [IndexRow]) {
+        guard !externalChangeHandlers.isEmpty else { return }
+        var oldByPath: [URL: Date] = [:]
+        oldByPath.reserveCapacity(oldRows.count)
+        for row in oldRows { oldByPath[row.path] = row.updated }
+        for row in newRows where oldByPath[row.path] != row.updated {
+            notifyExternalChange(to: row.path)
+        }
+    }
+
     /// How long after our own write a watcher event is treated as the echo of
     /// that write. Generous enough to cover FSEvents' coalescing latency,
     /// short enough that a genuine external edit arriving right after a save
@@ -262,7 +305,16 @@ public final class VaultIndexCoordinator {
         // targeted call happened after it started) or re-deriving
         // `directoryPaths` from `rows` plus the targeted deltas instead of a
         // flat overwrite — both are more than a one-line guard.
-        if let refreshed { rows = refreshed.rows; directoryPaths = refreshed.directories }
+        if let refreshed {
+            // Diffed BEFORE `rows` is overwritten — see `notifyChangedPaths`.
+            // This is the watcher's own path: a genuine external edit (a
+            // self-write's echo is already dropped by `suppressWatcherUntil`
+            // before `startBackgroundRebuild` is ever called) reaching every
+            // editor that asked to hear about it, with no keystroke required.
+            notifyChangedPaths(from: rows, to: refreshed.rows)
+            rows = refreshed.rows
+            directoryPaths = refreshed.directories
+        }
     }
 
     /// What one background rescan produced — the refreshed vault, or why it
@@ -424,9 +476,11 @@ public final class VaultIndexCoordinator {
     /// result immediately; production paths use `startBackgroundRebuild`.
     public func rebuild() throws {
         guard let root = vaultRoot, let index else { return }
+        let oldRows = rows
         try index.replaceAll(with: Self.scanVault(at: root))
         rows = try index.all()
         directoryPaths = Self.scanDirectories(under: root)
+        notifyChangedPaths(from: oldRows, to: rows)
     }
 
     public func search(_ query: String) -> [IndexRow] {
@@ -634,6 +688,11 @@ public final class VaultIndexCoordinator {
                                     isEditable: engine.isEditable, byteSize: byteSize,
                                     isTruncated: isTruncated))
         rows = try index.all()
+        // The per-save path — the one that fires when the SAME file is open
+        // (and saved) in another split pane, not only when an external tool
+        // writes it behind the store's back. `url` is already known exactly,
+        // no diff needed.
+        notifyExternalChange(to: url)
     }
 
     func removeFromIndex(_ url: URL) throws {
