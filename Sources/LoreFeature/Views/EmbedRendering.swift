@@ -12,6 +12,12 @@ import AinkradAppKit
 /// actually wants.
 public enum EmbedKind: Equatable {
     case image(URL)
+    /// A markdown note, rendered inline by the transclusion path. Was a
+    /// `.chip` before M7 — the comment above about "a second document's
+    /// renderer inside the editor" still holds for PDFs and Word files,
+    /// which is why those stay chips. A markdown note is different in kind:
+    /// this editor already knows how to lay one out.
+    case transclusion(URL)
     case chip(URL)
     case unresolved
 }
@@ -24,11 +30,17 @@ public enum EmbedRendering {
         "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "tif", "bmp", "svg",
     ]
 
+    /// Case-insensitive for the same reason `imageExtensions` is —
+    /// `EmbedRenderingTests.test_markdownTargetIsCaseInsensitive` pins
+    /// `"NOTE.MD"`.
+    public static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
+
     public static func kind(for target: URL?) -> EmbedKind {
         guard let target else { return .unresolved }
-        return imageExtensions.contains(target.pathExtension.lowercased())
-            ? .image(target)
-            : .chip(target)
+        let ext = target.pathExtension.lowercased()
+        if imageExtensions.contains(ext) { return .image(target) }
+        if markdownExtensions.contains(ext) { return .transclusion(target) }
+        return .chip(target)
     }
 
     /// The chip's pill: a background box plus the same colour and underline
@@ -234,6 +246,12 @@ extension MarkdownEditor.Coordinator {
                 continue   // Fallback colour already applied by `add(.embed:)`.
 
             case .chip:
+                EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
+
+            case .transclusion:
+                // Task 6 replaces this with the real transclusion render.
+                // For now a markdown target falls back to the same chip
+                // treatment a document embed gets.
                 EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
 
             case .image(let url):
