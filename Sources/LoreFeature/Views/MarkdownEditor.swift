@@ -17,6 +17,11 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Rows to offer for the current `[[` prefix. `nil` disables completion
     /// entirely — which is how plain-text documents get no link affordances.
     let completions: (@MainActor (String) -> [IndexRow])?
+    /// Tag names matching the current `#` prefix, for `#` completion. `nil`
+    /// disables it entirely — same "no capability supplied" shape as
+    /// `completions` above, so a document type with no tag pipeline (or a
+    /// call site that has not been updated) behaves exactly as before.
+    let tagCompletions: (@MainActor (String) -> [String])?
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
@@ -60,6 +65,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)? = nil,
                 createLinkedNote: (@MainActor (String) -> Bool)? = nil,
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
+                tagCompletions: (@MainActor (String) -> [String])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
@@ -73,7 +79,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         self._text = text; self.tokens = tokens; self.settings = settings
         self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
-        self.completions = completions; self.onOpenLink = onOpenLink
+        self.completions = completions; self.tagCompletions = tagCompletions
+        self.onOpenLink = onOpenLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
@@ -120,6 +127,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// one they open.
         var settings: EditorSettings
         var completions: (@MainActor (String) -> [IndexRow])?
+        /// See `MarkdownEditor.tagCompletions`.
+        var tagCompletions: (@MainActor (String) -> [String])?
         var onOpenLink: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
         /// practice — `makeNSView`/`updateNSView` always install at least the
@@ -327,7 +336,7 @@ public struct MarkdownEditor: NSViewRepresentable {
                 onSelectionChange?(tv.string, tv.selectedRange(), tv.spellCheckerDocumentTag)
             }
             guard completionPanel.isVisible, let tv = textView else { return }
-            if activePrefix(in: tv) == nil { completionPanel.hide() }
+            if activeTrigger(in: tv) == nil { completionPanel.hide() }
         }
 
         /// Focus left the editor. Nothing the list offers can be accepted from

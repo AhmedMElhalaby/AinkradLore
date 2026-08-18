@@ -447,4 +447,34 @@ final class LinkCreateOnUnresolvedTests: XCTestCase {
                 .appendingPathComponent("\(UUID()).sqlite"))
         XCTAssertThrowsError(try store.create(title: "Design"))
     }
+
+    // MARK: - Trigger detection (`[[` vs `#`)
+
+    func test_trigger_doubleBracketIsWikilink() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "see [[Des", at: 9)?.kind, .wikilink)
+    }
+
+    func test_trigger_hashIsTag() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "about #des", at: 10)?.kind, .tag)
+    }
+
+    func test_trigger_hashQueryExcludesTheHash() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "about #des", at: 10)?.query, "des")
+    }
+
+    func test_trigger_headingHashDoesNotTrigger() {
+        // `# ` at line start is a heading, and offering tag completions there
+        // would fire on every new heading anyone types.
+        XCTAssertNil(LinkCompletionContext.trigger(in: "# ", at: 2))
+    }
+
+    func test_trigger_hashInsideWikilinkDoesNotTrigger() {
+        // `[[Note#` is a heading fragment — the wikilink trigger owns it.
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "[[Note#Head", at: 11)?.kind, .wikilink)
+    }
+
+    func test_trigger_nestedTagQueryKeepsTheSlash() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "#project/ain", at: 12)?.query,
+                       "project/ain")
+    }
 }

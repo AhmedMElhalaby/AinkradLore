@@ -108,6 +108,10 @@ public struct EditorContext {
     /// link layer to offer — an engine that ignores it behaves exactly as
     /// before.
     public let completions: @MainActor (String) -> [IndexRow]
+    /// Tag names matching a `#` prefix, for `#` completion. Defaulted to "no
+    /// candidates" — same shape as `completions` — so an engine or call site
+    /// that has not been updated behaves exactly as before.
+    public let tagCompletions: @MainActor (String) -> [String]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
     /// Resolves an `![[target]]` embed's raw target to a file, for inline
@@ -166,6 +170,7 @@ public struct EditorContext {
                 reportCaretOffset: @escaping @MainActor (Int) -> Void = { _ in },
                 onChange: @escaping @MainActor () -> Void,
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
+                tagCompletions: @escaping @MainActor (String) -> [String] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
@@ -182,7 +187,8 @@ public struct EditorContext {
         self.createLinkedNote = createLinkedNote
         self.reportCaretOffset = reportCaretOffset
         self.onChange = onChange
-        self.completions = completions; self.openLink = openLink
+        self.completions = completions; self.tagCompletions = tagCompletions
+        self.openLink = openLink
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
         self.registerScrollHandler = registerScrollHandler

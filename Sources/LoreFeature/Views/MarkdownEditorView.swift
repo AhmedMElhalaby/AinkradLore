@@ -167,6 +167,7 @@ extension MarkdownEditor {
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let tv = context.coordinator.textView else { return }
         context.coordinator.completions = completions
+        context.coordinator.tagCompletions = tagCompletions
         context.coordinator.onOpenLink = onOpenLink
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget

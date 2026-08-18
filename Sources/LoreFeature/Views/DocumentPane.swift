@@ -289,6 +289,18 @@ struct DocumentPane: View {
                                   outlineDebouncer.schedule(after: 0.3) { refreshOutline() }
                               },
                               completions: { store.linkCompletions(matching: $0) },
+                              // Prefix-matched in Swift over `allTags` —
+                              // already in memory, deduplicated and sorted,
+                              // and (since inline `#tags` feed the same
+                              // pipeline) already including inline tags. No
+                              // new query, no SQL.
+                              tagCompletions: { prefix in
+                                  guard !prefix.isEmpty else { return store.allTags }
+                                  let needle = prefix.lowercased()
+                                  return store.allTags.filter {
+                                      $0.lowercased().hasPrefix(needle)
+                                  }
+                              },
                               openLink: { target in
                                   // `documentName` first: `openLink` funnels into
                                   // `LinkResolver.basename`, which strips a

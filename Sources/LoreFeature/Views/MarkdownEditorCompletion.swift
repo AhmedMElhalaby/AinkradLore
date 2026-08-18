@@ -25,13 +25,33 @@ extension MarkdownEditor.Coordinator {
             return LinkCompletionContext.activePrefix(in: text, caret: caret)
         }
 
+        /// Which trigger — `[[` or `#` — is active at the caret, or `nil`.
+        /// Same `String.Index` conversion as `activePrefix`, and the same
+        /// reason: this runs per keystroke.
+        func activeTrigger(in tv: NSTextView) -> LinkCompletionContext.Trigger? {
+            guard tv.selectedRange().length == 0 else { return nil }
+            let text = tv.string
+            guard let caret = Range(NSRange(location: tv.selectedRange().location, length: 0),
+                                    in: text)?.lowerBound else { return nil }
+            return LinkCompletionContext.trigger(in: text, at: caret)
+        }
+
         /// Internal for the same cross-file reason as `pendingEdit`: its one
         /// caller, `textDidChange`, lives in `MarkdownEditorEditPath.swift`.
         func refreshCompletions() {
-            guard let tv = textView, let completions,
-                  let prefix = activePrefix(in: tv) else {
+            guard let tv = textView, let trigger = activeTrigger(in: tv) else {
                 completionPanel.hide(); return
             }
+            switch trigger.kind {
+            case .wikilink:
+                refreshWikilinkCompletions(prefix: trigger.query, in: tv)
+            case .tag:
+                refreshTagCompletions(query: trigger.query, in: tv)
+            }
+        }
+
+        private func refreshWikilinkCompletions(prefix: String, in tv: NSTextView) {
+            guard let completions else { completionPanel.hide(); return }
             // A `#` in the prefix switches the list to that document's
             // HEADINGS. Checked before the document query so typing
             // `[[Design#` stops offering documents the moment the fragment
@@ -50,6 +70,18 @@ extension MarkdownEditor.Coordinator {
                 items = Self.completionItems(for: prefix, matches: rows,
                                              canCreate: createLinkedNote != nil)
             }
+            guard !items.isEmpty else { completionPanel.hide(); return }
+            completionPanel.show(matches: items, tokens: tokens,
+                                 caretRect: caretRect(in: tv), over: tv)
+        }
+
+        /// Tags come from `LoreStore.allTags` — already in memory, already
+        /// deduplicated, already sorted, and (since inline `#tags` feed the
+        /// same pipeline) already including inline tags. No new query: just a
+        /// prefix filter over what the store already handed back.
+        private func refreshTagCompletions(query: String, in tv: NSTextView) {
+            guard let tagCompletions else { completionPanel.hide(); return }
+            let items = tagCompletions(query).map { LinkCompletionItem.tag($0) }
             guard !items.isEmpty else { completionPanel.hide(); return }
             completionPanel.show(matches: items, tokens: tokens,
                                  caretRect: caretRect(in: tv), over: tv)
@@ -122,7 +154,35 @@ extension MarkdownEditor.Coordinator {
                     completionPanel.hide(); return
                 }
                 insert(linkText: name)
+            case .tag(let name):
+                insertTag(name)
             }
+        }
+
+        /// Replaces the active `#` trigger's span (the `#` through the caret)
+        /// with `#name`. Unlike `insert(linkText:)`, there is no closing
+        /// delimiter to absorb — a tag is just the `#` and the word after it.
+        func insertTag(_ name: String) {
+            guard let tv = textView, let trigger = activeTrigger(in: tv),
+                  trigger.kind == .tag else {
+                completionPanel.hide(); return
+            }
+            let insertion = "#" + name
+            let caretLocation = tv.selectedRange().location
+            // UTF-16 units, matching `insert(linkText:)`'s use of
+            // `prefix.utf16.count` — the query may contain non-ASCII tag
+            // characters (`scanTags` allows any `> 0x7F` code unit), so this
+            // counts UTF-16 units rather than assuming one Character is one
+            // unit. `+ 1` for the `#` itself.
+            let startLocation = caretLocation - trigger.query.utf16.count - 1
+            let range = NSRange(location: startLocation, length: caretLocation - startLocation)
+            if tv.shouldChangeText(in: range, replacementString: insertion) {
+                tv.textStorage?.replaceCharacters(in: range, with: insertion)
+                tv.didChangeText()
+            }
+            tv.setSelectedRange(NSRange(location: startLocation + (insertion as NSString).length,
+                                        length: 0))
+            completionPanel.hide()
         }
 
         func insert(linkText: String) {

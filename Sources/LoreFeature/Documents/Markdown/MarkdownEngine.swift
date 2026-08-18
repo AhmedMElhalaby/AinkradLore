@@ -186,7 +186,8 @@ private struct MarkdownDocumentEditor: View {
                            settings: ctx.editorSettings,
                            headingCompletions: ctx.headingCompletions,
                            createLinkedNote: ctx.createLinkedNote,
-                           completions: ctx.completions, onOpenLink: ctx.openLink,
+                           completions: ctx.completions, tagCompletions: ctx.tagCompletions,
+                           onOpenLink: ctx.openLink,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
                            // Task checkboxes are markdown, and only a session

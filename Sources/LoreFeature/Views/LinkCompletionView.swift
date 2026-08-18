@@ -229,6 +229,103 @@ public enum LinkCompletionContext {
     }
 }
 
+extension LinkCompletionContext {
+    /// What the user typed to summon the panel — `[[` (wikilink) or a bare
+    /// `#` (tag). One enum rather than a second panel: `LinkCompletionView`
+    /// and its floating `LinkCompletionPanel` already handle first-responder
+    /// and teardown correctly, and that handling took real work — a second
+    /// panel would mean a second copy of it that drifts from the first.
+    enum Kind: Equatable { case wikilink, tag }
+
+    struct Trigger: Equatable {
+        let kind: Kind
+        /// What to match against, excluding the trigger characters (`[[` or
+        /// `#`).
+        let query: String
+        /// The CHARACTER offset (see the file doc comment above) of the first
+        /// character replaced when a completion is accepted — right after
+        /// `[[`, or at the `#` itself.
+        let replaceFrom: Int
+    }
+
+    /// The trigger active at `caret`, or `nil` when neither is.
+    ///
+    /// `[[` is checked first — via `activePrefix` — because it OWNS any `#`
+    /// that follows: `[[Note#Head` is a heading fragment, not a tag, and the
+    /// wikilink trigger already knows how to read it (`headingQuery`).
+    static func trigger(in text: String, at caret: Int) -> Trigger? {
+        guard caret >= 0,
+              let index = text.index(text.startIndex, offsetBy: caret,
+                                     limitedBy: text.endIndex) else { return nil }
+        return trigger(in: text, at: index)
+    }
+
+    /// The real implementation, in `String.Index` space — see `activePrefix`.
+    static func trigger(in text: String, at caret: String.Index) -> Trigger? {
+        if let prefix = activePrefix(in: text, caret: caret) {
+            let replaceFrom = text.distance(from: text.startIndex, to: caret) - prefix.count
+            return Trigger(kind: .wikilink, query: prefix, replaceFrom: replaceFrom)
+        }
+        return tagTrigger(in: text, caret: caret)
+    }
+
+    /// Characters `scanTags` (`MarkdownExtensions.swift`) accepts inside a
+    /// tag name: letters (including non-ASCII), digits, `_`, `-`, `/`. `/` is
+    /// kept in the query, not stripped, so `#project/ain` still matches
+    /// `project/ainkrad` — the same reasoning `scanTags` uses to keep a
+    /// trailing `/` inside the span while the author is mid-typing.
+    private static func isTagChar(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_" || c == "-" || c == "/"
+    }
+
+    /// Scans backward from `caret` for an unclosed `#`, stopping at the first
+    /// character that cannot be part of a tag name (crucially, whitespace —
+    /// which is what makes `# ` at line start refuse to trigger below: the
+    /// space between `#` and the caret stops the scan before a `#` is ever
+    /// found).
+    private static func tagTrigger(in text: String, caret: String.Index) -> Trigger? {
+        var i = caret
+        while i > text.startIndex {
+            let prev = text.index(before: i)
+            let c = text[prev]
+            if c == "#" {
+                let query = String(text[i..<caret])
+                // `# ` at line start is a heading, not a tag — see
+                // `scanTags`. The disqualifying space itself can never reach
+                // here (it would already have stopped the scan below), so the
+                // only ambiguous case is a BARE `#` at line start with
+                // nothing typed after it yet: the next keystroke decides
+                // whether this becomes a heading or a tag, and offering
+                // completions before that is known would fire on every new
+                // heading anyone types.
+                if query.isEmpty, isAtLineStart(prev, in: text) { return nil }
+                let replaceFrom = text.distance(from: text.startIndex, to: prev)
+                return Trigger(kind: .tag, query: query, replaceFrom: replaceFrom)
+            }
+            guard isTagChar(c) else { return nil }
+            i = prev
+        }
+        return nil
+    }
+
+    /// Whether `index` starts a line, allowing up to three leading spaces —
+    /// CommonMark's own indent tolerance, matching `scanTags`'
+    /// `isAtLineStart`.
+    private static func isAtLineStart(_ index: String.Index, in text: String) -> Bool {
+        var k = index
+        var spaces = 0
+        while k > text.startIndex, spaces <= 3 {
+            let prev = text.index(before: k)
+            let c = text[prev]
+            if c == "\n" { return true }
+            guard c == " " else { return false }
+            spaces += 1
+            k = prev
+        }
+        return k == text.startIndex
+    }
+}
+
 /// One row in the completion list.
 ///
 /// The list used to be `[IndexRow]` end to end, which made "offer to create the
@@ -242,6 +339,10 @@ enum LinkCompletionItem: Equatable {
     case create(String)
     /// A heading inside the document already named before the `#`.
     case heading(document: String, text: String)
+    /// A `#tag` completion, matched against `LoreStore.allTags`. Carries the
+    /// bare name (no `#`), matching how `allTags` and `scanTags` both store
+    /// it.
+    case tag(String)
 
     /// What the row reads as.
     var label: String {
@@ -252,6 +353,8 @@ enum LinkCompletionItem: Equatable {
             return "Create “\(name)”"
         case .heading(_, let text):
             return text
+        case .tag(let name):
+            return "#\(name)"
         }
     }
 
@@ -260,6 +363,7 @@ enum LinkCompletionItem: Equatable {
         case .document(let row): return LoreSidebarRow.icon(for: row)
         case .create: return "plus.circle"
         case .heading: return "number"
+        case .tag: return "tag"
         }
     }
 }
