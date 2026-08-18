@@ -476,6 +476,23 @@ extension MarkdownEditor.Coordinator {
         for block in blocks.sorted() {
             restyleBlock(block, revealed: revealedRange, in: storage)
         }
+        // DRAINED HERE, not left to the caller. `restyleBlock` reset those
+        // blocks' paragraph styles, which pops a transcluded embed's reserved
+        // gap shut and leaves its region describing a rect that no longer
+        // exists — and one of this function's three callers is
+        // `revealForSelectionChange`'s early-return branch, which returns
+        // without any drain of its own (fix round 2, NEW-1: caret column 0 → 1
+        // on an embed's line flips embed reveal while the line-scoped
+        // `revealedRange` does not change, so the gap closed and a stale
+        // full-column panel painted over the following paragraph until the
+        // next keystroke). Draining inside the function that did the damage is
+        // what makes the invariant hold for EVERY caller rather than for the
+        // ones someone remembered.
+        //
+        // Reserves only. Whether the DRAWN decoration is rebuilt from it is
+        // the caller's call, because the caller knows its viewport window and
+        // whether it is about to refresh anyway — see fix round 1, Important 3.
+        prepareTransclusionsIfNeeded(in: storage)
         return !blocks.isEmpty
     }
 

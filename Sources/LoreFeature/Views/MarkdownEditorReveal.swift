@@ -343,7 +343,15 @@ extension MarkdownEditor.Coordinator {
             // which is empty for the overwhelming majority of documents and
             // tiny for the rest, and does no styling work at all unless the
             // answer changed.
-            if revealEmbedsForSelectionChange(in: storage) { tv.needsDisplay = true }
+            if revealEmbedsForSelectionChange(in: storage) {
+                // The reservation was already restored (or withdrawn) inside
+                // that call; the DRAWN decoration is rebuilt here, because
+                // this branch returns and nothing else will do it. Clipped to
+                // the window the last full render used, like the other caret
+                // path below.
+                refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
+                tv.needsDisplay = true
+            }
             return
         }
         revealedRange = now
@@ -370,12 +378,20 @@ extension MarkdownEditor.Coordinator {
         // only has to catch embeds in blocks that did NOT flip; it also keeps
         // `revealedEmbedSpans` in step so the next caret move compares against
         // the truth.
-        revealEmbedsForSelectionChange(in: storage)
+        let embedsFlipped = revealEmbedsForSelectionChange(in: storage)
         // ONE pass for the whole caret move, however many blocks flipped — see
         // `restyleBlock`. Clipped to the same viewport window the last full
         // render used, so a large document's decoration is not rebuilt
         // wholesale on an arrow key.
-        if prepareTransclusionsIfNeeded(in: storage) {
+        //
+        // The `||` order matters and the operands are not interchangeable:
+        // the drain must be ATTEMPTED either way (Swift short-circuits, so it
+        // goes first), and `embedsFlipped` is still consulted because
+        // `revealEmbedsForSelectionChange` may have already drained the flag
+        // itself — in which case the reservation changed but this call reports
+        // nothing, and skipping the rebuild would leave the decoration
+        // describing the previous reveal state.
+        if prepareTransclusionsIfNeeded(in: storage) || embedsFlipped {
             refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
         }
         // The DRAWN decoration is a function of reveal state too — a list

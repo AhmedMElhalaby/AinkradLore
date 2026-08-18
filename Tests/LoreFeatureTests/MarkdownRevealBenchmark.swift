@@ -111,6 +111,69 @@ final class MarkdownRevealBenchmark: XCTestCase {
         return (coordinator, tv, vault)
     }
 
+    /// Moving the caret WITHIN the embed's own line must not leave the
+    /// document in a half-rendered state.
+    ///
+    /// Fix round 2, NEW-1. Embed reveal is a SPAN-level property while
+    /// `revealedRange` is line-scoped, so column 0 → column 1 on an embed's
+    /// line flips the embed's reveal with `now == was` — the early-return
+    /// branch of `revealForSelectionChange`. That branch reaches
+    /// `restyleBlock`, which resets the block's paragraph styles, so before
+    /// this fix the reserved gap closed and the (now stale) full-column panel
+    /// kept painting over the following paragraph until the next keystroke.
+    ///
+    /// Asserts BOTH directions: entering drops the region, leaving restores
+    /// the reservation.
+    @MainActor
+    func test_caretMovingWithinAnEmbedsLineKeepsTheReservationHonest() throws {
+        let (coordinator, tv, _) = try makeTransclusionEditor()
+        coordinator.applyStyles()
+        coordinator.renderStyles()
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            let embed = (tv.string as NSString).range(of: "![[target-a]]")
+
+            // Column 0: the caret is at the embed's first character, which is
+            // NOT strictly inside it, so the embed stays collapsed and drawn.
+            tv.setSelectedRange(NSRange(location: embed.location, length: 0))
+            let collapsedRegions = coordinator.transclusionRegions
+            guard let region = collapsedRegions.first(where: { $0.range == embed }),
+                  case .transclusion(let box) = region.kind else {
+                return XCTFail("expected the embed to be drawn from column 0")
+            }
+            let reserved = (storage.attribute(.paragraphStyle, at: embed.location,
+                                              effectiveRange: nil) as? NSParagraphStyle)?
+                .minimumLineHeight ?? 0
+            XCTAssertEqual(reserved, box.height, accuracy: 0.5)
+
+            // Column 1: strictly inside — the embed reveals. The reveal RANGE
+            // does not change (same line), so this is the early-return branch.
+            let before = coordinator.revealedRange
+            tv.setSelectedRange(NSRange(location: embed.location + 1, length: 0))
+            XCTAssertEqual(coordinator.revealedRange, before,
+                           "this test is only meaningful on the `now == was` branch")
+            // The DOCUMENT holds a second embed, which is untouched — so the
+            // claim is about THIS embed's region, not about the array.
+            XCTAssertFalse(coordinator.transclusionRegions.contains { $0.range == embed },
+                           "a revealed embed must not leave a stale panel painting "
+                           + "over the paragraph beneath it")
+            XCTAssertEqual(coordinator.transclusionRegions.count,
+                           collapsedRegions.count - 1,
+                           "only the revealed embed loses its region")
+
+            // Back to column 0: collapsed again, and the gap must come back at
+            // the measured height rather than staying shut.
+            tv.setSelectedRange(NSRange(location: embed.location, length: 0))
+            XCTAssertEqual(coordinator.transclusionRegions.count, collapsedRegions.count,
+                           "the embed must be drawn again once the caret leaves it")
+            let restored = (storage.attribute(.paragraphStyle, at: embed.location,
+                                              effectiveRange: nil) as? NSParagraphStyle)?
+                .minimumLineHeight ?? 0
+            XCTAssertEqual(restored, box.height, accuracy: 0.5,
+                           "the reserved gap collapsed and was never re-opened")
+        }
+    }
+
     /// A transclusion must not ADD decoration rebuilds to a keystroke.
     ///
     /// Fix round 1, Important 3: `restyleBlock` used to run the whole-document
