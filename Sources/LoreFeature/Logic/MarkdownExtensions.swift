@@ -117,14 +117,21 @@ public enum MarkdownExtensions {
             CodeRegion(range: NSRange(location: $0.lowerBound, length: $0.count),
                        kind: .fencedCodeBlock)
         }, kinds: nil)
-        // Each scanner appends in the order listed. A later scanner never
-        // claims an offset an earlier one already took — that is what makes
-        // the precedence in `isClaimed` a decision rather than an accident.
-        // Tasks 4-7 fill the rest in.
-        scanHighlights(text, masked: index, found: &found, claimed: &claimed)
-        scanFootnotes(text, masked: index, found: &found, claimed: &claimed)
-        scanTags(text, masked: index, found: &found, claimed: &claimed, linkIndex: linkIndex)
-        scanBlockIDs(text, masked: index, found: &found, claimed: &claimed)
+        // THE ORDER IS THE CONTRACT. Each scanner appends in the order
+        // listed, and `isClaimed` stops a later one from taking an offset an
+        // earlier one already has — that is what makes the precedence below
+        // a stated decision rather than an accident of which function
+        // happened to run first. Every adjacent pair has a test in
+        // `MarkdownExtensionsPrecedenceTests`. Do not reorder without moving
+        // the tests with it.
+        //
+        // 1-2. Code regions and math arrive already masked, from
+        //      `MarkdownDocumentModel` and `MarkdownMath`. They are not
+        //      rescanned here — one answer to "is this inside code", not two.
+        scanHighlights(text, masked: index, found: &found, claimed: &claimed)   // 3
+        scanFootnotes(text, masked: index, found: &found, claimed: &claimed)    // 4, 5
+        scanTags(text, masked: index, found: &found, claimed: &claimed, linkIndex: linkIndex) // 6
+        scanBlockIDs(text, masked: index, found: &found, claimed: &claimed)     // 7
         return found.sorted { $0.range.lowerBound < $1.range.lowerBound }
     }
 
