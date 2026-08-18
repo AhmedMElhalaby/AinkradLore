@@ -74,6 +74,25 @@ public final class TransclusionCache {
         return content
     }
 
+    /// The height already measured for `key`, or `nil` when this entry has
+    /// never been measured (or its measurement was dropped by
+    /// `invalidateMeasurements()`). A miss is what makes the reservation pass
+    /// measure; a hit is what makes typing free.
+    public func measuredHeight(for key: TransclusionKey) -> CGFloat? {
+        guard let entry = storage[key] else { return nil }
+        return entry.measuredHeight
+    }
+
+    /// Records a measured height against an EXISTING entry. Silently does
+    /// nothing when there is no entry — a height with no content to belong to
+    /// would be unreachable anyway, and inventing an entry for it would need a
+    /// `TransclusionContent` this call does not have.
+    public func setMeasuredHeight(_ height: CGFloat, for key: TransclusionKey) {
+        guard storage[key] != nil else { return }
+        storage[key]?.measuredHeight = height
+        touch(key)
+    }
+
     /// Drops every entry whose key's `path` matches `path`, regardless of
     /// mtime or fragment — used when a file watcher reports a change but the
     /// exact new mtime isn't known to the caller yet.

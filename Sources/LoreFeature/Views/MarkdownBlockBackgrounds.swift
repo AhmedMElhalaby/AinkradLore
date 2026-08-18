@@ -62,6 +62,12 @@ enum MarkdownBlockBackgrounds {
         /// A pipe table drawn as a real grid, with per-cell wrapping. Painted
         /// only while its source is COLLAPSED, measured at draw time.
         case table(TableBox, marker: NSRange)
+        /// A transcluded `![[note]]`, laid out. Painted only while its source
+        /// is COLLAPSED, measured at draw time — the same geometry question
+        /// the callout case above spells out. The box carries the attributed
+        /// string its reserved height was measured from, so the paint and the
+        /// gap can never describe different content.
+        case transclusion(TransclusionLayout.Box)
     }
 
     /// A stretch of text to decorate. UTF-16, into the view's own string.
@@ -319,6 +325,23 @@ enum MarkdownBlockBackgrounds {
                 }
                 continue
             }
+            if case .transclusion(let box) = region.kind {
+                // Same witness as the table: the FIRST character of the
+                // collapsed source is 0.01 pt while hidden and a real glyph
+                // once the caret reveals it, so the drawn note is never
+                // painted on top of its own `![[…]]` source.
+                if MarkdownMathStyling.drawsExpression(
+                    at: NSRange(location: region.range.location, length: 1),
+                    in: textView) {
+                    TransclusionStyling.draw(box, at: region.range,
+                                             columnX: x, columnWidth: width,
+                                             rule: palette.mathTint,
+                                             frame: palette.quoteBar,
+                                             in: textView, origin: origin,
+                                             dirtyRect: dirtyRect)
+                }
+                continue
+            }
             if case .callout(let kind, let title, let marker) = region.kind {
                 // Collapsed marker means the source is hidden, so the icon and
                 // heading stand in for it. Visible marker means the caret is
@@ -353,7 +376,7 @@ enum MarkdownBlockBackgrounds {
                 palette.quoteBar.setFill()
                 NSBezierPath(roundedRect: bar, xRadius: barWidth / 2,
                              yRadius: barWidth / 2).fill()
-            case .listMarker, .callout, .math, .table:
+            case .listMarker, .callout, .math, .table, .transclusion:
                 break   // handled above, before the rect is taken
             }
         }

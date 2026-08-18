@@ -200,6 +200,19 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// ONE layout — a table measured one way and reserved another is drawn
         /// over the paragraph beneath it.
         var tableRegions: [MarkdownBlockBackgrounds.Region] = []
+        /// Drawing regions for transcluded `![[note]]` embeds, rebuilt in the
+        /// SAME pass that reserves their heights — held here for exactly the
+        /// reason `tableRegions` is, and against exactly the same failure: a
+        /// note measured one way and reserved another is drawn over the
+        /// paragraph beneath it. Each region carries the attributed string its
+        /// height was measured from, so the paint cannot drift from the gap.
+        var transclusionRegions: [MarkdownBlockBackgrounds.Region] = []
+        /// Resolved embed content and its measured height, per target. Lives
+        /// on the coordinator — one per open document — so a re-render costs a
+        /// cache hit rather than a second document's layout. This is what makes
+        /// typing free of embed measurement; see
+        /// `MarkdownRevealBenchmark.test_typingInHostDoesNotRemeasureEmbeds`.
+        let transclusionCache = TransclusionCache()
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip

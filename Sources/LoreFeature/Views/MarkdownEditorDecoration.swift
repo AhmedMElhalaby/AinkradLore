@@ -62,6 +62,42 @@ extension MarkdownEditor.Coordinator {
         MarkdownMathStyling.reserveSpace(styleCache.spans, revealed: revealedRange,
                                          font: MarkdownStyleRenderer.baseFont,
                                          in: storage)
+        // LAST, and after both collapse passes, for the reason every other
+        // reservation here runs late: `collapse` resets attributes over the
+        // ranges this writes to, so a height reserved before it would be
+        // wiped.
+        prepareTransclusions(in: storage)
+    }
+
+    /// Collapses, measures and reserves every transcluded embed, and records
+    /// the regions that will paint them.
+    ///
+    /// One entry point, called from the full render's collapse pass and from
+    /// `restyleBlock`'s, so the reservation and the drawing regions always
+    /// come out of the SAME layout — the invariant `transclusionRegions`
+    /// exists to hold. Whole-document rather than block-scoped even on the
+    /// caret path: a document holds very few embeds (usually zero), every one
+    /// of them is a cache hit after the first pass, and a block-scoped merge
+    /// would need the same care `applyEmbeds` documents for a much smaller
+    /// saving.
+    func prepareTransclusions(in storage: NSTextStorage) {
+        guard let tv = textView else { return }
+        transclusionRegions = TransclusionStyling.prepare(
+            styleCache.spans,
+            selection: tv.selectedRange(),
+            width: MarkdownBlockBackgrounds.columnWidth(in: tv),
+            theme: MarkdownTheme(tokens: tokens, settings: settings),
+            resolve: resolveEmbedTarget,
+            cache: transclusionCache,
+            in: storage)
+    }
+
+    /// Whether any span in the document is an embed at all — the cheap guard
+    /// the caret path uses before doing transclusion work, mirroring the
+    /// `holdsTable` test beside it.
+    var holdsEmbeds: Bool {
+        styleCache.spans.contains { if case .embed = $0.kind { return true }
+                                     return false }
     }
 
     /// Assembles every drawn decoration in one place, so the panels, the
@@ -79,6 +115,7 @@ extension MarkdownEditor.Coordinator {
                                           font: MarkdownStyleRenderer.baseFont,
                                           in: storage.string as NSString)
             + tableRegions
+            + transclusionRegions
     }
 
     /// The width a line of text actually has, which is what decides whether a

@@ -15,6 +15,40 @@ enum TransclusionLayout {
     /// Padding around the embed's drawn frame, inside the reserved height.
     static let framePadding: CGFloat = 12
 
+    /// One measured embed: the height reserved for it AND the exact attributed
+    /// string that height was measured from.
+    ///
+    /// The string travels WITH the height on purpose. Task 5's review flagged
+    /// the alternative — a draw pass that restyles the content independently —
+    /// as the defect recorded at `MarkdownEditor.swift:197`: a block measured
+    /// one way and reserved another is drawn wrong. Carrying one string means
+    /// there is only ever one styling path, so the two cannot diverge.
+    struct Box: Equatable {
+        let text: NSAttributedString
+        /// The measure the text was wrapped at — the INNER width, already
+        /// inset by `framePadding` on both sides, so the draw pass wraps at
+        /// exactly the width the measurement assumed.
+        let innerWidth: CGFloat
+        /// The full reserved height, text plus `framePadding` top and bottom.
+        let height: CGFloat
+    }
+
+    /// Lays `content` out at `width` and returns both halves of the answer.
+    ///
+    /// - Parameter measuredHeight: a height already in `TransclusionCache`.
+    ///   Supplied, this costs NO layout pass and records no measurement — the
+    ///   string is rebuilt (a copy, not a layout) and the cached height reused.
+    ///   `nil` measures, through `height(for:width:theme:)`, which keeps
+    ///   `TransclusionMeasureCounter.record()` at its single call site: one
+    ///   measured box is exactly one recorded measurement.
+    static func box(for content: TransclusionContent, width: CGFloat,
+                    theme: MarkdownTheme, measuredHeight: CGFloat? = nil) -> Box {
+        Box(text: attributedString(for: content, theme: theme),
+            innerWidth: max(1, width - framePadding * 2),
+            height: measuredHeight
+                ?? height(for: content, width: width, theme: theme))
+    }
+
     /// Height reserved for `content`, laid out once at `width`.
     ///
     /// `TransclusionMeasureCounter.record()` fires exactly once per call, at

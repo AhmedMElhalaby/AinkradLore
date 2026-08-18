@@ -61,9 +61,27 @@ final class MarkdownRevealBenchmark: XCTestCase {
     /// parity means an embed measurement is a whole second document's layout;
     /// doing that per keystroke is how this feature would quietly make the
     /// editor slow.
-    // M7-GATE: re-enable in Task 6, once TransclusionStyling drives measurement.
-    func test_typingInHostDoesNotRemeasureEmbeds() {
-        /*
+    ///
+    /// Drives the REAL reservation path — `TransclusionStyling.prepare`, via
+    /// the coordinator's render — because that is the only thing in the
+    /// codebase that measures. The version this replaces drove
+    /// `MarkdownDocumentModel.styleSpans`, which is pure logic and never
+    /// measures anything at all: it would have passed while asserting
+    /// nothing.
+    @MainActor
+    func test_typingInHostDoesNotRemeasureEmbeds() throws {
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("m7-gate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let a = vault.appendingPathComponent("target-a.md")
+        let b = vault.appendingPathComponent("target-b.md")
+        try String(repeating: "Transcluded prose that has to be laid out.\n\n", count: 40)
+            .write(to: a, atomically: true, encoding: .utf8)
+        try "# B\n\nAn anchored paragraph. ^anchor\n".write(to: b, atomically: true,
+                                                            encoding: .utf8)
+
         let host = """
         # Host
 
@@ -73,17 +91,41 @@ final class MarkdownRevealBenchmark: XCTestCase {
 
         ![[target-b#^anchor]]
         """
-        let model = MarkdownDocumentModel(body: host)
-        TransclusionMeasureCounter.reset()
-        _ = model.styleSpans                      // first pass may measure
-        let afterFirstPass = TransclusionMeasureCounter.count
-
-        for i in 0..<20 {
-            _ = MarkdownDocumentModel(body: host + String(repeating: "x", count: i)).styleSpans
+        var stored = host
+        let binding = Binding<String>(get: { stored }, set: { stored = $0 })
+        let coordinator = MarkdownEditor.Coordinator(text: binding, tokens: TestTokens.make())
+        coordinator.resolveEmbedTarget = { raw in
+            let name = LinkResolver.basename(of: raw)
+            if name == "target-a" { return a }
+            if name == "target-b" { return b }
+            return nil
         }
-        XCTAssertEqual(TransclusionMeasureCounter.count, afterFirstPass,
-                       "typing re-measured an embed")
-        */
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 400))
+        tv.isRichText = false
+        tv.delegate = coordinator
+        tv.string = host
+        coordinator.textView = tv
+
+        TransclusionMeasureCounter.reset()
+        coordinator.applyStyles()
+        coordinator.renderStyles()
+        let afterFirstPass = TransclusionMeasureCounter.count
+        XCTAssertGreaterThan(afterFirstPass, 0,
+                             "the first render must actually measure the two embeds — "
+                             + "a gate that never reaches the measurement path asserts nothing")
+
+        withExtendedLifetime(coordinator) {
+            // The caret lives in the PROSE paragraph, well away from either
+            // embed, which is the ordinary case this bound is about.
+            let caret = (host as NSString).range(of: "Some prose")
+            tv.setSelectedRange(NSRange(location: caret.location + 5, length: 0))
+            for _ in 0..<20 {
+                tv.insertText("x", replacementRange: tv.selectedRange())
+                coordinator.renderStyles()
+            }
+            XCTAssertEqual(TransclusionMeasureCounter.count, afterFirstPass,
+                           "typing re-measured an embed")
+        }
     }
 }
 

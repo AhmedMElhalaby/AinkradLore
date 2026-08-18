@@ -249,10 +249,15 @@ extension MarkdownEditor.Coordinator {
                 EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
 
             case .transclusion:
-                // Task 6 replaces this with the real transclusion render.
-                // For now a markdown target falls back to the same chip
-                // treatment a document embed gets.
-                EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
+                // Rendered by `TransclusionStyling`, not here. The collapse,
+                // the reserved height and the drawing region have to come out
+                // of ONE pass — and that pass is the collapse pass, because
+                // `MarkdownStyleRenderer.collapse` resets attributes over the
+                // very ranges a reservation writes to. `applyEmbeds` runs
+                // AFTER that pass, so reserving here would be reserving into
+                // a gap that has already been sized. See
+                // `MarkdownEditorDecoration.prepareTransclusions`.
+                continue
 
             case .image(let url):
                 guard let image = EmbedImageCache.shared.image(for: url) else {

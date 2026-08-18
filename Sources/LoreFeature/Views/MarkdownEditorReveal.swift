@@ -457,6 +457,19 @@ extension MarkdownEditor.Coordinator {
         MarkdownMathStyling.reserveSpace(blockSpans, revealed: revealed,
                                          font: MarkdownStyleRenderer.baseFont,
                                          in: storage)
+        // `restyle` above reset this block's paragraph styles, which pops a
+        // transcluded embed's reserved gap shut and leaves a stale region
+        // painting into a rect that no longer exists — the same failure fix
+        // round 1's Critical 2 found for an image embed. Re-reserving here
+        // restores it (or, if the caret just entered the embed, deliberately
+        // withholds it) inside the same pass. Guarded on the document holding
+        // an embed at all, so the ordinary caret move pays one span scan and
+        // nothing else; after the first pass every embed is a cache hit, so
+        // this costs no measurement.
+        if holdsEmbeds {
+            prepareTransclusions(in: storage)
+            refreshBlockBackgrounds(in: storage, window: nil)
+        }
     }
 
     // Container geometry and the off-actor parse pipeline (the debounce,
