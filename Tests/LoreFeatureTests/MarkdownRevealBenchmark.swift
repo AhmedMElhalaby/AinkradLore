@@ -56,6 +56,35 @@ final class MarkdownRevealBenchmark: XCTestCase {
             _ = MarkdownDocumentModel(body: body).extensionSpans
         }
     }
+
+    /// Typing in a host document must not re-measure ANY embed. Full-content
+    /// parity means an embed measurement is a whole second document's layout;
+    /// doing that per keystroke is how this feature would quietly make the
+    /// editor slow.
+    // M7-GATE: re-enable in Task 6, once TransclusionStyling drives measurement.
+    func test_typingInHostDoesNotRemeasureEmbeds() {
+        /*
+        let host = """
+        # Host
+
+        ![[target-a]]
+
+        Some prose the caret will live in.
+
+        ![[target-b#^anchor]]
+        """
+        let model = MarkdownDocumentModel(body: host)
+        TransclusionMeasureCounter.reset()
+        _ = model.styleSpans                      // first pass may measure
+        let afterFirstPass = TransclusionMeasureCounter.count
+
+        for i in 0..<20 {
+            _ = MarkdownDocumentModel(body: host + String(repeating: "x", count: i)).styleSpans
+        }
+        XCTAssertEqual(TransclusionMeasureCounter.count, afterFirstPass,
+                       "typing re-measured an embed")
+        */
+    }
 }
 
 /// The editor-level half: the bounds this task exists to pin, asserted on the
