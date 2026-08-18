@@ -62,8 +62,18 @@ public enum TransclusionResolver {
         let bodyStart = (String(model.fullText.prefix(bodyCharOffset)) as NSString).length
         let bodyRange = NSRange(location: bodyStart, length: text.length - bodyStart)
 
-        // 6. Fragment handling.
-        switch LinkResolver.fragment(of: rawTarget) {
+        // 6. Fragment handling. `fragment(of:)` returns `LinkFragment?` — the
+        // "no fragment" case is unwrapped explicitly with `guard let`, rather
+        // than switching on the optional itself with a `case nil:` arm. The
+        // two are semantically identical, but SourceKit's Swift 6 checker
+        // reports a spurious "value can never be nil" against the `case nil:`
+        // spelling; unwrapping first sidesteps that reading entirely, without
+        // hiding any real non-optional-ness (the type really is optional —
+        // `LinkResolver.fragment(of:)` at LinkResolver.swift:121).
+        guard let fragment = LinkResolver.fragment(of: rawTarget) else {
+            return capped(slice(text, bodyRange))
+        }
+        switch fragment {
         case .block(let id):
             guard let anchor = model.blockAnchors.first(where: { $0.id == id }) else {
                 let opening = slice(text, NSRange(location: bodyRange.location,
@@ -81,9 +91,6 @@ public enum TransclusionResolver {
             }
             let range = headingRange(in: text, outline: model.outline, entry: entry)
             return capped(slice(text, range))
-
-        case nil:
-            return capped(slice(text, bodyRange))
         }
     }
 
@@ -100,13 +107,10 @@ public enum TransclusionResolver {
     /// Walks backward from `offset` to the start of the enclosing block: the
     /// character right after the nearest blank line, or the start of text.
     private static func boundaryBefore(_ text: NSString, from offset: Int) -> Int {
-        var searchEnd = offset
-        while searchEnd > 0 {
-            let blank = lastBlankLineEnd(text, before: searchEnd)
-            guard let blank else { return 0 }
-            return blank
+        guard offset > 0, let blank = lastBlankLineEnd(text, before: offset) else {
+            return 0
         }
-        return 0
+        return blank
     }
 
     /// Finds the end (i.e. the position right after) of the blank line
@@ -149,14 +153,28 @@ public enum TransclusionResolver {
     /// `<=` its own, or to the end of text.
     private static func headingRange(in text: NSString, outline: [OutlineEntry], entry: OutlineEntry) -> NSRange {
         let start = entry.utf16Offset
-        let sorted = outline.sorted { $0.utf16Offset < $1.utf16Offset }
-        guard let index = sorted.firstIndex(where: { $0.utf16Offset == entry.utf16Offset && $0.text == entry.text }) else {
+        let sorted = outline.sorted { (lhs: OutlineEntry, rhs: OutlineEntry) -> Bool in
+            lhs.utf16Offset < rhs.utf16Offset
+        }
+        var index: Int?
+        for (candidateIndex, candidate) in sorted.enumerated() {
+            let sameOffset = candidate.utf16Offset == entry.utf16Offset
+            let sameText = candidate.text == entry.text
+            if sameOffset && sameText {
+                index = candidateIndex
+                break
+            }
+        }
+        guard let index else {
             return NSRange(location: start, length: text.length - start)
         }
         var end = text.length
-        for later in sorted[(index + 1)...] where later.level <= entry.level {
-            end = later.utf16Offset
-            break
+        let later = sorted[(index + 1)...]
+        for entryAfter in later {
+            if entryAfter.level <= entry.level {
+                end = entryAfter.utf16Offset
+                break
+            }
         }
         // Trim a single trailing newline so the slice doesn't carry the
         // start-of-next-block blank line into its own content.
