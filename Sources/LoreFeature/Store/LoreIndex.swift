@@ -124,7 +124,10 @@ public final class LoreIndex: @unchecked Sendable {
     /// index has neither, and every row in it predates the read-only engines —
     /// so its `type` column holds `unclaimed` for files that are now `pdf`,
     /// `richtext` or `attachment`. Discard and rebuild.
-    static let schemaVersion: Int32 = 7
+    /// 8: M6 added `blocks`, storing `^block-id` anchors so `[[Note#^id]]`
+    /// can resolve. A v7 index has no such rows for any note. Discard and
+    /// rebuild — the mechanism this constant exists for.
+    static let schemaVersion: Int32 = 8
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -184,6 +187,15 @@ public final class LoreIndex: @unchecked Sendable {
             """)
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS links_by_source ON links(source_path);
+            """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS blocks(
+                    source_path TEXT NOT NULL,
+                    block_id    TEXT NOT NULL,
+                    offset      INTEGER NOT NULL);
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS blocks_by_id ON blocks(source_path, block_id);
             """)
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
@@ -328,6 +340,14 @@ public final class LoreIndex: @unchecked Sendable {
                              link.targetPath.map(canonical), link.isEmbed ? 1 : 0,
                              link.syntax.rawValue])
         }
+        try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?",
+                       arguments: [path])
+        for anchor in entry.payload.blocks {
+            try db.execute(sql: """
+                INSERT INTO blocks(source_path, block_id, offset)
+                VALUES(?,?,?);
+            """, arguments: [path, anchor.id, anchor.offset])
+        }
     }
 
     /// Replaces the whole index with `entries`, in a SINGLE write transaction.
@@ -355,6 +375,7 @@ public final class LoreIndex: @unchecked Sendable {
                 try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
                 try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
                 try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
+                try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?", arguments: [path])
             }
         }
     }
@@ -367,6 +388,7 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
             try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
             try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
+            try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?", arguments: [path])
         }
     }
 
@@ -461,6 +483,18 @@ public final class LoreIndex: @unchecked Sendable {
                              isEmbed: (r["is_embed"] as Int) == 1,
                              syntax: Self.syntax(r["syntax"]))
             }
+        }
+    }
+
+    // MARK: - Blocks
+
+    /// Where a block anchor sits, or `nil` if that document has no such
+    /// anchor. Used to resolve `[[Note#^id]]`.
+    public func blockOffset(inDocumentAt path: String, id: String) throws -> Int? {
+        try dbQueue.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT offset FROM blocks WHERE source_path = ? AND block_id = ? LIMIT 1;
+            """, arguments: [path, id])
         }
     }
 }

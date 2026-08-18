@@ -89,6 +89,7 @@ public final class MarkdownEngine: DocumentEngine {
                             outline: model.outline,
                             links: model.links,
                             aliases: note.aliases,
+                            blocks: model.blockAnchors,
                             id: note.id)
     }
 

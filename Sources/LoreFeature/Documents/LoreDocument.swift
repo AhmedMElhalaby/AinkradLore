@@ -33,6 +33,16 @@ public struct OutlineEntry: Sendable, Equatable {
 /// The shell never re-reads a document's file to index it. That indirection is
 /// what lets a PDF or a `.lore` package contribute searchable text it does not
 /// literally contain as bytes.
+/// A `^block-id` anchor and where it sits.
+///
+/// `offset` is a UTF-16 offset into the document BODY, matching every other
+/// offset the index holds.
+public struct BlockAnchor: Sendable, Equatable {
+    public let id: String
+    public let offset: Int
+    public init(id: String, offset: Int) { self.id = id; self.offset = offset }
+}
+
 public struct IndexPayload: Sendable {
     /// Stable document identity, when the format has one of its own (markdown's
     /// `id:` frontmatter key). `nil` means "no intrinsic identity" and the
@@ -48,14 +58,18 @@ public struct IndexPayload: Sendable {
     public var links: [DocumentLink]
     /// Alternate names this document answers to, from frontmatter `aliases`.
     public var aliases: [String]
+    /// `^block-id` anchors this document defines. Populated by M6.
+    public var blocks: [BlockAnchor]
 
     public init(title: String, plaintext: String, tags: [String] = [],
                 properties: [FrontmatterPair] = [], outline: [OutlineEntry] = [],
-                links: [DocumentLink] = [], aliases: [String] = [], id: String? = nil) {
+                links: [DocumentLink] = [], aliases: [String] = [],
+                blocks: [BlockAnchor] = [], id: String? = nil) {
         self.id = id
         self.title = title; self.plaintext = plaintext; self.tags = tags
         self.properties = properties; self.outline = outline; self.links = links
         self.aliases = aliases
+        self.blocks = blocks
     }
 }
 

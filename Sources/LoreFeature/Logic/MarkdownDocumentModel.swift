@@ -218,6 +218,14 @@ public struct MarkdownDocumentModel: Sendable {
         }
     }
 
+    /// `^block-id` anchors, derived from `extensionSpans` — not a rescan.
+    public var blockAnchors: [BlockAnchor] {
+        extensionSpans.compactMap { span in
+            guard case let .blockID(id) = span.kind else { return nil }
+            return BlockAnchor(id: id, offset: span.range.lowerBound)
+        }
+    }
+
     /// Every link this document contributes to the graph, from THIS parse.
     ///
     /// The index-building half of `indexPayload` used to call

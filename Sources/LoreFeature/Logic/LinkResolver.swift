@@ -32,6 +32,13 @@ import Foundation
 /// Both are fixed the same way: sort markdown-first, then by path length,
 /// then lexicographically by the full path, so equal-length ties break on
 /// path content alone.
+/// What a `[[Note#…]]` fragment names: a heading, or a `^block-id` anchor.
+/// The discriminator is a single `^` immediately after the `#`.
+public enum LinkFragment: Sendable, Equatable {
+    case heading(String)
+    case block(String)
+}
+
 public struct LinkResolver: Sendable {
     private let byKey: [String: [URL]]
     /// All document URLs, sorted deterministically (markdown-first, then
@@ -107,6 +114,17 @@ public struct LinkResolver: Sendable {
         target = target.trimmingCharacters(in: .whitespaces)
         if target.lowercased().hasSuffix(".md") { target = String(target.dropLast(3)) }
         return target
+    }
+
+    /// The `#…` fragment a raw target carries, if any — distinguishing
+    /// `#^block-id` from `#Heading`. `nil` when there is no `#` at all.
+    public static func fragment(of rawTarget: String) -> LinkFragment? {
+        guard let hash = rawTarget.firstIndex(of: "#") else { return nil }
+        let raw = String(rawTarget[rawTarget.index(after: hash)...])
+        if raw.hasPrefix("^") {
+            return .block(String(raw.dropFirst()))
+        }
+        return .heading(raw)
     }
 
     public func resolve(_ rawTarget: String) -> URL? {
