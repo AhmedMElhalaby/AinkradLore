@@ -21,6 +21,9 @@ public struct StyleSpan: Equatable, Sendable {
         /// `#tag`, `#nested/tag`. `name` excludes the `#` and any trailing
         /// `/`. From `MarkdownExtensions` — CommonMark has no tag node.
         case tag(name: String)
+        /// `^block-id` at the end of a block. An anchor, not a control. From
+        /// `MarkdownExtensions` — CommonMark has no block-reference node.
+        case blockID(id: String)
         case inlineCode
         case codeBlock(language: String?)
         case link
@@ -85,6 +88,9 @@ public struct StyleSpan: Equatable, Sendable {
             // No closing delimiter at all — there is nothing to split across
             // a line break, and no pair to reveal together.
             case .tag:
+                return false
+            // Line-scoped, with no closing half — same shape as `.tag`.
+            case .blockID:
                 return false
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
                  .table, .tableHeader, .checkbox, .marker:

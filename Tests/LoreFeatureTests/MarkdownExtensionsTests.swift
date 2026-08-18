@@ -172,4 +172,40 @@ final class MarkdownExtensionsTests: XCTestCase {
         // one.
         XCTAssertEqual(scan("#🎈idea").first?.kind, .tag(name: "🎈idea"))
     }
+
+    func test_blockID_atEndOfLine() {
+        let spans = scan("A paragraph. ^abc123")
+        XCTAssertEqual(spans.first?.kind, .blockID(id: "abc123"))
+        XCTAssertEqual(spans.first?.range, 13..<20)
+    }
+
+    func test_blockID_midLineEmitsNothing() {
+        XCTAssertTrue(scan("A ^abc123 paragraph.").isEmpty)
+    }
+
+    func test_blockID_withoutPrecedingWhitespaceEmitsNothing() {
+        XCTAssertTrue(scan("caret^abc123").isEmpty)
+    }
+
+    func test_blockID_allowsHyphen() {
+        XCTAssertEqual(scan("text ^my-block").first?.kind, .blockID(id: "my-block"))
+    }
+
+    func test_blockID_underscoreIsNotObsidianCharset() {
+        // Obsidian allows letters, digits and hyphen only.
+        XCTAssertTrue(scan("text ^my_block").isEmpty)
+    }
+
+    func test_blockID_insideMathEmitsNothing() {
+        // `^` is superscript in math and is masked before this scanner runs.
+        XCTAssertTrue(scan("$x^2$").isEmpty)
+    }
+
+    func test_blockID_insideCodeEmitsNothing() {
+        XCTAssertTrue(scan("```\ntext ^abc\n```").isEmpty)
+    }
+
+    func test_blockID_bareCaretEmitsNothing() {
+        XCTAssertTrue(scan("text ^").isEmpty)
+    }
 }

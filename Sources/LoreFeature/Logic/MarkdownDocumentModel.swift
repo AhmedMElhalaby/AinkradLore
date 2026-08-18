@@ -270,12 +270,11 @@ public struct MarkdownDocumentModel: Sendable {
                 // indistinguishable from a link chip), so there is nothing
                 // for `MarkdownReveal` to collapse.
                 return [StyleSpan(range: span.range, kind: .tag(name: name))]
-            case .blockID:
-                // Replaced by its own arm in Task 6. Listed explicitly rather
-                // than behind a `default:` so that adding a sixth Kind later
-                // breaks THIS switch and forces the question, exactly as
-                // `isDelimitedByASinglePair` does.
-                return []
+            case .blockID(let id):
+                // The WHOLE range, `^` included, and NO marker span — same
+                // shape as `.tag`: a block ID is line-scoped with no closing
+                // half, so there is nothing for `MarkdownReveal` to collapse.
+                return [StyleSpan(range: span.range, kind: .blockID(id: id))]
             }
         }
     }

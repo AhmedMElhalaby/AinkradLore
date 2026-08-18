@@ -124,7 +124,47 @@ public enum MarkdownExtensions {
         scanHighlights(text, masked: index, found: &found, claimed: &claimed)
         scanFootnotes(text, masked: index, found: &found, claimed: &claimed)
         scanTags(text, masked: index, found: &found, claimed: &claimed, linkIndex: linkIndex)
+        scanBlockIDs(text, masked: index, found: &found, claimed: &claimed)
         return found.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    /// `^block-id`, anchored to the END of a line and preceded by whitespace.
+    ///
+    /// Runs LAST, after math is masked: `^` is superscript inside `$…$`, and a
+    /// block ID scanned first would claim it before the math scan could.
+    private static func scanBlockIDs(_ text: NSString, masked: CodeRegionIndex,
+                                     found: inout [Span], claimed: inout ClaimedBitmap) {
+        var i = 0
+        while i < text.length {
+            guard text.character(at: i) == 0x5E,          // ^
+                  !isClaimed(i, masked: masked, claimed: claimed) else { i += 1; continue }
+            // Must be preceded by whitespace: `caret^abc` is one word.
+            guard i > 0 else { i += 1; continue }
+            let before = text.character(at: i - 1)
+            guard before == 0x20 || before == 0x09 else { i += 1; continue }
+            var j = i + 1
+            while j < text.length {
+                let u = text.character(at: j)
+                let ok = (u >= 0x30 && u <= 0x39) || (u >= 0x41 && u <= 0x5A)
+                    || (u >= 0x61 && u <= 0x7A) || u == 0x2D
+                guard ok else { break }
+                j += 1
+            }
+            // The id is sliced from the SOURCE over the matched UTF-16 range
+            // in one operation, not built scalar-by-scalar — same reasoning
+            // as `scanTags`' `name`, even though this charset (letters,
+            // digits, hyphen) cannot itself contain a surrogate pair: the
+            // guard above is what must be trusted, not the accumulator.
+            let id = text.substring(with: NSRange(location: i + 1, length: j - (i + 1)))
+            // Must run to the end of the line — a block ID is a trailing
+            // anchor, not something in the middle of a sentence.
+            let atLineEnd = j >= text.length || text.character(at: j) == 0x0A
+                || text.character(at: j) == 0x0D
+            guard !id.isEmpty, atLineEnd else { i = max(j, i + 1); continue }
+            found.append(Span(range: i..<j, content: (i + 1)..<j, kind: .blockID(id: id)))
+            claimed.mark(i..<j)
+            i = j
+        }
     }
 
     /// `#tag`, `#nested/tag`.

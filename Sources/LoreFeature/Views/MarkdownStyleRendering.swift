@@ -235,6 +235,13 @@ enum MarkdownStyleRenderer {
                                      range: r)
             }
 
+        case .blockID:
+            // Near-invisible when the caret is elsewhere. It is machinery the
+            // author needs to be able to find, not something to read past.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.25),
+                                 range: r)
+
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),
