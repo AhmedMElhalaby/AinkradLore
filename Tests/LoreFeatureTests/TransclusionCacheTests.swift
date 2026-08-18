@@ -48,4 +48,50 @@ final class TransclusionCacheTests: XCTestCase {
         _ = cache.content(for: key("b.md"), make: make)
         XCTAssertEqual(made, 2, "an unrelated watcher event dropped a good entry")
     }
+
+    func test_exceedingCapacityEvictsOldestAndReparsesOnNextAccess() {
+        let cache = TransclusionCache(capacity: 2)
+        var made = 0
+        let make: () -> TransclusionContent = { made += 1; return .content("x") }
+        _ = cache.content(for: key("a.md"), make: make)
+        _ = cache.content(for: key("b.md"), make: make)
+        _ = cache.content(for: key("c.md"), make: make) // pushes capacity to 3, should evict a.md
+        XCTAssertEqual(made, 3)
+        _ = cache.content(for: key("a.md"), make: make)
+        XCTAssertEqual(made, 4, "an entry evicted under capacity pressure should be a miss on next access")
+    }
+
+    func test_evictionTakesLeastRecentlyUsedNotOldestInserted() {
+        let cache = TransclusionCache(capacity: 2)
+        var made = 0
+        let make: () -> TransclusionContent = { made += 1; return .content("x") }
+        _ = cache.content(for: key("a.md"), make: make) // insert A
+        _ = cache.content(for: key("b.md"), make: make) // insert B
+        _ = cache.content(for: key("a.md"), make: make) // read A again -> A is now most-recent, B is least-recent
+        XCTAssertEqual(made, 2, "re-reading A should have been a hit, not a re-parse")
+        _ = cache.content(for: key("c.md"), make: make) // insert C, should evict B (least-recently-used), not A
+        XCTAssertEqual(made, 3)
+
+        _ = cache.content(for: key("a.md"), make: make)
+        XCTAssertEqual(made, 3, "A was touched most recently and must still be cached, not evicted")
+
+        _ = cache.content(for: key("b.md"), make: make)
+        XCTAssertEqual(made, 4, "B was least-recently-used and should have been evicted")
+    }
+
+    func test_cacheHitDoesNotItselfTriggerEviction() {
+        let cache = TransclusionCache(capacity: 2)
+        var made = 0
+        let make: () -> TransclusionContent = { made += 1; return .content("x") }
+        _ = cache.content(for: key("a.md"), make: make)
+        _ = cache.content(for: key("b.md"), make: make)
+        XCTAssertEqual(made, 2)
+
+        // Repeated hits on both entries, at capacity, must never evict either one.
+        for _ in 0..<5 {
+            _ = cache.content(for: key("a.md"), make: make)
+            _ = cache.content(for: key("b.md"), make: make)
+        }
+        XCTAssertEqual(made, 2, "cache hits at capacity must not evict live entries")
+    }
 }
