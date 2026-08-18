@@ -33,22 +33,67 @@ public enum TransclusionMeasureCounter {
     }
 }
 
+/// One measured embed height, TOGETHER WITH the geometry it was measured at.
+///
+/// The geometry travels with the number because a height is only true for the
+/// width and type metrics it was laid out against: `TransclusionLayout` wraps
+/// at `width - 2 * framePadding` and sizes from the theme's `bodySize` and
+/// `lineHeightMultiple`. `TransclusionKey` carries none of those — it is
+/// (path, mtime, fragment) — so a cache keyed on it alone would hand back a
+/// height measured at the old window width after a resize, and the content
+/// would re-wrap inside a gap sized for a different measure. That is the exact
+/// defect this milestone exists to prevent, and an ordinary window resize
+/// reaches it.
+///
+/// So the reader COMPARES: a measurement whose geometry does not match the one
+/// being asked about is a MISS, and the caller re-measures. Correctness is
+/// therefore self-correcting, the way `MarkdownTableStyling.prepare` is by
+/// re-measuring at `maxWidth` every render — it does not depend on every
+/// future site that can change the width remembering to call
+/// `invalidateMeasurements()`. That call remains, and Task 7 still wires it,
+/// but it is now an optimisation (drop work known to be stale early) rather
+/// than the mechanism that makes the cache correct.
+public struct TransclusionMeasurement: Equatable, Sendable {
+    public let height: CGFloat
+    /// The OUTER width passed to `TransclusionLayout`, before frame padding.
+    public let width: CGFloat
+    public let bodySize: CGFloat
+    public let lineHeightMultiple: CGFloat
+
+    public init(height: CGFloat, width: CGFloat,
+                bodySize: CGFloat, lineHeightMultiple: CGFloat) {
+        self.height = height
+        self.width = width
+        self.bodySize = bodySize
+        self.lineHeightMultiple = lineHeightMultiple
+    }
+
+    /// Whether this measurement describes `other`'s geometry — i.e. whether
+    /// its height may be reused for it.
+    public func matchesGeometry(of other: TransclusionMeasurement) -> Bool {
+        width == other.width && bodySize == other.bodySize
+            && lineHeightMultiple == other.lineHeightMultiple
+    }
+}
+
 /// An LRU cache of resolved embed content, keyed by `TransclusionKey`.
 ///
 /// Two independent things are cached per entry: the parsed `TransclusionContent`
-/// (expensive: a full re-parse of the target note) and an optional measured
-/// height (expensive in a different way: a full second layout pass, added by
-/// Task 5). They're stored together in one `Entry` rather than two parallel
-/// caches, because they always share a key and a lifetime — a `mtime` bump
-/// invalidates both, a path invalidation drops both. Only the *measurement*
-/// half needs its own narrower invalidation (`invalidateMeasurements()`),
-/// which the measure-width and theme-change triggers use because they never
-/// change what a target's content is, only how tall it renders.
+/// (expensive: a full re-parse of the target note) and an optional
+/// `TransclusionMeasurement` (expensive in a different way: a full second
+/// layout pass). They're stored together in one `Entry` rather than two
+/// parallel caches, because they always share a key and a lifetime — a `mtime`
+/// bump invalidates both, a path invalidation drops both. Only the
+/// *measurement* half needs its own narrower invalidation
+/// (`invalidateMeasurements()`), which the measure-width and theme-change
+/// triggers use because they never change what a target's content is, only how
+/// tall it renders — and, since `TransclusionMeasurement` carries its own
+/// geometry, a missed invalidation costs a re-measure rather than a wrong gap.
 @MainActor
 public final class TransclusionCache {
     private struct Entry {
         var content: TransclusionContent
-        var measuredHeight: CGFloat?
+        var measurement: TransclusionMeasurement?
     }
 
     private let capacity: Int
@@ -68,28 +113,33 @@ public final class TransclusionCache {
             return entry.content
         }
         let content = make()
-        storage[key] = Entry(content: content, measuredHeight: nil)
+        storage[key] = Entry(content: content, measurement: nil)
         touch(key)
         evictIfNeeded()
         return content
     }
 
-    /// The height already measured for `key`, or `nil` when this entry has
-    /// never been measured (or its measurement was dropped by
-    /// `invalidateMeasurements()`). A miss is what makes the reservation pass
-    /// measure; a hit is what makes typing free.
-    public func measuredHeight(for key: TransclusionKey) -> CGFloat? {
-        guard let entry = storage[key] else { return nil }
-        return entry.measuredHeight
+    /// The height already measured for `key` AT `geometry`'s width and type
+    /// metrics, or `nil` when there is none.
+    ///
+    /// A stored measurement taken at a DIFFERENT geometry is a miss, not a
+    /// hit: reusing it would reserve a gap sized for a window the reader is no
+    /// longer looking at. See `TransclusionMeasurement`.
+    public func measuredHeight(for key: TransclusionKey,
+                               matching geometry: TransclusionMeasurement) -> CGFloat? {
+        guard let stored = storage[key]?.measurement,
+              stored.matchesGeometry(of: geometry) else { return nil }
+        return stored.height
     }
 
-    /// Records a measured height against an EXISTING entry. Silently does
-    /// nothing when there is no entry — a height with no content to belong to
-    /// would be unreachable anyway, and inventing an entry for it would need a
+    /// Records a measurement against an EXISTING entry. Silently does nothing
+    /// when there is no entry — a height with no content to belong to would be
+    /// unreachable anyway, and inventing an entry for it would need a
     /// `TransclusionContent` this call does not have.
-    public func setMeasuredHeight(_ height: CGFloat, for key: TransclusionKey) {
+    public func setMeasurement(_ measurement: TransclusionMeasurement,
+                               for key: TransclusionKey) {
         guard storage[key] != nil else { return }
-        storage[key]?.measuredHeight = height
+        storage[key]?.measurement = measurement
         touch(key)
     }
 
@@ -108,9 +158,14 @@ public final class TransclusionCache {
     /// measure-width and theme-change triggers, which change how tall an
     /// embed renders but never what its content is — so re-parsing on those
     /// triggers would be pure waste.
+    ///
+    /// An OPTIMISATION, not the correctness mechanism: a measurement carries
+    /// the geometry it was taken at, so one that survives a width change is
+    /// already ignored by `measuredHeight(for:matching:)`. This call just
+    /// stops the stale bytes being carried around.
     public func invalidateMeasurements() {
         for key in storage.keys {
-            storage[key]?.measuredHeight = nil
+            storage[key]?.measurement = nil
         }
     }
 

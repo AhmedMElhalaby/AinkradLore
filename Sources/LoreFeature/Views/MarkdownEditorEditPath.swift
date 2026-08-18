@@ -441,6 +441,9 @@ extension MarkdownEditor.Coordinator {
                                                         maxWidth: textColumnWidth(of: tv),
                                                         in: storage)
         }
+        // Drains whatever the restyled blocks above asked for — one
+        // whole-document reservation per EDIT, not per block.
+        prepareTransclusionsIfNeeded(in: storage)
         refreshBlockBackgrounds(in: storage, window: nil)
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)

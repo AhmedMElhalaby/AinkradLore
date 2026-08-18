@@ -213,6 +213,17 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// typing free of embed measurement; see
         /// `MarkdownRevealBenchmark.test_typingInHostDoesNotRemeasureEmbeds`.
         let transclusionCache = TransclusionCache()
+        /// Set by `restyleBlock` when a block it just re-attributed holds a
+        /// transcluded embed, and drained ONCE per pass by
+        /// `prepareTransclusionsIfNeeded`. A flag rather than the work itself
+        /// because `renderStylesForEdit` restyles several blocks per keystroke
+        /// and the reservation is whole-document — fix round 1, Important 3.
+        var needsTransclusionPass = false
+        /// How many times the drawn decoration has been rebuilt. Counts the
+        /// CALLS, exactly as `applyStylesCalls` does, so "one rebuild per
+        /// edit" can be asserted directly rather than inferred from a timing —
+        /// the claim fix round 1's Important 3 was made against.
+        var blockBackgroundRefreshes = 0
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip

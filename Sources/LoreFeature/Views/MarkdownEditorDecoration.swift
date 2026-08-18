@@ -81,6 +81,7 @@ extension MarkdownEditor.Coordinator {
     /// would need the same care `applyEmbeds` documents for a much smaller
     /// saving.
     func prepareTransclusions(in storage: NSTextStorage) {
+        needsTransclusionPass = false
         guard let tv = textView else { return }
         transclusionRegions = TransclusionStyling.prepare(
             styleCache.spans,
@@ -92,18 +93,28 @@ extension MarkdownEditor.Coordinator {
             in: storage)
     }
 
-    /// Whether any span in the document is an embed at all — the cheap guard
-    /// the caret path uses before doing transclusion work, mirroring the
-    /// `holdsTable` test beside it.
-    var holdsEmbeds: Bool {
-        styleCache.spans.contains { if case .embed = $0.kind { return true }
-                                     return false }
+    /// Runs the transclusion pass ONCE if any block restyled since the last
+    /// drain asked for it, then rebuilds the decoration inside `window`.
+    ///
+    /// The drain point exists because `restyleBlock` is called once per
+    /// changed block while the reservation is whole-document: doing the work
+    /// per block made a keystroke cost N whole-document walks and N+1
+    /// background rebuilds (fix round 1, Important 3). The caller that owns
+    /// the pass drains it once, with its own viewport window.
+    /// - Returns: whether it did anything, so the caller can skip a
+    ///   decoration rebuild it does not need.
+    @discardableResult
+    func prepareTransclusionsIfNeeded(in storage: NSTextStorage) -> Bool {
+        guard needsTransclusionPass else { return false }
+        prepareTransclusions(in: storage)
+        return true
     }
 
     /// Assembles every drawn decoration in one place, so the panels, the
     /// substituted markers, the maths and the tables can never be built from
     /// different passes over different spans.
     func refreshBlockBackgrounds(in storage: NSTextStorage, window: NSRange?) {
+        blockBackgroundRefreshes += 1
         guard let linkView = textView as? LinkTextView else { return }
         linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
         linkView.blockBackgrounds =

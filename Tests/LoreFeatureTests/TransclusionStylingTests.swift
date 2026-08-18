@@ -135,4 +135,99 @@ final class TransclusionStylingTests: XCTestCase {
                                         cache: cache, in: second)
         XCTAssertEqual(TransclusionMeasureCounter.count, afterFirst)
     }
+
+    // MARK: - Fix round 1, Critical 1: the cache is geometry-aware
+
+    /// A height measured at one width must NOT be reused at another. The key
+    /// carries no width, so without the geometry check a window resize would
+    /// re-wrap the note inside a gap sized for the old measure.
+    func test_reservedHeightChangesWhenTheWidthChanges() {
+        let text = "![[target]]\n"
+        let cache = TransclusionCache()
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let resolve: (String) -> URL? = { _ in self.target }
+        let selection = NSRange(location: 99, length: 0)
+
+        let wide = storage(text)
+        let wideRegions = TransclusionStyling.prepare(
+            spans(text), selection: selection, width: 700, theme: theme,
+            resolve: resolve, cache: cache, in: wide)
+        let narrow = storage(text)
+        let narrowRegions = TransclusionStyling.prepare(
+            spans(text), selection: selection, width: 220, theme: theme,
+            resolve: resolve, cache: cache, in: narrow)
+
+        guard case .transclusion(let wideBox) = wideRegions.first?.kind,
+              case .transclusion(let narrowBox) = narrowRegions.first?.kind else {
+            return XCTFail("expected a transclusion region at both widths")
+        }
+        XCTAssertGreaterThan(narrowBox.height, wideBox.height,
+                             "a narrower measure wraps to more lines, so the reserved "
+                             + "gap must grow — a width-blind cache would reuse the old height")
+        let style = narrow.attribute(.paragraphStyle,
+                                     at: (text as NSString).range(of: "![[target]]").location,
+                                     effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.minimumLineHeight ?? 0, narrowBox.height, accuracy: 0.5)
+    }
+
+    /// The same, for the other half of the geometry: type scale.
+    func test_reservedHeightChangesWhenTheBodySizeChanges() {
+        let text = "![[target]]\n"
+        let cache = TransclusionCache()
+        let resolve: (String) -> URL? = { _ in self.target }
+        let selection = NSRange(location: 99, length: 0)
+
+        // `bodySize` is derived from density and zoom, so the zoom step is
+        // how a test moves it — the same lever the reader's Cmd-+ moves.
+        var big = EditorSettings.default
+        big.zoomStep = 5
+        XCTAssertGreaterThan(big.bodySize, EditorSettings.default.bodySize)
+
+        let small = storage(text)
+        let smallRegions = TransclusionStyling.prepare(
+            spans(text), selection: selection, width: 600,
+            theme: MarkdownTheme(tokens: TestTokens.make()),
+            resolve: resolve, cache: cache, in: small)
+        let large = storage(text)
+        let largeRegions = TransclusionStyling.prepare(
+            spans(text), selection: selection, width: 600,
+            theme: MarkdownTheme(tokens: TestTokens.make(), settings: big),
+            resolve: resolve, cache: cache, in: large)
+
+        guard case .transclusion(let smallBox) = smallRegions.first?.kind,
+              case .transclusion(let largeBox) = largeRegions.first?.kind else {
+            return XCTFail("expected a transclusion region at both sizes")
+        }
+        XCTAssertGreaterThan(largeBox.height, smallBox.height,
+                             "doubling the body size must re-measure, not reuse")
+    }
+
+    // MARK: - Fix round 1, Important 2: inline embeds are not drawn
+
+    /// An embed sharing its line with prose has nowhere safe to reserve: the
+    /// line height is a PARAGRAPH property and the panel is full-column, so it
+    /// would stretch and then paint over the text beside it.
+    func test_midParagraphEmbedIsNotReservedOrDrawn() {
+        let text = "Before ![[target]] after.\n"
+        let store = storage(text)
+        let regions = prepare(text, in: store)
+
+        XCTAssertTrue(regions.isEmpty, "an inline embed produces no drawing region")
+        let source = (text as NSString).range(of: "![[target]]")
+        let font = store.attribute(.font, at: source.location, effectiveRange: nil) as? NSFont
+        XCTAssertGreaterThan(font?.pointSize ?? 12, 1,
+                             "an inline embed's source must not be collapsed")
+        let style = store.attribute(.paragraphStyle, at: source.location,
+                                    effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.minimumLineHeight ?? 0, 0, accuracy: 0.01,
+                       "an inline embed must not stretch the line it shares with prose")
+    }
+
+    /// Two embeds in one paragraph would fight over that paragraph's line
+    /// height and draw into the same rect, so neither is drawn.
+    func test_twoEmbedsInOneParagraphAreBothLeftAsSource() {
+        let text = "![[target]] ![[target]]\n"
+        let store = storage(text)
+        XCTAssertTrue(prepare(text, in: store).isEmpty)
+    }
 }

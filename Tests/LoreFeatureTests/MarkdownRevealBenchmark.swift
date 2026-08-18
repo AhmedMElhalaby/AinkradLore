@@ -8,6 +8,14 @@ import SwiftUI
 /// (four parses, 1.6s on the main actor) survived an earlier benchmark.
 final class MarkdownRevealBenchmark: XCTestCase {
 
+    /// Temp vaults made by `makeTransclusionEditor`, removed in `tearDown`.
+    private var transclusionVaults: [URL] = []
+
+    override func tearDownWithError() throws {
+        for vault in transclusionVaults { try? FileManager.default.removeItem(at: vault) }
+        transclusionVaults = []
+    }
+
     static func largeBody() -> String {
         (0..<3_000).map { "## Heading \($0)\n\nSome **bold** and `code` and [[Link \($0)]].\n" }
             .joined()
@@ -57,23 +65,17 @@ final class MarkdownRevealBenchmark: XCTestCase {
         }
     }
 
-    /// Typing in a host document must not re-measure ANY embed. Full-content
-    /// parity means an embed measurement is a whole second document's layout;
-    /// doing that per keystroke is how this feature would quietly make the
-    /// editor slow.
-    ///
-    /// Drives the REAL reservation path — `TransclusionStyling.prepare`, via
-    /// the coordinator's render — because that is the only thing in the
-    /// codebase that measures. The version this replaces drove
-    /// `MarkdownDocumentModel.styleSpans`, which is pure logic and never
-    /// measures anything at all: it would have passed while asserting
-    /// nothing.
+    /// A real coordinator over a real text view, with two `![[…]]` embeds
+    /// resolving to real files on disk. The only way to reach the measurement
+    /// path at all — `MarkdownDocumentModel.styleSpans` is pure logic and
+    /// never measures anything.
     @MainActor
-    func test_typingInHostDoesNotRemeasureEmbeds() throws {
+    private func makeTransclusionEditor(resolving: Bool = true) throws
+        -> (MarkdownEditor.Coordinator, NSTextView, URL) {
         let vault = FileManager.default.temporaryDirectory
             .appendingPathComponent("m7-gate-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: vault) }
+        transclusionVaults.append(vault)
 
         let a = vault.appendingPathComponent("target-a.md")
         let b = vault.appendingPathComponent("target-b.md")
@@ -95,6 +97,7 @@ final class MarkdownRevealBenchmark: XCTestCase {
         let binding = Binding<String>(get: { stored }, set: { stored = $0 })
         let coordinator = MarkdownEditor.Coordinator(text: binding, tokens: TestTokens.make())
         coordinator.resolveEmbedTarget = { raw in
+            guard resolving else { return nil }
             let name = LinkResolver.basename(of: raw)
             if name == "target-a" { return a }
             if name == "target-b" { return b }
@@ -105,6 +108,89 @@ final class MarkdownRevealBenchmark: XCTestCase {
         tv.delegate = coordinator
         tv.string = host
         coordinator.textView = tv
+        return (coordinator, tv, vault)
+    }
+
+    /// A transclusion must not ADD decoration rebuilds to a keystroke.
+    ///
+    /// Fix round 1, Important 3: `restyleBlock` used to run the whole-document
+    /// transclusion reservation AND a whole-document `refreshBlockBackgrounds`
+    /// itself, while `renderStylesForEdit` calls it once per changed block and
+    /// then refreshes again — N+1 rebuilds per keystroke in any document
+    /// holding an embed. Stated as a COMPARISON against the same document with
+    /// the embeds unresolved, because the absolute number of rebuilds per
+    /// keystroke is the editor's existing behaviour and not this task's claim;
+    /// what this task must not do is make it worse.
+    ///
+    /// Drives the real edit path (`insertText` → `textDidChange`), which the
+    /// measurement gate below deliberately does not.
+    @MainActor
+    func test_transclusionAddsNoDecorationRebuildsToAKeystroke() throws {
+        func rebuilds(resolving: Bool) throws -> Int {
+            let (coordinator, tv, _) = try makeTransclusionEditor(resolving: resolving)
+            return withExtendedLifetime(coordinator) { () -> Int in
+                coordinator.applyStyles()
+                coordinator.renderStyles()
+                let caret = (tv.string as NSString).range(of: "Some prose")
+                tv.setSelectedRange(NSRange(location: caret.location + 5, length: 0))
+                TransclusionMeasureCounter.reset()
+                coordinator.blockBackgroundRefreshes = 0
+                for _ in 0..<10 {
+                    tv.insertText("x", replacementRange: tv.selectedRange())
+                }
+                return coordinator.blockBackgroundRefreshes
+            }
+        }
+
+        XCTAssertEqual(try rebuilds(resolving: true), try rebuilds(resolving: false),
+                       "a resolved transclusion must not cost extra decoration rebuilds")
+        XCTAssertEqual(TransclusionMeasureCounter.count, 0,
+                       "the real edit path re-measured an embed")
+    }
+
+    /// The per-block half of the same claim, asserted where the regression
+    /// lived: restyling a block that DOES hold a transclusion records the need
+    /// for a pass and rebuilds nothing itself, and the pass drains once.
+    @MainActor
+    func test_restylingABlockDefersTheTransclusionPass() throws {
+        let (coordinator, tv, _) = try makeTransclusionEditor()
+        coordinator.applyStyles()
+        coordinator.renderStyles()
+        try withExtendedLifetime(coordinator) {
+            let storage = try XCTUnwrap(tv.textStorage)
+            let embedBlock = try XCTUnwrap(coordinator.embedIndex.first?.block)
+
+            coordinator.blockBackgroundRefreshes = 0
+            coordinator.needsTransclusionPass = false
+            coordinator.restyleBlock(embedBlock, revealed: nil, in: storage)
+            XCTAssertEqual(coordinator.blockBackgroundRefreshes, 0,
+                           "restyling one block must not rebuild the whole decoration")
+            XCTAssertTrue(coordinator.needsTransclusionPass,
+                          "it must still RECORD that a transclusion pass is owed")
+
+            XCTAssertTrue(coordinator.prepareTransclusionsIfNeeded(in: storage))
+            XCTAssertFalse(coordinator.prepareTransclusionsIfNeeded(in: storage),
+                           "a drained pass must not run twice")
+            XCTAssertEqual(coordinator.blockBackgroundRefreshes, 0,
+                           "the drain reserves; the caller decides when to rebuild")
+        }
+    }
+
+    /// Typing in a host document must not re-measure ANY embed. Full-content
+    /// parity means an embed measurement is a whole second document's layout;
+    /// doing that per keystroke is how this feature would quietly make the
+    /// editor slow.
+    ///
+    /// Drives the REAL reservation path — `TransclusionStyling.prepare`, via
+    /// the coordinator's render — because that is the only thing in the
+    /// codebase that measures. The version this replaces drove
+    /// `MarkdownDocumentModel.styleSpans`, which is pure logic and never
+    /// measures anything at all: it would have passed while asserting
+    /// nothing.
+    @MainActor
+    func test_typingInHostDoesNotRemeasureEmbeds() throws {
+        let (coordinator, tv, _) = try makeTransclusionEditor()
+        let host = tv.string
 
         TransclusionMeasureCounter.reset()
         coordinator.applyStyles()

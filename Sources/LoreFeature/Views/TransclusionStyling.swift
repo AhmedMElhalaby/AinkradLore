@@ -64,6 +64,20 @@ enum TransclusionStyling {
             guard case .transclusion(let url) = EmbedRendering.kind(for: resolve(target))
             else { continue }
             if MarkdownEditor.Coordinator.isEmbedRevealed(full, selection: selection) { continue }
+            // ALONE on its paragraph, or not transcluded at all — the same
+            // guard, and the same reasoning, an image embed uses (see
+            // `EmbedRendering.isAloneOnItsParagraph`). The reservation this
+            // function writes is a PARAGRAPH line height and the region it
+            // returns is a full-column panel: an embed sharing its line with
+            // prose would have that prose stretched to the note's height and
+            // then painted over, and two embeds in one paragraph would fight
+            // over the same line height and draw into the same rect. A
+            // mid-sentence transclusion therefore degrades to the chip/link
+            // treatment instead, applied by `applyEmbeds` — which asks this
+            // same question, so the two can never disagree.
+            guard EmbedRendering.isAloneOnItsParagraph(fullRange: full, in: text) else {
+                continue
+            }
 
             let box = self.box(for: url, rawTarget: target, width: width,
                                theme: theme, cache: cache, font: font)
@@ -119,12 +133,23 @@ enum TransclusionStyling {
                 height: placeholderHeight(font: font))
         }
 
-        if let cached = cache.measuredHeight(for: key) {
+        // The geometry this measurement would be true FOR. A stored height
+        // taken at any other width or type scale is a miss — see
+        // `TransclusionMeasurement`. This is what makes a window resize or a
+        // font-size change self-correct on the very next render, without
+        // depending on anything remembering to invalidate.
+        let geometry = TransclusionMeasurement(height: 0, width: width,
+                                               bodySize: theme.bodySize,
+                                               lineHeightMultiple: theme.lineHeightMultiple)
+        if let cached = cache.measuredHeight(for: key, matching: geometry) {
             return TransclusionLayout.box(for: content, width: width, theme: theme,
                                           measuredHeight: cached)
         }
         let box = TransclusionLayout.box(for: content, width: width, theme: theme)
-        cache.setMeasuredHeight(box.height, for: key)
+        cache.setMeasurement(TransclusionMeasurement(height: box.height, width: width,
+                                                     bodySize: theme.bodySize,
+                                                     lineHeightMultiple: theme.lineHeightMultiple),
+                             for: key)
         return box
     }
 

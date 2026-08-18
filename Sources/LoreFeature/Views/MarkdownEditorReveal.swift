@@ -371,6 +371,13 @@ extension MarkdownEditor.Coordinator {
         // `revealedEmbedSpans` in step so the next caret move compares against
         // the truth.
         revealEmbedsForSelectionChange(in: storage)
+        // ONE pass for the whole caret move, however many blocks flipped — see
+        // `restyleBlock`. Clipped to the same viewport window the last full
+        // render used, so a large document's decoration is not rebuilt
+        // wholesale on an arrow key.
+        if prepareTransclusionsIfNeeded(in: storage) {
+            refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
+        }
         // The DRAWN decoration is a function of reveal state too — a list
         // marker's substitute is drawn only while the real one is collapsed —
         // and it lives in the gutter, outside the glyph rects an attribute
@@ -460,16 +467,32 @@ extension MarkdownEditor.Coordinator {
         // `restyle` above reset this block's paragraph styles, which pops a
         // transcluded embed's reserved gap shut and leaves a stale region
         // painting into a rect that no longer exists — the same failure fix
-        // round 1's Critical 2 found for an image embed. Re-reserving here
-        // restores it (or, if the caret just entered the embed, deliberately
-        // withholds it) inside the same pass. Guarded on the document holding
-        // an embed at all, so the ordinary caret move pays one span scan and
-        // nothing else; after the first pass every embed is a cache hit, so
-        // this costs no measurement.
-        if holdsEmbeds {
-            prepareTransclusions(in: storage)
-            refreshBlockBackgrounds(in: storage, window: nil)
+        // round 1's Critical 2 found for an image embed.
+        //
+        // RECORDED, not done here. `renderStylesForEdit` calls this method
+        // once per changed block and then refreshes the decoration itself, so
+        // doing the (whole-document) reservation and a second whole-document
+        // background rebuild inside this method put N+1 of each on every
+        // keystroke of the fast edit path — fix round 1, Important 3. The flag
+        // is drained exactly once per pass by
+        // `prepareTransclusionsIfNeeded`, at the caller's own refresh, with
+        // the caller's own viewport window.
+        if blockSpans.contains(where: { isTransclusion($0) }) {
+            needsTransclusionPass = true
         }
+    }
+
+    /// Whether one span is an embed whose target renders as a transclusion.
+    ///
+    /// Narrower than "is an embed": an image or a document chip needs none of
+    /// this work, and `holdsEmbeds` matching them was what made the fast edit
+    /// path pay for documents with no transclusion in them at all.
+    func isTransclusion(_ span: StyleSpan) -> Bool {
+        guard case .embed(let target, _) = span.kind else { return false }
+        if case .transclusion = EmbedRendering.kind(for: resolveEmbedTarget(target)) {
+            return true
+        }
+        return false
     }
 
     // Container geometry and the off-actor parse pipeline (the debounce,

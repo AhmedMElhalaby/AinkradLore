@@ -77,6 +77,30 @@ public enum EmbedRendering {
         storage.addAttribute(.underlineStyle,
                              value: NSUnderlineStyle.single.rawValue, range: range)
     }
+
+    /// True when `fullRange`, trimmed of the whitespace `MarkdownReveal.
+    /// blocks`/`paragraphRange` would also trim, IS the paragraph — i.e. the
+    /// embed is the only thing on its line. Compares TRIMMED bounds rather
+    /// than exact equality so leading indentation (an embed inside a list
+    /// item) still counts as "alone".
+    static func isAloneOnItsParagraph(fullRange: NSRange, in text: NSString) -> Bool {
+        let paragraph = text.paragraphRange(for: fullRange)
+        var start = paragraph.location
+        let paragraphEnd = paragraph.location + paragraph.length
+        while start < NSMaxRange(fullRange), isTrimmable(text.character(at: start)) {
+            start += 1
+        }
+        var end = paragraphEnd
+        while end > NSMaxRange(fullRange), end > start,
+              isTrimmable(text.character(at: end - 1)) {
+            end -= 1
+        }
+        return start == fullRange.location && end == NSMaxRange(fullRange)
+    }
+
+    private static func isTrimmable(_ unit: unichar) -> Bool {
+        unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
+    }
 }
 
 /// Decoded embed images, keyed like `ExtractionCache` — `(canonical path,
@@ -249,7 +273,18 @@ extension MarkdownEditor.Coordinator {
                 EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
 
             case .transclusion:
-                // Rendered by `TransclusionStyling`, not here. The collapse,
+                // A transclusion that is NOT alone on its paragraph cannot be
+                // drawn — the reserved gap is a paragraph line height and the
+                // panel is full-column, so it would stretch and then paint over
+                // the prose sharing its line. It degrades to the SAME chip a
+                // document embed gets, exactly as a mid-paragraph image does.
+                // `TransclusionStyling.prepare` asks this same question and
+                // skips those embeds, so the two answers cannot disagree.
+                guard EmbedRendering.isAloneOnItsParagraph(fullRange: full_, in: text) else {
+                    EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
+                    continue
+                }
+                // Otherwise: rendered by `TransclusionStyling`, not here. The collapse,
                 // the reserved height and the drawing region have to come out
                 // of ONE pass — and that pass is the collapse pass, because
                 // `MarkdownStyleRenderer.collapse` resets attributes over the
@@ -289,7 +324,7 @@ extension MarkdownEditor.Coordinator {
                 // built. See `EmbedDecorationTests
                 // .test_midParagraphEmbed_rendersAsAChipNotAnImage` for the
                 // regression guard.
-                guard Self.isAloneOnItsParagraph(fullRange: full_, in: text) else {
+                guard EmbedRendering.isAloneOnItsParagraph(fullRange: full_, in: text) else {
                     EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
                     continue
                 }
@@ -444,27 +479,4 @@ extension MarkdownEditor.Coordinator {
         return !blocks.isEmpty
     }
 
-    /// True when `fullRange`, trimmed of the whitespace `MarkdownReveal.
-    /// blocks`/`paragraphRange` would also trim, IS the paragraph — i.e. the
-    /// embed is the only thing on its line. Compares TRIMMED bounds rather
-    /// than exact equality so leading indentation (an embed inside a list
-    /// item) still counts as "alone".
-    private static func isAloneOnItsParagraph(fullRange: NSRange, in text: NSString) -> Bool {
-        let paragraph = text.paragraphRange(for: fullRange)
-        var start = paragraph.location
-        let paragraphEnd = paragraph.location + paragraph.length
-        while start < NSMaxRange(fullRange), Self.isTrimmable(text.character(at: start)) {
-            start += 1
-        }
-        var end = paragraphEnd
-        while end > NSMaxRange(fullRange), end > start,
-              Self.isTrimmable(text.character(at: end - 1)) {
-            end -= 1
-        }
-        return start == fullRange.location && end == NSMaxRange(fullRange)
-    }
-
-    private static func isTrimmable(_ unit: unichar) -> Bool {
-        unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
-    }
 }
