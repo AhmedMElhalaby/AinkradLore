@@ -191,6 +191,17 @@ enum MarkdownBlockBackgrounds {
         // The lines that carry a checkbox, so the bullet on those lines can be
         // suppressed. Collected in one pass up front rather than searched per
         // bullet, which would be quadratic on a long task list.
+        // Nesting depth per list item, keyed by where the item STARTS — which
+        // is also where its bullet marker starts, since `visitListItem` emits
+        // both from the same range. That shared origin is what lets a marker
+        // find its own depth without a second containment scan.
+        let depths = MarkdownListDepth.depths(of: spans)
+        var depthByItemStart: [Int: Int] = [:]
+        for (index, span) in spans.enumerated() {
+            guard case .listItem = span.kind else { continue }
+            depthByItemStart[span.range.lowerBound] = depths[index]
+        }
+
         var taskLines: Set<Int> = []
         if let text {
             for span in spans {
@@ -247,7 +258,9 @@ enum MarkdownBlockBackgrounds {
                 // characters, so intersecting it would draw half a `10.`. It is
                 // either wholly inside the styled window or it is not drawn.
                 guard let text, NSMaxRange(r) <= text.length,
-                      let glyph = listMarkerGlyph(for: text.substring(with: r))
+                      let glyph = listMarkerGlyph(
+                        for: text.substring(with: r),
+                        depth: depthByItemStart[span.range.lowerBound] ?? 0)
                 else { return nil }
                 if let window,
                    NSIntersectionRange(r, window).length != r.length { return nil }
@@ -269,10 +282,18 @@ enum MarkdownBlockBackgrounds {
     /// alike. Anything else returns nil — the same "emit nothing rather than a
     /// guess" rule `MarkdownMarkers` follows, since a wrong glyph in the gutter
     /// is worse than none.
-    static func listMarkerGlyph(for source: String) -> String? {
+    /// - Parameter depth: nesting level, 0 for a top-level item. An UNORDERED
+    ///   bullet cycles with it — Obsidian draws a filled disc, then a hollow
+    ///   one, then a small square — which is what lets a reader tell a nested
+    ///   list from a wrapped line at a glance. An ordinal does not cycle: a
+    ///   number is already its own distinguishing mark.
+    static func listMarkerGlyph(for source: String, depth: Int = 0) -> String? {
         let body = source.trimmingCharacters(in: .whitespaces)
         guard !body.isEmpty else { return nil }
-        if body == "-" || body == "*" || body == "+" { return "•" }
+        if body == "-" || body == "*" || body == "+" {
+            let cycle = ["•", "◦", "▪"]
+            return cycle[max(0, depth) % cycle.count]
+        }
         let digits = body.dropLast()
         guard let last = body.last, last == "." || last == ")",
               !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber })

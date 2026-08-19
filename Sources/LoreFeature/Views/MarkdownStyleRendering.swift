@@ -211,10 +211,16 @@ enum MarkdownStyleRenderer {
                                      ? NSColor(tokens.foreground)
                                      : NSColor(tokens.foreground).withAlphaComponent(0.85),
                                  range: r)
-            storage.addAttribute(.paragraphStyle,
-                                 value: MarkdownParagraphStyles.style(for: .heading(level),
-                                                                      theme: theme),
-                                 range: r)
+            let full = storage.string as NSString
+            let paragraph = full.paragraphRange(for: r)
+            storage.addAttribute(
+                .paragraphStyle,
+                value: MarkdownParagraphStyles.headingStyle(
+                    level: level,
+                    follows: MarkdownParagraphStyles.headingLevelAbove(
+                        paragraphStart: paragraph.location, in: full),
+                    theme: theme),
+                range: r)
 
         // Both compose onto `current` ITSELF, not onto a fresh
         // `.systemFont(ofSize: current.pointSize)`. Re-basing kept the size and

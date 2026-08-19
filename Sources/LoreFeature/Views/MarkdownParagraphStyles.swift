@@ -106,6 +106,68 @@ enum MarkdownParagraphStyles {
         return s
     }
 
+    /// A heading's style, with the space ABOVE it collapsed when the thing
+    /// above it is another heading.
+    ///
+    /// `headingSpacingBefore` is ~1.35x the heading's own size, which is right
+    /// when a heading follows prose — it is what stops the heading crowding
+    /// the paragraph it comes after. Between two headings it is wrong twice
+    /// over: the previous heading has already contributed its own
+    /// `paragraphSpacing` below itself, and there is no body text for the gap
+    /// to separate the new heading FROM. `## A` immediately followed by
+    /// `### B` stacked both, leaving a band of dead air that reads as a
+    /// missing paragraph.
+    ///
+    /// Collapsed to the PREVIOUS heading's spacing-after, not to zero: two
+    /// headings still need to be told apart, just by a normal gap rather than
+    /// a section break.
+    static func headingStyle(level: Int, follows previousLevel: Int?,
+                             theme: MarkdownTheme) -> NSParagraphStyle {
+        let base = style(for: .heading(level), theme: theme)
+        guard let previousLevel,
+              let s = base.mutableCopy() as? NSMutableParagraphStyle else { return base }
+        s.paragraphSpacingBefore = theme.headingSpacingAfter(previousLevel)
+        return s
+    }
+
+    /// The level of the heading immediately above the paragraph starting at
+    /// `paragraphStart`, or `nil` when what is above is not a heading.
+    ///
+    /// Read from the TEXT rather than from the span list, deliberately. The
+    /// per-block restyle path (`MarkdownStyleRenderer.restyle`) is handed only
+    /// its own block's spans — two headings separated by a blank line are two
+    /// blocks — so a span-based answer would be correct on a full render and
+    /// silently wrong the moment the caret moved. The text is available to
+    /// both paths and says the same thing to each.
+    ///
+    /// ATX only (`## A`), and a hash run must be followed by a space to count:
+    /// `#tag` at the start of a line is not a heading, and CommonMark agrees.
+    /// A setext heading is not detected — its own underline is the line above,
+    /// so the lookback would have to distinguish `---` the underline from
+    /// `---` the rule, and answering "not a heading" merely keeps the spacing
+    /// that was there before.
+    static func headingLevelAbove(paragraphStart: Int, in text: NSString) -> Int? {
+        var index = paragraphStart
+        // Back over the blank lines between the two, if any.
+        while index > 0 {
+            let unit = text.character(at: index - 1)
+            guard unit == 0x0A || unit == 0x0D || unit == 0x20 || unit == 0x09 else { break }
+            index -= 1
+        }
+        guard index > 0 else { return nil }
+        let previous = text.lineRange(for: NSRange(location: index - 1, length: 0))
+        var scan = previous.location
+        let limit = min(NSMaxRange(previous), text.length)
+        // Up to three spaces of indent are still a heading; four make it code.
+        var indent = 0
+        while scan < limit, text.character(at: scan) == 0x20, indent < 3 { scan += 1; indent += 1 }
+        var hashes = 0
+        while scan < limit, text.character(at: scan) == 0x23 { scan += 1; hashes += 1 }
+        guard hashes >= 1, hashes <= 6, scan < limit,
+              text.character(at: scan) == 0x20 else { return nil }
+        return hashes
+    }
+
     /// The line a thematic break occupies once its source has collapsed.
     ///
     /// A fixed height, like an embedded image's: the source is 0.01 pt while
