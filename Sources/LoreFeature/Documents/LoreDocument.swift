@@ -114,6 +114,13 @@ public struct EditorContext {
     public let tagCompletions: @MainActor (String) -> [String]
     /// Open a wikilink target the user activated in the editor.
     public let openLink: @MainActor (String) -> Void
+    /// ⌥-click on a transclusion's rendered content: open its source note
+    /// BESIDE what is showing, rather than replacing it — the same gesture
+    /// `LoreRootView.openRow` already gives an ⌥-clicked sidebar row.
+    /// Defaulted to a no-op, the same "no capability supplied" shape every
+    /// other closure added to this struct since it was written uses, so an
+    /// engine or call site with no split-view story needs no changes.
+    public let openLinkBeside: @MainActor (String) -> Void
     /// A `#tag` the user clicked in the editor. Wired to the SAME
     /// `activeTag` filter the sidebar's `TagChipRow`/`NoteListView` share, so
     /// a click in the body does exactly what a click in the sidebar does.
@@ -168,6 +175,20 @@ public struct EditorContext {
     /// "declined" shape as `writePastedImage` — so an engine with no
     /// title-field story, or a test that does not care, needs no changes.
     public let commitTitle: @MainActor (String) -> LoreStore.TitleCommitOutcome
+    /// Lets the editor learn, with no keystroke required, that a file changed
+    /// on disk — an edit made in Obsidian, a save from the same file open in
+    /// another split pane, or any other external tool. Rides the SAME sink
+    /// the index already uses (`VaultIndexCoordinator`'s watcher-driven
+    /// rescan and per-save `indexDocument`), rather than a second watcher:
+    /// this is what makes a transcluded `![[note]]` embed update live. The
+    /// returned token must be handed back to `unregisterExternalChangeHandler`
+    /// when the editor tears down, or the closure — and everything it
+    /// captures — outlives it. Defaulted to "never fires, token unused", so
+    /// an engine or test with no vault behind it needs no changes.
+    public let registerExternalChangeHandler:
+        @MainActor (@escaping @MainActor (URL) -> Void) -> UUID
+    /// Pairs with `registerExternalChangeHandler` — see its doc comment.
+    public let unregisterExternalChangeHandler: @MainActor (UUID) -> Void
 
     public init(theme: HostTheme,
                 editorSettings: EditorSettings = .default,
@@ -179,6 +200,7 @@ public struct EditorContext {
                 completions: @escaping @MainActor (String) -> [IndexRow] = { _ in [] },
                 tagCompletions: @escaping @MainActor (String) -> [String] = { _ in [] },
                 openLink: @escaping @MainActor (String) -> Void = { _ in },
+                openLinkBeside: @escaping @MainActor (String) -> Void = { _ in },
                 onTagClick: @escaping @MainActor (String) -> Void = { _ in },
                 resolveEmbedTarget: @escaping @MainActor (String) -> URL? = { _ in nil },
                 linkTarget: @escaping @MainActor (IndexRow) -> String
@@ -189,7 +211,12 @@ public struct EditorContext {
                 writePastedImage: @escaping @MainActor (Data, String) -> String? = { _, _ in nil },
                 writeDroppedFile: @escaping @MainActor (URL) -> String? = { _ in nil },
                 commitTitle: @escaping @MainActor (String) -> LoreStore.TitleCommitOutcome
-                    = { _ in .refused("Renaming is unavailable here.") }) {
+                    = { _ in .refused("Renaming is unavailable here.") },
+                registerExternalChangeHandler:
+                    @escaping @MainActor (@escaping @MainActor (URL) -> Void) -> UUID
+                    = { _ in UUID() },
+                unregisterExternalChangeHandler: @escaping @MainActor (UUID) -> Void
+                    = { _ in }) {
         self.theme = theme; self.editorSettings = editorSettings
         self.headingCompletions = headingCompletions
         self.createLinkedNote = createLinkedNote
@@ -197,6 +224,7 @@ public struct EditorContext {
         self.onChange = onChange
         self.completions = completions; self.tagCompletions = tagCompletions
         self.openLink = openLink
+        self.openLinkBeside = openLinkBeside
         self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
         self.linkTarget = linkTarget
@@ -205,5 +233,7 @@ public struct EditorContext {
         self.writePastedImage = writePastedImage
         self.writeDroppedFile = writeDroppedFile
         self.commitTitle = commitTitle
+        self.registerExternalChangeHandler = registerExternalChangeHandler
+        self.unregisterExternalChangeHandler = unregisterExternalChangeHandler
     }
 }

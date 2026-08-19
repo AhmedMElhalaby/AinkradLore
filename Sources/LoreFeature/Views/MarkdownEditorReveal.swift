@@ -160,6 +160,15 @@ extension MarkdownEditor.Coordinator {
         // The redundant-redraw guard — see `isRenderStale` in
         // `MarkdownEditorEditPath.swift` for what it checks and why a keystroke
         // reaches here at all.
+        //
+        // Deliberately does NOT also poll `detectExternalTransclusionChanges()`
+        // here: this runs once per keystroke (`MarkdownEditorRedrawTests`), and
+        // stat-ing every embedded target's file on every character typed is
+        // real, synchronous, main-actor filesystem work with no gate covering
+        // it (fix round 1, Important #2). Live updates from an external edit
+        // arrive instead through `handleExternalChange(to:)`, pushed with no
+        // keystroke required; the poll here would only ever be a fallback for
+        // idle time, which `makeNSView`/`onBecomeFirstResponder` already cover.
         if !isRenderStale(for: tv) { return }
         applyStylesRenders += 1
         if !styleCache.describes(tv.string) {
@@ -343,7 +352,15 @@ extension MarkdownEditor.Coordinator {
             // which is empty for the overwhelming majority of documents and
             // tiny for the rest, and does no styling work at all unless the
             // answer changed.
-            if revealEmbedsForSelectionChange(in: storage) { tv.needsDisplay = true }
+            if revealEmbedsForSelectionChange(in: storage) {
+                // The reservation was already restored (or withdrawn) inside
+                // that call; the DRAWN decoration is rebuilt here, because
+                // this branch returns and nothing else will do it. Clipped to
+                // the window the last full render used, like the other caret
+                // path below.
+                refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
+                tv.needsDisplay = true
+            }
             return
         }
         revealedRange = now
@@ -370,7 +387,22 @@ extension MarkdownEditor.Coordinator {
         // only has to catch embeds in blocks that did NOT flip; it also keeps
         // `revealedEmbedSpans` in step so the next caret move compares against
         // the truth.
-        revealEmbedsForSelectionChange(in: storage)
+        let embedsFlipped = revealEmbedsForSelectionChange(in: storage)
+        // ONE pass for the whole caret move, however many blocks flipped — see
+        // `restyleBlock`. Clipped to the same viewport window the last full
+        // render used, so a large document's decoration is not rebuilt
+        // wholesale on an arrow key.
+        //
+        // The `||` order matters and the operands are not interchangeable:
+        // the drain must be ATTEMPTED either way (Swift short-circuits, so it
+        // goes first), and `embedsFlipped` is still consulted because
+        // `revealEmbedsForSelectionChange` may have already drained the flag
+        // itself — in which case the reservation changed but this call reports
+        // nothing, and skipping the rebuild would leave the decoration
+        // describing the previous reveal state.
+        if prepareTransclusionsIfNeeded(in: storage) || embedsFlipped {
+            refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
+        }
         // The DRAWN decoration is a function of reveal state too — a list
         // marker's substitute is drawn only while the real one is collapsed —
         // and it lives in the gutter, outside the glyph rects an attribute
@@ -457,6 +489,35 @@ extension MarkdownEditor.Coordinator {
         MarkdownMathStyling.reserveSpace(blockSpans, revealed: revealed,
                                          font: MarkdownStyleRenderer.baseFont,
                                          in: storage)
+        // `restyle` above reset this block's paragraph styles, which pops a
+        // transcluded embed's reserved gap shut and leaves a stale region
+        // painting into a rect that no longer exists — the same failure fix
+        // round 1's Critical 2 found for an image embed.
+        //
+        // RECORDED, not done here. `renderStylesForEdit` calls this method
+        // once per changed block and then refreshes the decoration itself, so
+        // doing the (whole-document) reservation and a second whole-document
+        // background rebuild inside this method put N+1 of each on every
+        // keystroke of the fast edit path — fix round 1, Important 3. The flag
+        // is drained exactly once per pass by
+        // `prepareTransclusionsIfNeeded`, at the caller's own refresh, with
+        // the caller's own viewport window.
+        if blockSpans.contains(where: { isTransclusion($0) }) {
+            needsTransclusionPass = true
+        }
+    }
+
+    /// Whether one span is an embed whose target renders as a transclusion.
+    ///
+    /// Narrower than "is an embed": an image or a document chip needs none of
+    /// this work, and `holdsEmbeds` matching them was what made the fast edit
+    /// path pay for documents with no transclusion in them at all.
+    func isTransclusion(_ span: StyleSpan) -> Bool {
+        guard case .embed(let target, _) = span.kind else { return false }
+        if case .transclusion = EmbedRendering.kind(for: resolveEmbedTarget(target)) {
+            return true
+        }
+        return false
     }
 
     // Container geometry and the off-actor parse pipeline (the debounce,

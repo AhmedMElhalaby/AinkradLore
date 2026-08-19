@@ -110,6 +110,20 @@ public struct StyleSpan: Equatable, Sendable {
     public init(range: Range<Int>, kind: Kind) {
         self.range = range; self.kind = kind
     }
+
+    /// Whether this span is an `![[target]]` embed's target span — the ONLY
+    /// kind `EmbedRendering`/`TransclusionStyling` ever act on. Named for the
+    /// M8 test that pins the code-fence mask: a `![[…]]` written inside a
+    /// fenced code block is never emitted as `.embed` at all (the fence
+    /// suppresses wikilink/embed parsing entirely, same as any other inline
+    /// syntax inside a code span), so no span with `isTransclusionEmbed ==
+    /// true` can ever fall inside a fence's range. This property exists so
+    /// that guarantee has a name to test, rather than tests reaching past
+    /// `StyleSpan` into `Kind` directly.
+    public var isTransclusionEmbed: Bool {
+        if case .embed = kind { return true }
+        return false
+    }
 }
 
 /// The prose half of the ONE markdown walk.

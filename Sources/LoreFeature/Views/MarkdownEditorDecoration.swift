@@ -62,12 +62,59 @@ extension MarkdownEditor.Coordinator {
         MarkdownMathStyling.reserveSpace(styleCache.spans, revealed: revealedRange,
                                          font: MarkdownStyleRenderer.baseFont,
                                          in: storage)
+        // LAST, and after both collapse passes, for the reason every other
+        // reservation here runs late: `collapse` resets attributes over the
+        // ranges this writes to, so a height reserved before it would be
+        // wiped.
+        prepareTransclusions(in: storage)
+    }
+
+    /// Collapses, measures and reserves every transcluded embed, and records
+    /// the regions that will paint them.
+    ///
+    /// One entry point, called from the full render's collapse pass and from
+    /// `restyleBlock`'s, so the reservation and the drawing regions always
+    /// come out of the SAME layout — the invariant `transclusionRegions`
+    /// exists to hold. Whole-document rather than block-scoped even on the
+    /// caret path: a document holds very few embeds (usually zero), every one
+    /// of them is a cache hit after the first pass, and a block-scoped merge
+    /// would need the same care `applyEmbeds` documents for a much smaller
+    /// saving.
+    func prepareTransclusions(in storage: NSTextStorage) {
+        needsTransclusionPass = false
+        guard let tv = textView else { return }
+        transclusionRegions = TransclusionStyling.prepare(
+            styleCache.spans,
+            selection: tv.selectedRange(),
+            width: MarkdownBlockBackgrounds.columnWidth(in: tv),
+            theme: MarkdownTheme(tokens: tokens, settings: settings),
+            resolve: resolveEmbedTarget,
+            cache: transclusionCache,
+            in: storage)
+    }
+
+    /// Runs the transclusion pass ONCE if any block restyled since the last
+    /// drain asked for it, then rebuilds the decoration inside `window`.
+    ///
+    /// The drain point exists because `restyleBlock` is called once per
+    /// changed block while the reservation is whole-document: doing the work
+    /// per block made a keystroke cost N whole-document walks and N+1
+    /// background rebuilds (fix round 1, Important 3). The caller that owns
+    /// the pass drains it once, with its own viewport window.
+    /// - Returns: whether it did anything, so the caller can skip a
+    ///   decoration rebuild it does not need.
+    @discardableResult
+    func prepareTransclusionsIfNeeded(in storage: NSTextStorage) -> Bool {
+        guard needsTransclusionPass else { return false }
+        prepareTransclusions(in: storage)
+        return true
     }
 
     /// Assembles every drawn decoration in one place, so the panels, the
     /// substituted markers, the maths and the tables can never be built from
     /// different passes over different spans.
     func refreshBlockBackgrounds(in storage: NSTextStorage, window: NSRange?) {
+        blockBackgroundRefreshes += 1
         guard let linkView = textView as? LinkTextView else { return }
         linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
         linkView.blockBackgrounds =
@@ -79,6 +126,7 @@ extension MarkdownEditor.Coordinator {
                                           font: MarkdownStyleRenderer.baseFont,
                                           in: storage.string as NSString)
             + tableRegions
+            + transclusionRegions
     }
 
     /// The width a line of text actually has, which is what decides whether a

@@ -35,6 +35,119 @@ extension MarkdownEditor.Coordinator {
         // The drawn decoration is positioned from the container, so it has to
         // be repainted when the container moves.
         tv.needsDisplay = true
+        // Every transcluded embed's measured height is a function of THIS
+        // width — see `TransclusionMeasurement`. A stale height self-corrects
+        // on the very next render (the geometry travels with the number), so
+        // dropping it here is purely an optimisation: it stops the next pass
+        // from carrying around a measurement it already knows it cannot use,
+        // rather than discovering that one geometry check at a time.
+        transclusionCache.invalidateMeasurements()
+    }
+
+    // MARK: - Live transclusion updates
+
+    /// The PRIMARY live-update path: called with NO editor interaction
+    /// whatsoever, whenever `EditorContext.registerExternalChangeHandler`'s
+    /// sink fires for `url` — a watcher-driven vault rescan (an edit made in
+    /// Obsidian, or any external tool), or another split pane saving the
+    /// SAME file. See `MarkdownEditor.Coordinator.externalChangeToken`'s doc
+    /// comment for why this exists as a push rather than relying on
+    /// `detectExternalTransclusionChanges()` alone (fix round 1, Critical #1
+    /// — a poll driven only by `applyStyles()` never fires while the window
+    /// sits idle, so an Obsidian edit would sit invisible until the user
+    /// typed a character).
+    ///
+    /// `cache.invalidate(path:)` is called UNCONDITIONALLY — it is a cheap
+    /// no-op for a path with no entries, and computing the membership check
+    /// twice (once to guard this, once to guard the render below) would cost
+    /// more than the no-op it would be guarding.
+    ///
+    /// `renderStyles()` is NOT unconditional (fix round 2, Important #4): it
+    /// is a full render pass (span apply, `revealIndex` rebuild, embed index
+    /// rebuild, writing-direction scan, embed application, block-background
+    /// refresh) — cheap for `invalidate(path:)` to be a no-op over, but not
+    /// cheap to run unfiltered. Every open editor registers a handler
+    /// against the SAME sink, and `VaultIndexCoordinator.indexDocument`
+    /// fires it on every save of ANY document — so an unfiltered render here
+    /// meant every open pane paid for a full render on every save anywhere
+    /// in the vault, whether or not it embedded the saved file. Filtered by
+    /// `isEmbeddedTarget(url)`, a cheap scan of the CURRENT spans with no
+    /// filesystem access — no `stat`, unlike the mtime backstop below — so
+    /// it costs far less than the render it decides whether to run.
+    func handleExternalChange(to url: URL) {
+        transclusionCache.invalidate(path: url)
+        guard isEmbeddedTarget(url) else { return }
+        // `applyStyles()`'s `isRenderStale` guard has no way to know a
+        // DIFFERENT file changed, so it is bypassed by forcing a render
+        // directly — the render itself re-derives `transclusionRegions` from
+        // the (now-invalidated, so freshly re-resolved) cache and repaints,
+        // exactly what Task 6's drain invariant requires.
+        renderStyles()
+    }
+
+    /// Whether `url` is one of THIS document's currently-transcluded targets
+    /// — a scan of `styleCache.spans` for `.embed` spans that resolve to a
+    /// `.transclusion` matching `url`. No filesystem access: this exists to
+    /// be cheap enough to run before deciding whether a real render is
+    /// warranted, not to detect whether the file's content actually changed
+    /// (that is `TransclusionKey`'s mtime, and the backstop's `stat` calls).
+    private func isEmbeddedTarget(_ url: URL) -> Bool {
+        for span in styleCache.spans {
+            guard case .embed(let target, _) = span.kind else { continue }
+            guard case .transclusion(let resolved) = EmbedRendering.kind(for: resolveEmbedTarget(target))
+            else { continue }
+            if resolved == url { return true }
+        }
+        return false
+    }
+
+    /// Compares every currently-embedded transclusion target's on-disk mtime
+    /// against what the last check saw, and invalidates the cache (and forces
+    /// a render) for any that changed.
+    ///
+    /// The BACKSTOP, not the primary mechanism — see
+    /// `MarkdownEditor.Coordinator.embeddedTargetMTimes`'s doc comment.
+    /// Deliberately NOT called from `applyStyles()` (fix round 1, Important
+    /// #2): that runs once per keystroke, and stat-ing every embedded
+    /// target's file on every character typed is real, measured,
+    /// synchronous main-actor filesystem work the typing-path performance
+    /// gates do not cover. Called instead from `makeNSView` (on open) and
+    /// `onBecomeFirstResponder` (on focus) — an idle document that never
+    /// regains focus relies entirely on the watcher push in
+    /// `handleExternalChange(to:)` above, which is the common case this
+    /// backstop is not needed for.
+    ///
+    /// Distinct URLs are stat'd once per call, not once per embed SPAN
+    /// occurrence — a target embedded five times in one document costs one
+    /// `stat`, not five.
+    func detectExternalTransclusionChanges() {
+        var stattedThisPass: [URL: Date] = [:]
+        var seen: Set<URL> = []
+        var changedTargets: [URL] = []
+        for span in styleCache.spans {
+            guard case .embed(let target, _) = span.kind else { continue }
+            guard case .transclusion(let url) = EmbedRendering.kind(for: resolveEmbedTarget(target))
+            else { continue }
+            seen.insert(url)
+            guard stattedThisPass[url] == nil else { continue }
+            externalChangeStatCalls += 1
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let mtime = (attributes?[.modificationDate] as? Date) ?? .distantPast
+            stattedThisPass[url] = mtime
+            if let known = embeddedTargetMTimes[url], known != mtime {
+                changedTargets.append(url)
+            }
+            embeddedTargetMTimes[url] = mtime
+        }
+        // Targets no longer embedded (the `![[…]]` was removed or edited to
+        // point elsewhere) are dropped, so a later re-embed of the same path
+        // is compared against a fresh baseline rather than one from before it
+        // was removed.
+        if embeddedTargetMTimes.count != seen.count {
+            embeddedTargetMTimes = embeddedTargetMTimes.filter { seen.contains($0.key) }
+        }
+        for url in changedTargets { transclusionCache.invalidate(path: url) }
+        if !changedTargets.isEmpty { renderStyles() }
     }
 
     // MARK: - Parsing

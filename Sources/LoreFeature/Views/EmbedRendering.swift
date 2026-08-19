@@ -12,6 +12,12 @@ import AinkradAppKit
 /// actually wants.
 public enum EmbedKind: Equatable {
     case image(URL)
+    /// A markdown note, rendered inline by the transclusion path. Was a
+    /// `.chip` before M7 — the comment above about "a second document's
+    /// renderer inside the editor" still holds for PDFs and Word files,
+    /// which is why those stay chips. A markdown note is different in kind:
+    /// this editor already knows how to lay one out.
+    case transclusion(URL)
     case chip(URL)
     case unresolved
 }
@@ -24,11 +30,17 @@ public enum EmbedRendering {
         "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "tif", "bmp", "svg",
     ]
 
+    /// Case-insensitive for the same reason `imageExtensions` is —
+    /// `EmbedRenderingTests.test_markdownTargetIsCaseInsensitive` pins
+    /// `"NOTE.MD"`.
+    public static let markdownExtensions: Set<String> = ["md", "markdown", "mdown"]
+
     public static func kind(for target: URL?) -> EmbedKind {
         guard let target else { return .unresolved }
-        return imageExtensions.contains(target.pathExtension.lowercased())
-            ? .image(target)
-            : .chip(target)
+        let ext = target.pathExtension.lowercased()
+        if imageExtensions.contains(ext) { return .image(target) }
+        if markdownExtensions.contains(ext) { return .transclusion(target) }
+        return .chip(target)
     }
 
     /// The chip's pill: a background box plus the same colour and underline
@@ -64,6 +76,30 @@ public enum EmbedRendering {
         storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: range)
         storage.addAttribute(.underlineStyle,
                              value: NSUnderlineStyle.single.rawValue, range: range)
+    }
+
+    /// True when `fullRange`, trimmed of the whitespace `MarkdownReveal.
+    /// blocks`/`paragraphRange` would also trim, IS the paragraph — i.e. the
+    /// embed is the only thing on its line. Compares TRIMMED bounds rather
+    /// than exact equality so leading indentation (an embed inside a list
+    /// item) still counts as "alone".
+    static func isAloneOnItsParagraph(fullRange: NSRange, in text: NSString) -> Bool {
+        let paragraph = text.paragraphRange(for: fullRange)
+        var start = paragraph.location
+        let paragraphEnd = paragraph.location + paragraph.length
+        while start < NSMaxRange(fullRange), isTrimmable(text.character(at: start)) {
+            start += 1
+        }
+        var end = paragraphEnd
+        while end > NSMaxRange(fullRange), end > start,
+              isTrimmable(text.character(at: end - 1)) {
+            end -= 1
+        }
+        return start == fullRange.location && end == NSMaxRange(fullRange)
+    }
+
+    private static func isTrimmable(_ unit: unichar) -> Bool {
+        unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
     }
 }
 
@@ -236,6 +272,28 @@ extension MarkdownEditor.Coordinator {
             case .chip:
                 EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
 
+            case .transclusion:
+                // A transclusion that is NOT alone on its paragraph cannot be
+                // drawn — the reserved gap is a paragraph line height and the
+                // panel is full-column, so it would stretch and then paint over
+                // the prose sharing its line. It degrades to the SAME chip a
+                // document embed gets, exactly as a mid-paragraph image does.
+                // `TransclusionStyling.prepare` asks this same question and
+                // skips those embeds, so the two answers cannot disagree.
+                guard EmbedRendering.isAloneOnItsParagraph(fullRange: full_, in: text) else {
+                    EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
+                    continue
+                }
+                // Otherwise: rendered by `TransclusionStyling`, not here. The collapse,
+                // the reserved height and the drawing region have to come out
+                // of ONE pass — and that pass is the collapse pass, because
+                // `MarkdownStyleRenderer.collapse` resets attributes over the
+                // very ranges a reservation writes to. `applyEmbeds` runs
+                // AFTER that pass, so reserving here would be reserving into
+                // a gap that has already been sized. See
+                // `MarkdownEditorDecoration.prepareTransclusions`.
+                continue
+
             case .image(let url):
                 guard let image = EmbedImageCache.shared.image(for: url) else {
                     // Decode failed: never a blank gap, so it falls back to
@@ -266,7 +324,7 @@ extension MarkdownEditor.Coordinator {
                 // built. See `EmbedDecorationTests
                 // .test_midParagraphEmbed_rendersAsAChipNotAnImage` for the
                 // regression guard.
-                guard Self.isAloneOnItsParagraph(fullRange: full_, in: text) else {
+                guard EmbedRendering.isAloneOnItsParagraph(fullRange: full_, in: text) else {
                     EmbedRendering.applyChipStyling(over: r, to: storage, tokens: tokens)
                     continue
                 }
@@ -418,30 +476,24 @@ extension MarkdownEditor.Coordinator {
         for block in blocks.sorted() {
             restyleBlock(block, revealed: revealedRange, in: storage)
         }
+        // DRAINED HERE, not left to the caller. `restyleBlock` reset those
+        // blocks' paragraph styles, which pops a transcluded embed's reserved
+        // gap shut and leaves its region describing a rect that no longer
+        // exists — and one of this function's three callers is
+        // `revealForSelectionChange`'s early-return branch, which returns
+        // without any drain of its own (fix round 2, NEW-1: caret column 0 → 1
+        // on an embed's line flips embed reveal while the line-scoped
+        // `revealedRange` does not change, so the gap closed and a stale
+        // full-column panel painted over the following paragraph until the
+        // next keystroke). Draining inside the function that did the damage is
+        // what makes the invariant hold for EVERY caller rather than for the
+        // ones someone remembered.
+        //
+        // Reserves only. Whether the DRAWN decoration is rebuilt from it is
+        // the caller's call, because the caller knows its viewport window and
+        // whether it is about to refresh anyway — see fix round 1, Important 3.
+        prepareTransclusionsIfNeeded(in: storage)
         return !blocks.isEmpty
     }
 
-    /// True when `fullRange`, trimmed of the whitespace `MarkdownReveal.
-    /// blocks`/`paragraphRange` would also trim, IS the paragraph — i.e. the
-    /// embed is the only thing on its line. Compares TRIMMED bounds rather
-    /// than exact equality so leading indentation (an embed inside a list
-    /// item) still counts as "alone".
-    private static func isAloneOnItsParagraph(fullRange: NSRange, in text: NSString) -> Bool {
-        let paragraph = text.paragraphRange(for: fullRange)
-        var start = paragraph.location
-        let paragraphEnd = paragraph.location + paragraph.length
-        while start < NSMaxRange(fullRange), Self.isTrimmable(text.character(at: start)) {
-            start += 1
-        }
-        var end = paragraphEnd
-        while end > NSMaxRange(fullRange), end > start,
-              Self.isTrimmable(text.character(at: end - 1)) {
-            end -= 1
-        }
-        return start == fullRange.location && end == NSMaxRange(fullRange)
-    }
-
-    private static func isTrimmable(_ unit: unichar) -> Bool {
-        unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
-    }
 }

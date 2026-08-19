@@ -25,6 +25,13 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// Called with the raw target of a Cmd-clicked `[[…]]` span. `nil` disables
     /// click-to-open.
     let onOpenLink: (@MainActor (String) -> Void)?
+    /// Called with the raw target of a click that landed inside a rendered
+    /// transclusion (a `![[note]]` embed's drawn content, not its collapsed
+    /// source) while ⌥ was held. `nil` disables the beside-open affordance —
+    /// same "no capability supplied" shape `onOpenLink == nil` already has —
+    /// which is how a plain click still opens the embed in place even when
+    /// nothing wired the split-view path up.
+    let onOpenLinkBeside: (@MainActor (String) -> Void)?
     /// Called with a `#tag`'s name when clicked in the body. `nil` disables
     /// tag-click-to-filter entirely, matching `onOpenLink`'s "no capability
     /// supplied" shape.
@@ -34,6 +41,14 @@ public struct MarkdownEditor: NSViewRepresentable {
     /// `.unresolved` (plain wikilink colouring), which is the right answer
     /// for an engine with no link layer, exactly like `completions == nil`.
     let resolveEmbedTarget: (@MainActor (String) -> URL?)?
+    /// See `EditorContext.registerExternalChangeHandler`. `nil` disables live
+    /// transclusion updates entirely — the same "no capability supplied"
+    /// shape `resolveEmbedTarget == nil` already has, which is right for an
+    /// engine with no vault (and so no `![[…]]` targets that could ever
+    /// change out from under it).
+    let registerExternalChangeHandler: (@MainActor (@escaping @MainActor (URL) -> Void) -> UUID)?
+    /// Pairs with `registerExternalChangeHandler` — see its doc comment.
+    let unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)?
     /// What a picked row inserts. Defaults to the store-blind approximation.
     let linkTarget: @MainActor (IndexRow) -> String
     /// A UTF-16 offset (into `text`) to scroll the caret to and select. Set by
@@ -71,8 +86,12 @@ public struct MarkdownEditor: NSViewRepresentable {
                 completions: (@MainActor (String) -> [IndexRow])? = nil,
                 tagCompletions: (@MainActor (String) -> [String])? = nil,
                 onOpenLink: (@MainActor (String) -> Void)? = nil,
+                onOpenLinkBeside: (@MainActor (String) -> Void)? = nil,
                 onTagClick: (@MainActor (String) -> Void)? = nil,
                 resolveEmbedTarget: (@MainActor (String) -> URL?)? = nil,
+                registerExternalChangeHandler:
+                    (@MainActor (@escaping @MainActor (URL) -> Void) -> UUID)? = nil,
+                unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)? = nil,
                 linkTarget: @escaping @MainActor (IndexRow) -> String
                     = { LinkCompletionContext.insertableTarget(for: $0) },
                 scrollTarget: Binding<Int?> = .constant(nil),
@@ -86,8 +105,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         self.createLinkedNote = createLinkedNote
         self.completions = completions; self.tagCompletions = tagCompletions
         self.onOpenLink = onOpenLink
+        self.onOpenLinkBeside = onOpenLinkBeside
         self.onTagClick = onTagClick
         self.resolveEmbedTarget = resolveEmbedTarget
+        self.registerExternalChangeHandler = registerExternalChangeHandler
+        self.unregisterExternalChangeHandler = unregisterExternalChangeHandler
         self.linkTarget = linkTarget
         self.scrollTarget = scrollTarget
         self.allowsTaskToggle = allowsTaskToggle
@@ -136,6 +158,8 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// See `MarkdownEditor.tagCompletions`.
         var tagCompletions: (@MainActor (String) -> [String])?
         var onOpenLink: (@MainActor (String) -> Void)?
+        /// See `MarkdownEditor.onOpenLinkBeside`.
+        var onOpenLinkBeside: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.onTagClick`.
         var onTagClick: (@MainActor (String) -> Void)?
         /// See `MarkdownEditor.resolveEmbedTarget`. Never left `nil` in
@@ -200,6 +224,63 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// ONE layout — a table measured one way and reserved another is drawn
         /// over the paragraph beneath it.
         var tableRegions: [MarkdownBlockBackgrounds.Region] = []
+        /// Drawing regions for transcluded `![[note]]` embeds, rebuilt in the
+        /// SAME pass that reserves their heights — held here for exactly the
+        /// reason `tableRegions` is, and against exactly the same failure: a
+        /// note measured one way and reserved another is drawn over the
+        /// paragraph beneath it. Each region carries the attributed string its
+        /// height was measured from, so the paint cannot drift from the gap.
+        var transclusionRegions: [MarkdownBlockBackgrounds.Region] = []
+        /// Resolved embed content and its measured height, per target. Lives
+        /// on the coordinator — one per open document — so a re-render costs a
+        /// cache hit rather than a second document's layout. This is what makes
+        /// typing free of embed measurement; see
+        /// `MarkdownRevealBenchmark.test_typingInHostDoesNotRemeasureEmbeds`.
+        let transclusionCache = TransclusionCache()
+        /// Every currently-embedded transclusion target's on-disk mtime, as of
+        /// the last time `detectExternalTransclusionChanges()` checked it —
+        /// see that function (`MarkdownEditorParsing.swift`).
+        ///
+        /// This is the BACKSTOP, not the primary mechanism: the primary path
+        /// is `handleExternalChange(to:)`, invoked with NO editor interaction
+        /// whenever `EditorContext.registerExternalChangeHandler`'s sink
+        /// fires (a watcher-driven rescan, or another pane's save). This
+        /// mtime check exists for what that push can miss — a same-second
+        /// edit on a filesystem with coarse mtime resolution, where the
+        /// watcher fires but the row's `updated` timestamp does not actually
+        /// change (fix round 1, Critical #1's "belt and suspenders" ruling)
+        /// — and is checked only off the per-keystroke path: on-appear
+        /// (`makeNSView`) and on-focus (`onBecomeFirstResponder`), never from
+        /// `applyStyles()` (fix round 1, Important #2 — a keystroke used to
+        /// pay for one `stat()` per embed SPAN OCCURRENCE, synchronously, on
+        /// every character typed).
+        var embeddedTargetMTimes: [URL: Date] = [:]
+        /// The token `EditorContext.registerExternalChangeHandler` handed
+        /// back, and the paired unregister closure — held so `tearDown()` can
+        /// unsubscribe, or the closure captured by the registration (which
+        /// captures this coordinator) would keep it alive for as long as the
+        /// vault stays open, well past this editor's own lifetime.
+        var externalChangeToken: UUID?
+        var unregisterExternalChangeHandler: (@MainActor (UUID) -> Void)?
+        /// Counts `FileManager.attributesOfItem` calls made by
+        /// `detectExternalTransclusionChanges()` — ONE per distinct embedded
+        /// target per call, never per span occurrence. Exists so
+        /// `MarkdownRevealBenchmark`'s per-keystroke gate can assert this
+        /// backstop costs ZERO filesystem work on the typing path (fix round
+        /// 1, Important #2), the same shape `blockBackgroundRefreshes`
+        /// already asserts for decoration rebuilds.
+        var externalChangeStatCalls = 0
+        /// Set by `restyleBlock` when a block it just re-attributed holds a
+        /// transcluded embed, and drained ONCE per pass by
+        /// `prepareTransclusionsIfNeeded`. A flag rather than the work itself
+        /// because `renderStylesForEdit` restyles several blocks per keystroke
+        /// and the reservation is whole-document — fix round 1, Important 3.
+        var needsTransclusionPass = false
+        /// How many times the drawn decoration has been rebuilt. Counts the
+        /// CALLS, exactly as `applyStylesCalls` does, so "one rebuild per
+        /// edit" can be asserted directly rather than inferred from a timing —
+        /// the claim fix round 1's Important 3 was made against.
+        var blockBackgroundRefreshes = 0
         /// First-responder state as of the last reveal pass. Compared against
         /// the LIVE state on every selection-change notification so a focus
         /// change — which does not move the caret and therefore would not flip
@@ -314,6 +395,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         }
 
         func tearDown() {
+            if let externalChangeToken {
+                unregisterExternalChangeHandler?(externalChangeToken)
+            }
+            externalChangeToken = nil
             completionPanel.hide()
             // The hover preview is a child window of the same host window, so
             // it must go with the editor — and its pending task must be
@@ -410,6 +495,58 @@ public struct MarkdownEditor: NSViewRepresentable {
             guard let target = LinkCompletionContext.target(in: text, at: offset)
             else { return false }
             onOpenLink(target)
+            return true
+        }
+
+        /// A click inside a RENDERED transclusion (`transclusionRegions`,
+        /// built by `TransclusionStyling.prepare` every render pass — see
+        /// `MarkdownEditorDecoration`) opens the embed's source note; ⌥-click
+        /// opens it beside, through `onOpenLinkBeside` — the same
+        /// `store.openInSecondaryPane` path an ⌥-click already opens a
+        /// sidebar row beside (`LoreRootView.openRow`), not a second one.
+        ///
+        /// ALWAYS returns `true` once `index` falls inside a transclusion
+        /// region, whether or not a handler actually fires — the region is
+        /// COLLAPSED source (`TransclusionStyling.prepare` collapses it every
+        /// time it is not the one the caret is literally inside), so once a
+        /// click lands here it must never fall through to
+        /// `super.mouseDown`'s caret placement: doing so would be exactly the
+        /// "caret inside drawn content" the M6 rule forbids. The `defer`
+        /// parks the caret right after the embed instead — the same "caret
+        /// goes just past what the click activated" contract `toggleTask`
+        /// already keeps for a flipped checkbox.
+        @MainActor func openTransclusion(atUTF16 index: Int, beside: Bool) -> Bool {
+            guard let tv = textView else { return false }
+            guard let region = transclusionRegions.first(where: { region in
+                guard case .transclusion = region.kind else { return false }
+                return index >= region.range.location && index <= NSMaxRange(region.range)
+            }) else { return false }
+
+            defer {
+                tv.setSelectedRange(NSRange(location: NSMaxRange(region.range), length: 0))
+            }
+
+            let ns = tv.string as NSString
+            guard NSMaxRange(region.range) <= ns.length else { return true }
+            // Re-read the LIVE text at the region's own range rather than
+            // trusting a cached target string — the same "cached offset is a
+            // candidate, never an authority" rule `toggleTask`'s doc comment
+            // spells out. `region.range` is the WHOLE source form (`!`, both
+            // brackets, the target — see `StyleSpan.Kind.embed`'s doc
+            // comment), so stripping the fixed `![[`/`]]` delimiters is
+            // enough; anything else here means the live text no longer
+            // matches what this region was built from, and the click is
+            // simply absorbed rather than opening something stale.
+            let raw = ns.substring(with: region.range)
+            guard raw.hasPrefix("![["), raw.hasSuffix("]]") else { return true }
+            let target = String(raw.dropFirst(3).dropLast(2))
+            guard !target.isEmpty else { return true }
+
+            if beside {
+                onOpenLinkBeside?(target)
+            } else {
+                onOpenLink?(target)
+            }
             return true
         }
 

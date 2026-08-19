@@ -15,7 +15,7 @@ final class EmbedRenderingTests: XCTestCase {
     }
 
     func test_documentTargetsRenderAsChips() {
-        for ext in ["pdf", "docx", "md", "xlsx", "zip"] {
+        for ext in ["pdf", "docx", "xlsx", "zip"] {
             let url = URL(fileURLWithPath: "/v/a.\(ext)")
             guard case .chip = EmbedRendering.kind(for: url) else {
                 return XCTFail("\(ext) should render as a chip")
@@ -27,6 +27,26 @@ final class EmbedRenderingTests: XCTestCase {
         guard case .unresolved = EmbedRendering.kind(for: nil) else {
             return XCTFail("nil target should render unresolved")
         }
+    }
+
+    func test_markdownTargetBecomesTransclusion() {
+        let url = URL(fileURLWithPath: "/vault/note.md")
+        XCTAssertEqual(EmbedRendering.kind(for: url), .transclusion(url))
+    }
+
+    func test_markdownTargetIsCaseInsensitive() {
+        let url = URL(fileURLWithPath: "/vault/NOTE.MD")
+        XCTAssertEqual(EmbedRendering.kind(for: url), .transclusion(url))
+    }
+
+    func test_imageStillRendersInline() {
+        let url = URL(fileURLWithPath: "/vault/shot.PNG")
+        XCTAssertEqual(EmbedRendering.kind(for: url), .image(url))
+    }
+
+    func test_pdfIsStillAChip() {
+        let url = URL(fileURLWithPath: "/vault/contract.pdf")
+        XCTAssertEqual(EmbedRendering.kind(for: url), .chip(url))
     }
 }
 

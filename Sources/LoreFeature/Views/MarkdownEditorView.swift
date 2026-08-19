@@ -76,6 +76,9 @@ extension MarkdownEditor {
         tv.onPlainClick = { [weak coordinator = context.coordinator] index in
             coordinator?.handlePlainClick(atUTF16: index) ?? false
         }
+        tv.onEmbedClick = { [weak coordinator = context.coordinator] index, optionHeld in
+            coordinator?.openTransclusion(atUTF16: index, beside: optionHeld) ?? false
+        }
         // Losing first responder INSIDE the same window — clicking the title
         // field, the sidebar, another pane — is not covered by
         // `hidesOnDeactivate`, and would otherwise leave a `.popUpMenu`-level
@@ -95,6 +98,13 @@ extension MarkdownEditor {
         }
         tv.onBecomeFirstResponder = { [weak coordinator = context.coordinator] in
             coordinator?.revealForSelectionChange(forcedFocus: true)
+            // The on-focus half of the mtime backstop — see
+            // `detectExternalTransclusionChanges()`'s doc comment. The
+            // watcher push (`handleExternalChange(to:)`) is the primary
+            // mechanism; this catches what it can miss (a same-second edit
+            // on a coarse-mtime filesystem) the moment the user comes back
+            // to this pane, without paying for it on every keystroke.
+            coordinator?.detectExternalTransclusionChanges()
         }
         tv.onPasteImage = { [weak coordinator = context.coordinator] data, name in
             coordinator?.insertAttachment(fromPastedImage: data, name: name) ?? false
@@ -121,6 +131,19 @@ extension MarkdownEditor {
         // The SAME resolver embeds use, so a hover and an embed cannot
         // disagree about what a name points at.
         context.coordinator.resolveHoverTarget = resolveEmbedTarget
+        // The live-transclusion push (fix round 1, Critical #1): rides the
+        // SAME sink the index already uses for a watcher event or another
+        // pane's save, rather than a second watcher. `nil` — an engine or
+        // test with no vault behind it — means live updates never fire,
+        // which degrades to exactly the poll-only backstop this coordinator
+        // already runs on-appear/on-focus.
+        context.coordinator.unregisterExternalChangeHandler = unregisterExternalChangeHandler
+        if let registerExternalChangeHandler {
+            context.coordinator.externalChangeToken =
+                registerExternalChangeHandler { [weak coordinator = context.coordinator] url in
+                    coordinator?.handleExternalChange(to: url)
+                }
+        }
         context.coordinator.createLinkedNote = createLinkedNote
         context.coordinator.headingCompletions = headingCompletions
         context.coordinator.writePastedImage = writePastedImage
@@ -130,6 +153,12 @@ extension MarkdownEditor {
         context.coordinator.onTagClick = onTagClick
         tv.string = text
         context.coordinator.applyStyles()
+        // The on-open half of the mtime backstop — see
+        // `detectExternalTransclusionChanges()`'s doc comment. AFTER
+        // `applyStyles()`, whose render pass is what populates
+        // `styleCache.spans` (and so the embed targets this walks) in the
+        // first place — a call before it would find nothing to check yet.
+        context.coordinator.detectExternalTransclusionChanges()
         // The text view exists now, so the closures that need it (cut, copy,
         // the formatting actions) can be built once, here, rather than
         // re-derived on every menu presentation. Deferred to the next
@@ -170,6 +199,7 @@ extension MarkdownEditor {
         context.coordinator.completions = completions
         context.coordinator.tagCompletions = tagCompletions
         context.coordinator.onOpenLink = onOpenLink
+        context.coordinator.onOpenLinkBeside = onOpenLinkBeside
         context.coordinator.onTagClick = onTagClick
         context.coordinator.resolveEmbedTarget = resolveEmbedTarget ?? { _ in nil }
         context.coordinator.linkTarget = linkTarget
@@ -193,6 +223,15 @@ extension MarkdownEditor {
         if context.coordinator.settings != settings {
             context.coordinator.settings = settings
             context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
+            // Called explicitly, not left to `applyContainerGeometry`'s own
+            // call: that one only fires when the CONTAINER'S width or inset
+            // actually moved, but `bodySize` (density) can change under a
+            // settings edit — a text-size or density change — without either
+            // one moving. Every transcluded embed's measured height is a
+            // function of `bodySize`/`lineHeightMultiple` too (see
+            // `TransclusionMeasurement`), so it must drop on ANY settings
+            // change, not only the ones that happen to move the geometry.
+            context.coordinator.transclusionCache.invalidateMeasurements()
             // `applyStyles()` below is a no-op unless `isRenderStale` says the
             // ON-SCREEN render is out of date, and that guard compares only
             // `tokens` and the text — never `settings` (see

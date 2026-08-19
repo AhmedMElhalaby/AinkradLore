@@ -314,6 +314,20 @@ struct DocumentPane: View {
                                   let name = LinkCompletionContext.documentName(of: target)
                                   if !store.openLink(name) { unresolved = name }
                               },
+                              openLinkBeside: { target in
+                                  // Same target-resolution rule `openLink`
+                                  // above follows, then `openInSecondaryPane`
+                                  // — the exact path `LoreRootView.openRow`
+                                  // already uses for an ⌥-clicked sidebar
+                                  // row, so an ⌥-click means the same thing
+                                  // everywhere in this app.
+                                  let name = LinkCompletionContext.documentName(of: target)
+                                  guard let url = store.resolveLink(name) else {
+                                      unresolved = name
+                                      return
+                                  }
+                                  store.openInSecondaryPane(url: url)
+                              },
                               onTagClick: onTagClick,
                               resolveEmbedTarget: { store.resolveLink($0) },
                               linkTarget: { store.linkTarget(for: $0) },
@@ -368,6 +382,12 @@ struct DocumentPane: View {
                               },
                               commitTitle: { newTitle in
                                   store.commitTitleChange(for: session, to: newTitle)
+                              },
+                              registerExternalChangeHandler: { handler in
+                                  store.registerExternalChangeHandler(handler)
+                              },
+                              unregisterExternalChangeHandler: { token in
+                                  store.unregisterExternalChangeHandler(token)
                               }))
                 // The engines' editors seed their `@State` in `.onAppear` only,
                 // and `resolveByReloading()` mutates the engine in place — so

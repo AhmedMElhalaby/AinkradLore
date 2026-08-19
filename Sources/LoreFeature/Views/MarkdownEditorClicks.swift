@@ -226,9 +226,26 @@ final class LinkTextView: NSTextView {
 
     /// Modifiers that mean the user is doing something other than "activate
     /// what is under the pointer": extending a selection, opening a context
-    /// menu, or whatever the host binds Option-click to.
+    /// menu. `.option` is deliberately NOT here — see `onEmbedClick` — an
+    /// Option-click still means "activate", just the beside-opening variant
+    /// of it, for the one affordance (a transclusion) that has one.
     private static let selectionModifiers: NSEvent.ModifierFlags =
-        [.shift, .option, .control, .command]
+        [.shift, .control, .command]
+
+    /// Receives the clicked UTF-16 offset of a click on a RENDERED
+    /// transclusion (never on its collapsed source — there is nothing to
+    /// click there) and whether ⌥ was held, and reports whether it opened
+    /// the embed's source note. Same fall-through contract as
+    /// `onCommandClick`/`onPlainClick`.
+    ///
+    /// Tried on every single click that carries no modifier but ⌥ — both a
+    /// plain click (open in place) and an ⌥-click (open beside) land here,
+    /// AFTER `onPlainClick`: a transclusion region and a checkbox/footnote/
+    /// tag span never overlap in practice, but plain-click affordances are
+    /// the more specific claim of the two and get first refusal, same
+    /// precedence `toggleTask`/`jumpFootnote`/`selectTag` already have among
+    /// themselves inside `handlePlainClick`.
+    var onEmbedClick: (@MainActor (Int, Bool) -> Bool)?
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
@@ -250,11 +267,20 @@ final class LinkTextView: NSTextView {
             super.mouseDown(with: event)
             return
         }
-        // Single, unmodified click only. A double-click is select-the-word and
-        // a drag starts from a click too — neither should flip a checkbox.
+        // Single click, no modifier but (optionally) ⌥. A double-click is
+        // select-the-word and a drag starts from a click too — neither
+        // should flip a checkbox or open an embed.
         if event.clickCount == 1,
-           event.modifierFlags.intersection(Self.selectionModifiers).isEmpty,
-           onPlainClick?(characterIndexForInsertion(at: point)) == true { return }
+           event.modifierFlags.intersection(Self.selectionModifiers).isEmpty {
+            let index = characterIndexForInsertion(at: point)
+            let optionHeld = event.modifierFlags.contains(.option)
+            // ⌥-click skips `onPlainClick` entirely: none of the checkbox/
+            // footnote/tag affordances have a "beside" variant, and running
+            // them under ⌥ would toggle a checkbox the user meant to open
+            // something beside.
+            if !optionHeld, onPlainClick?(index) == true { return }
+            if onEmbedClick?(index, optionHeld) == true { return }
+        }
         super.mouseDown(with: event)
     }
 

@@ -188,6 +188,17 @@ public final class LoreStore {
 
     public func rebuild() throws { try coordinator.rebuild() }
 
+    /// See `VaultIndexCoordinator.registerExternalChangeHandler` — the
+    /// pass-through `EditorContext.registerExternalChangeHandler` reaches.
+    public func registerExternalChangeHandler(_ handler: @escaping (URL) -> Void) -> UUID {
+        coordinator.registerExternalChangeHandler(handler)
+    }
+
+    /// Pairs with `registerExternalChangeHandler` above.
+    public func unregisterExternalChangeHandler(_ token: UUID) {
+        coordinator.unregisterExternalChangeHandler(token)
+    }
+
     /// True while a vault rescan is running — drives the sidebar's "Indexing…"
     /// state and the Settings spinner.
     public var isIndexing: Bool { coordinator.isRebuilding }

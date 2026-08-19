@@ -188,8 +188,11 @@ private struct MarkdownDocumentEditor: View {
                            createLinkedNote: ctx.createLinkedNote,
                            completions: ctx.completions, tagCompletions: ctx.tagCompletions,
                            onOpenLink: ctx.openLink,
+                           onOpenLinkBeside: ctx.openLinkBeside,
                            onTagClick: ctx.onTagClick,
                            resolveEmbedTarget: ctx.resolveEmbedTarget,
+                           registerExternalChangeHandler: ctx.registerExternalChangeHandler,
+                           unregisterExternalChangeHandler: ctx.unregisterExternalChangeHandler,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
                            // Task checkboxes are markdown, and only a session
                            // that can actually be written may offer to flip
