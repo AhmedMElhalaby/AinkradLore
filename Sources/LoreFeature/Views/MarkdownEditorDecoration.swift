@@ -56,11 +56,12 @@ extension MarkdownEditor.Coordinator {
         tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
                                                     revealed: revealedRange,
                                                     maxWidth: textColumnWidth(of: tv),
+                                                    bodyFont: theme.bodyFont,
                                                     in: storage)
         MarkdownStyleRenderer.collapse(hidden.filter { rowMarkers.contains($0) },
                                        in: storage)
         MarkdownMathStyling.reserveSpace(styleCache.spans, revealed: revealedRange,
-                                         font: MarkdownStyleRenderer.baseFont,
+                                         font: theme.bodyFont,
                                          in: storage)
         // LAST, and after both collapse passes, for the reason every other
         // reservation here runs late: `collapse` resets attributes over the
@@ -87,7 +88,7 @@ extension MarkdownEditor.Coordinator {
             styleCache.spans,
             selection: tv.selectedRange(),
             width: MarkdownBlockBackgrounds.columnWidth(in: tv),
-            theme: MarkdownTheme(tokens: tokens, settings: settings),
+            theme: theme,
             resolve: resolveEmbedTarget,
             cache: transclusionCache,
             in: storage)
@@ -117,13 +118,14 @@ extension MarkdownEditor.Coordinator {
         blockBackgroundRefreshes += 1
         guard let linkView = textView as? LinkTextView else { return }
         linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
+        linkView.blockBackgroundFont = theme.bodyFont
         linkView.blockBackgrounds =
             MarkdownBlockBackgrounds.regions(for: styleCache.spans,
                                              length: storage.length,
                                              limitedTo: window,
                                              in: storage.string as NSString)
             + MarkdownMathStyling.regions(for: styleCache.spans,
-                                          font: MarkdownStyleRenderer.baseFont,
+                                          font: theme.bodyFont,
                                           in: storage.string as NSString)
             + tableRegions
             + transclusionRegions

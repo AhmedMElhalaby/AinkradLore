@@ -104,7 +104,8 @@ extension MarkdownStyleRenderer {
     /// is safe because CommonMark's info string is exactly that word (an
     /// identifier, no spaces) immediately after the fence run.
     static func styleLanguageLabel(_ language: String, in r: NSRange,
-                                           storage: NSTextStorage, tokens: HostThemeTokens) {
+                                           storage: NSTextStorage, tokens: HostThemeTokens,
+                                           theme: MarkdownTheme) {
         let full = storage.string as NSString
         let limit = NSMaxRange(r)
         var lineEnd = r.location
@@ -117,7 +118,15 @@ extension MarkdownStyleRenderer {
         let labelRange = NSRange(location: fenceLine.location + nsLangRange.location,
                                  length: nsLangRange.length)
         guard NSMaxRange(labelRange) <= full.length else { return }
-        storage.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: baseSize), range: labelRange)
-        storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: labelRange)
+        // A CAPTION, not a control. This was bold and `accentTertiary`, which
+        // in Lore means "you can click this" — so every fence wore what looked
+        // like a button in its corner. Obsidian's language label is small,
+        // quiet and unmistakably inert; this is the same idea.
+        storage.addAttribute(.font,
+                             value: NSFont.systemFont(ofSize: theme.bodySize * 0.85),
+                             range: labelRange)
+        storage.addAttribute(.foregroundColor,
+                             value: NSColor(tokens.foreground).withAlphaComponent(0.45),
+                             range: labelRange)
     }
 }

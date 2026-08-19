@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 import AinkradAppKit
 
-/// Column alignment for pipe tables.
+/// Preparing and painting a pipe table's drawn grid.
 ///
-/// ## Why kerning, and not the two obvious alternatives
+/// ## Why the grid is DRAWN
 ///
 /// An `NSTextAttachment` is how most editors render a table, and it is ruled
 /// out here: an attachment needs a `U+FFFC` character standing in for the
@@ -17,93 +17,32 @@ import AinkradAppKit
 /// which avoids even READING `layoutManager` because that silently downgrades
 /// the view.
 ///
-/// So the columns are aligned by PADDING: each cell's trailing `|` — already
-/// collapsed to nothing by the marker machinery — is given a `.kern` equal to
-/// the space the cell needs to reach its column's width. The text is untouched,
-/// no character is added or removed, and the alignment is exact rather than
-/// approximate because the editor's base font is MONOSPACED, so a column's
-/// width in characters is its width on screen.
+/// So the grid is measured by `MarkdownTableLayout` and painted here, over
+/// source that has been collapsed rather than altered — the same
+/// collapse-reserve-draw route the maths and the transclusions take.
 ///
-/// ## Why it runs after collapse
+/// ## What used to be here
 ///
-/// `MarkdownStyleRenderer.collapse` writes `.kern = 0` over every hidden
-/// marker. Padding applied before it would be wiped; padding applied after it
-/// lands on top, which is also the only point at which the reveal state — and
+/// Columns were once aligned by KERNING: each cell's collapsed `|` was given a
+/// `.kern` equal to the space the cell needed to reach its column's width. That
+/// worked only while a whole row fitted one line — a row is one paragraph, so
+/// past the container's edge it wrapped and the continuation started at the
+/// left margin with no memory of its cell. `MarkdownTableLayout` replaced it
+/// with per-cell wrapping inside a measured grid, and the kern path
+/// (`align`, `fits`, `pad`, `rangesShownAsSource`) went unreferenced from that
+/// day. It is deleted rather than kept: it was the last thing in the editor
+/// that assumed a MONOSPACED base font — a column's width in characters being
+/// its width on screen — and leaving it in place would have made the M9.1 font
+/// change look far riskier than it is.
+///
+/// ## Why the reservations run after collapse
+///
+/// `MarkdownStyleRenderer.collapse` resets attributes over every hidden
+/// marker, so a row height reserved before it would be wiped. Reserving after
+/// it lands on top, and is also the only point at which the reveal state — and
 /// therefore whether a row is showing its source at all — is known.
 @MainActor
 enum MarkdownTableStyling {
-
-    /// Aligns every table in `spans` that is not currently revealed.
-    ///
-    /// - Parameter revealed: the source range whose syntax is shown. A row
-    ///   inside it keeps its real `|` characters at full width, so padding it
-    ///   would push the columns apart by the width of the pipes it can now see.
-    ///   Obsidian does the same thing — the row you are editing goes back to
-    ///   source — so this is the behaviour being matched, not a limitation.
-    static func align(_ spans: [StyleSpan], revealed: Range<Int>?,
-                      maxWidth: CGFloat = .greatestFiniteMagnitude,
-                      in storage: NSTextStorage) {
-        let text = storage.string as NSString
-        let space = (" " as NSString).size(
-            withAttributes: [.font: MarkdownStyleRenderer.baseFont]).width
-        guard space > 0 else { return }
-
-        for span in spans {
-            guard case .table = span.kind,
-                  let table = MarkdownTable.parse(range: span.range, in: text),
-                  fits(table, space: space, maxWidth: maxWidth)
-            else { continue }
-
-            for row in table.rows {
-                // A revealed row shows its pipes, so it must not be padded.
-                if let revealed,
-                   row.range.lowerBound < revealed.upperBound,
-                   revealed.lowerBound < row.range.upperBound { continue }
-
-                for (column, cell) in row.cells.enumerated()
-                where column < table.columnWidths.count {
-                    let padding = table.columnWidths[column] - cell.width
-                    guard padding > 0 else { continue }
-
-                    // Where the slack goes decides how the column reads. Left
-                    // puts it all after the cell, right all before it, centre
-                    // splits it — with the ODD unit going after, so a column
-                    // that cannot centre exactly leans the same way every row
-                    // rather than jittering between them.
-                    let alignment = column < table.columnAlignments.count
-                        ? table.columnAlignments[column] : .left
-                    let before: Int
-                    switch alignment {
-                    case .left: before = 0
-                    case .right: before = padding
-                    case .center: before = padding / 2
-                    }
-
-                    // The pipes that OPEN and CLOSE this cell. Found by
-                    // position rather than by index arithmetic, which would be
-                    // off by one for a row without a leading `|` — both
-                    // spellings are legal GFM and a vault contains both.
-                    let closing = row.pipes.first { $0.lowerBound >= cell.range.upperBound }
-                    let opening = row.pipes.last { $0.upperBound <= cell.range.lowerBound }
-
-                    // A first cell in a row with no leading `|` has nothing to
-                    // pad in front of, so it stays left-aligned. Falling back
-                    // is right: the alternative is padding the END and shifting
-                    // every later column, which misaligns the whole row to
-                    // honour one cell's colon.
-                    let leading = opening == nil ? 0 : before
-                    let trailing = padding - leading
-
-                    if leading > 0, let opening {
-                        pad(opening, by: leading, space: space, in: storage)
-                    }
-                    if trailing > 0, let closing {
-                        pad(closing, by: trailing, space: space, in: storage)
-                    }
-                }
-            }
-        }
-    }
 
     /// The ranges of the row markers — the spans that hide a whole table row.
     ///
@@ -125,6 +64,7 @@ enum MarkdownTableStyling {
     /// the SAME layout — a grid measured one way and reserved another is how a
     /// table ends up drawn over the paragraph beneath it.
     static func prepare(_ spans: [StyleSpan], revealed: Range<Int>?, maxWidth: CGFloat,
+                        bodyFont: NSFont,
                         in storage: NSTextStorage) -> [MarkdownBlockBackgrounds.Region] {
         let text = storage.string as NSString
         var out: [MarkdownBlockBackgrounds.Region] = []
@@ -132,7 +72,8 @@ enum MarkdownTableStyling {
             guard case .table = span.kind,
                   let table = MarkdownTable.parse(range: span.range, in: text),
                   let box = MarkdownTableLayout.layout(table, in: storage,
-                                                       maxWidth: maxWidth)
+                                                       maxWidth: maxWidth,
+                                                       bodyFont: bodyFont)
             else { continue }
             reserveRows(box, revealed: revealed, in: storage)
             out.append(MarkdownBlockBackgrounds.Region(
@@ -251,50 +192,4 @@ enum MarkdownTableStyling {
     static let cellPaddingH = MarkdownTableLayout.cellPadding
     static let cellPaddingV = MarkdownTableLayout.rowPadding
 
-    /// Whether an aligned table would fit the text column.
-    ///
-    /// It very often does not, and that is a LIMIT of this approach rather than
-    /// a bug to tune away. Padding aligns columns by widening cells, and a row
-    /// is one paragraph: when it exceeds the column it wraps at the container's
-    /// edge, and the continuation starts at the left margin with no memory of
-    /// which cell it belonged to. The table stops being a table.
-    ///
-    /// Per-cell wrapping needs real table layout — `NSTextTable`, which is
-    /// TextKit 1 and unavailable here — or drawing the whole grid. Until one of
-    /// those, a table that cannot fit is left as SOURCE: pipes visible,
-    /// delimiter row visible, nothing padded. Markdown a reader can follow
-    /// beats a grid that has come apart.
-    ///
-    /// MEASURED on a real table from Ahmed's vault (2026-08-17): 114 characters
-    /// of content against a 760 pt measure — 987 pt needed. It could not fit at
-    /// any window width.
-    static func fits(_ table: MarkdownTable, space: CGFloat, maxWidth: CGFloat) -> Bool {
-        let columns = table.columnWidths.reduce(0, +)
-        // One space of gutter between columns, which is what the collapsed
-        // pipes leave behind.
-        let gutters = max(0, table.columnWidths.count - 1)
-        return CGFloat(columns + gutters) * space <= maxWidth
-    }
-
-    /// The tables in `spans` that cannot fit, so their notation stays visible.
-    static func rangesShownAsSource(_ spans: [StyleSpan], maxWidth: CGFloat,
-                                    in text: NSString) -> [Range<Int>] {
-        let space = (" " as NSString).size(
-            withAttributes: [.font: MarkdownStyleRenderer.baseFont]).width
-        guard space > 0 else { return [] }
-        return spans.compactMap { span in
-            guard case .table = span.kind,
-                  let table = MarkdownTable.parse(range: span.range, in: text),
-                  !fits(table, space: space, maxWidth: maxWidth) else { return nil }
-            return span.range
-        }
-    }
-
-    /// Writes `columns` worth of space into a collapsed pipe.
-    private static func pad(_ pipe: Range<Int>, by columns: Int, space: CGFloat,
-                            in storage: NSTextStorage) {
-        let range = NSRange(location: pipe.lowerBound, length: pipe.count)
-        guard NSMaxRange(range) <= storage.length else { return }
-        storage.addAttribute(.kern, value: CGFloat(columns) * space, range: range)
-    }
 }

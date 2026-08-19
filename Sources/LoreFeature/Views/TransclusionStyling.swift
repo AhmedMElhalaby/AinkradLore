@@ -54,7 +54,7 @@ enum TransclusionStyling {
                         cache: TransclusionCache,
                         in storage: NSTextStorage) -> [MarkdownBlockBackgrounds.Region] {
         let text = storage.string as NSString
-        let font = MarkdownStyleRenderer.baseFont
+        let font = theme.bodyFont
         var out: [MarkdownBlockBackgrounds.Region] = []
 
         for span in spans {

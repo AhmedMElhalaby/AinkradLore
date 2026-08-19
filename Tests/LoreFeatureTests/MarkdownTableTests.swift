@@ -18,14 +18,18 @@ final class MarkdownTableTests: XCTestCase {
 
     // MARK: - Parsing
 
-    func test_rowsCellsAndWidthsAreRead() throws {
+    func test_rowsCellsAndColumnCountAreRead() throws {
         let body = "| name | qty |\n|---|---|\n| apple | 3 |\n"
         let table = try XCTUnwrap(parse(body))
         XCTAssertEqual(table.rows.count, 2, "header and one body row; the delimiter is not a row")
         XCTAssertNotNil(table.delimiterRow)
         XCTAssertEqual(table.rows.map { $0.cells.count }, [2, 2])
-        // Widths are the WIDEST cell per column: "apple" (5) beats "name" (4).
-        XCTAssertEqual(table.columnWidths, [5, 3])
+        // `columnWidths: [Int]` (the widest cell per column, in characters)
+        // is gone with the kern-padding renderer that was its only consumer —
+        // a character count is a rendered width only in a monospaced font, and
+        // the body font is no longer one. `MarkdownTableLayout` measures cells
+        // from the storage instead. What survives is the column COUNT.
+        XCTAssertEqual(table.columnCount, 2)
     }
 
     func test_cellContentIsTrimmedOfItsPadding() throws {
@@ -35,6 +39,9 @@ final class MarkdownTableTests: XCTestCase {
         let first = try XCTUnwrap(table.rows.first?.cells.first)
         XCTAssertEqual(ns.substring(with: NSRange(location: first.range.lowerBound,
                                                   length: first.range.count)), "a")
+        // `Cell.width` survives as a character COUNT — the one question it
+        // can still answer honestly, and the one `row` needs it for: whether a
+        // cell is empty, which is how a row's outer `|` are told from columns.
         XCTAssertEqual(first.width, 1)
     }
 
@@ -42,7 +49,7 @@ final class MarkdownTableTests: XCTestCase {
     func test_aTableWithoutOuterPipesParses() throws {
         let table = try XCTUnwrap(parse("a | b\n--|--\nc | d\n"))
         XCTAssertEqual(table.rows.map { $0.cells.count }, [2, 2])
-        XCTAssertEqual(table.columnWidths, [1, 1])
+        XCTAssertEqual(table.columnCount, 2)
     }
 
     /// `\|` is how GFM writes a literal pipe. Splitting on it would shear the
@@ -210,8 +217,8 @@ final class MarkdownTableTests: XCTestCase {
 
         // The long third column must have wrapped, making its row taller than
         // a single line — which is the whole point.
-        let single = MarkdownStyleRenderer.baseFont.ascender
-            - MarkdownStyleRenderer.baseFont.descender
+        let bodyFont = MarkdownTheme(tokens: TestTokens.make()).bodyFont
+        let single = bodyFont.ascender - bodyFont.descender
         let tallest = try XCTUnwrap(laid.rows.map(\.height).max())
         XCTAssertGreaterThan(tallest, single * 1.8,
                              "a cell too long for its column takes more lines INSIDE "

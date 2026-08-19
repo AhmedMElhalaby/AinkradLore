@@ -9,16 +9,22 @@ import AinkradAppKit
 /// appearance, which Task 9 will keep changing.
 @MainActor
 enum MarkdownStyleRenderer {
-    /// `nonisolated` so the paragraph styles — which are computed off the main
-    /// actor — can size a callout's indent from the SAME number the drawing
-    /// uses. An immutable `CGFloat` is safe to read from anywhere; the point is
-    /// that there is exactly one of it.
-    nonisolated static let baseSize: CGFloat = 14
-    static var baseFont: NSFont { .monospacedSystemFont(ofSize: baseSize, weight: .regular) }
-    /// The base font at semibold, for a callout's title.
-    static var boldBaseFont: NSFont {
-        .monospacedSystemFont(ofSize: baseSize, weight: .semibold)
-    }
+    /// The font a run falls back to when the storage carries none.
+    ///
+    /// A LAST RESORT, and nothing else. `baseSize`/`baseFont`/`boldBaseFont`
+    /// used to live here as the editor's real body font — a monospaced 14 pt
+    /// constant that every drawing helper, every measurement and the whole
+    /// styling path reached for directly. That made the body font a property
+    /// of this enum rather than of the document being rendered, which is why
+    /// `EditorSettings.bodySize` could be computed correctly and then change
+    /// nothing on screen. The font now belongs to `MarkdownTheme` and arrives
+    /// with the `theme` parameter every entry point here already takes.
+    ///
+    /// `composeFont` still needs an answer for a run with no `.font` attribute
+    /// at all, which cannot happen on any path that goes through `apply` or
+    /// `restyle` — both set one over their whole range first — but is not
+    /// worth a crash if it ever does.
+    static let fallbackFont: NSFont = .systemFont(ofSize: 15)
 
     /// How much text on either side of the visible range is styled in viewport
     /// mode. Big enough that a flick of the scroll wheel lands inside
@@ -39,7 +45,7 @@ enum MarkdownStyleRenderer {
         let full = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.setAttributes([
-            .font: baseFont,
+            .font: theme.bodyFont,
             .foregroundColor: NSColor(tokens.foreground),
             // Body rhythm as the FLOOR, so line height and paragraph spacing
             // exist for ordinary prose — which is most of a note — and each
@@ -88,7 +94,7 @@ enum MarkdownStyleRenderer {
         guard clamped.length > 0 else { return }
         storage.beginEditing()
         storage.setAttributes([
-            .font: baseFont,
+            .font: theme.bodyFont,
             .foregroundColor: NSColor(tokens.foreground),
             .paragraphStyle: MarkdownParagraphStyles.style(for: .body, theme: theme)
         ], range: clamped)
@@ -128,11 +134,26 @@ enum MarkdownStyleRenderer {
                                     _ transform: (NSFont) -> NSFont) {
         var runs: [(NSRange, NSFont)] = []
         storage.enumerateAttribute(.font, in: r) { value, sub, _ in
-            runs.append((sub, (value as? NSFont) ?? baseFont))
+            runs.append((sub, (value as? NSFont) ?? fallbackFont))
         }
         for (sub, font) in runs {
             storage.addAttribute(.font, value: transform(font), range: sub)
         }
+    }
+
+    /// The size a monospaced run takes, given the font it is replacing.
+    ///
+    /// In ordinary prose the answer is `theme.monoFont`'s own size — already
+    /// scaled below the body size, since SF Mono reads larger than SF Text at
+    /// equal points. Inside a HEADING the run is bigger than body, and must
+    /// stay proportional to the heading rather than snapping down to the code
+    /// size: `# A `code` C` sets the code at the heading's size, which is what
+    /// `M2aMergeFixTests` has pinned since M2a. The same ratio applies either
+    /// way, so the two cases differ only in what they scale FROM.
+    static func monoSize(replacing current: NSFont, theme: MarkdownTheme) -> CGFloat {
+        current.pointSize == theme.bodyFont.pointSize
+            ? theme.monoFont.pointSize
+            : current.pointSize * MarkdownTheme.monoRatio
     }
 
     /// The traits a child span must carry over from its ancestors. Bold and
@@ -171,31 +192,59 @@ enum MarkdownStyleRenderer {
             // Foreground, not accentPrimary. Size and weight carry hierarchy;
             // colour is reserved for what is clickable. Reversing M2a here is
             // deliberate: a note should read as text, not as coloured bands.
+            // Weight comes from `systemFont(ofSize:weight:)`, and `.boldFontMask`
+            // is deliberately NOT unioned on top of it: doing so rounds semibold
+            // back up to bold and collapses `headingWeight`'s distinction between
+            // the top and the bottom of the ramp. Inherited traits still compose,
+            // so `# A *b*` keeps its italic.
             composeFont(in: r, storage: storage) { current in
-                Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
-                              to: .systemFont(ofSize: theme.headingSize(level)))
+                Self.applying(Self.inheritedTraits(of: current),
+                              to: .systemFont(ofSize: theme.headingSize(level),
+                                              weight: theme.headingWeight(level)))
             }
-            storage.addAttribute(.foregroundColor, value: NSColor(tokens.foreground), range: r)
+            // h1–h3 at full foreground; h4–h6 faded slightly. Size separates the
+            // top of the ramp on its own, and the bottom — where the steps are
+            // 1–2 pt — needs a second signal. A FADE rather than a hue, so the
+            // rule that accent means "you can click this" is untouched.
+            storage.addAttribute(.foregroundColor,
+                                 value: level <= 3
+                                     ? NSColor(tokens.foreground)
+                                     : NSColor(tokens.foreground).withAlphaComponent(0.85),
+                                 range: r)
             storage.addAttribute(.paragraphStyle,
                                  value: MarkdownParagraphStyles.style(for: .heading(level),
                                                                       theme: theme),
                                  range: r)
 
+        // Both compose onto `current` ITSELF, not onto a fresh
+        // `.systemFont(ofSize: current.pointSize)`. Re-basing kept the size and
+        // discarded the FAMILY, which was invisible while the body font was the
+        // only family in play and became a bug the moment it was not: bold
+        // inside a monospaced code span, or inside a heading, switched typeface
+        // mid-run. `.tableHeader` below already did it this way and is the
+        // model being followed.
         case .strong:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current).union(.boldFontMask),
-                              to: .systemFont(ofSize: current.pointSize))
+                              to: current)
             }
 
         case .emphasis:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current).union(.italicFontMask),
-                              to: .systemFont(ofSize: current.pointSize))
+                              to: current)
             }
 
         case .strikethrough:
             storage.addAttribute(.strikethroughStyle,
                                  value: NSUnderlineStyle.single.rawValue,
+                                 range: r)
+            // Struck text recedes as well as being crossed out, which is what
+            // Obsidian's `--text-faint` does for it. A line through text at
+            // full contrast reads as emphasis; the point of the construct is
+            // the opposite.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.55),
                                  range: r)
 
         case .highlight:
@@ -207,13 +256,16 @@ enum MarkdownStyleRenderer {
                                  range: r)
 
         case .footnoteReference:
-            // Superscript, via baseline offset only — a DRAWING change, not
-            // a text change. NOT at "the same size reduction Obsidian uses":
-            // no font-size attribute is applied here, so the glyph stays
-            // full size, just raised. See the M6 final review, Finding 5 —
-            // that gap is a design decision left for the owner to make, not
-            // fixed here; only the comment overclaiming it was wrong.
-            storage.addAttribute(.baselineOffset, value: 4.0, range: r)
+            // A real superscript: raised AND reduced. Both are drawing changes,
+            // never text changes — no character is added, removed or replaced.
+            //
+            // The size reduction is what M6 left undone (final review, Finding
+            // 5) and it is done now, so the reference reads as a mark on the
+            // sentence rather than as a bracketed word inside it. The offset is
+            // theme-relative rather than the flat 4.0 it was: at Comfortable's
+            // 17 pt body a fixed 4 pt barely clears the baseline.
+            composeFont(in: r, storage: storage) { $0.withSize($0.pointSize * 0.75) }
+            storage.addAttribute(.baselineOffset, value: theme.bodySize * 0.28, range: r)
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.accentPrimary), range: r)
 
@@ -248,14 +300,18 @@ enum MarkdownStyleRenderer {
         case .inlineCode:
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),
-                              to: .monospacedSystemFont(ofSize: current.pointSize,
-                                                        weight: .regular))
+                              to: .monospacedSystemFont(
+                                    ofSize: Self.monoSize(replacing: current, theme: theme),
+                                    weight: .regular))
             }
-            // No accent tint. Mono plus a background already says "code", and
-            // the tint is what made every `code` span read as a coloured word
-            // in the middle of a sentence.
+            // No accent tint, and a LIGHTER background than before (0.6 → 0.35).
+            // Mono against proportional prose is now the primary signal — it was
+            // not, while the body font was itself monospaced and the background
+            // was the only thing distinguishing code from the sentence around
+            // it. With the family carrying the meaning, a heavy panel behind
+            // every inline span is noise.
             storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.6),
+                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.35),
                                  range: r)
 
         case .codeBlock(let language):
@@ -270,8 +326,9 @@ enum MarkdownStyleRenderer {
             // each line, giving a ragged staircase instead of a panel.
             composeFont(in: r, storage: storage) { current in
                 Self.applying(Self.inheritedTraits(of: current),
-                              to: .monospacedSystemFont(ofSize: current.pointSize,
-                                                        weight: .regular))
+                              to: .monospacedSystemFont(
+                                    ofSize: Self.monoSize(replacing: current, theme: theme),
+                                    weight: .regular))
             }
             // Over the PARAGRAPH, for the same reason the list case is — and
             // now for a reason that is reachable rather than theoretical. A
@@ -292,7 +349,8 @@ enum MarkdownStyleRenderer {
                 highlightCode(in: r, grammar: grammar, storage: storage, tokens: tokens)
             }
             if let language, !language.isEmpty {
-                styleLanguageLabel(language, in: r, storage: storage, tokens: tokens)
+                styleLanguageLabel(language, in: r, storage: storage, tokens: tokens,
+                                   theme: theme)
             }
 
         case .link:
@@ -322,8 +380,14 @@ enum MarkdownStyleRenderer {
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
 
         case .blockQuote:
+            // 0.85, not the 0.65 this used to be. `LoreMetrics.secondaryText`
+            // names 0.75 as the floor at which supporting text still meets
+            // 4.5:1, and quote BODY is not supporting text — it is prose the
+            // reader is meant to read. The bar and the indent already say
+            // "quote"; dimming below the floor as well was saying it twice, the
+            // second time by making it harder to read.
             storage.addAttribute(.foregroundColor,
-                                 value: NSColor(tokens.foreground).withAlphaComponent(0.65),
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.85),
                                  range: r)
             // The indent leaves room for the bar `MarkdownBlockBackgrounds`
             // draws in the margin; the bar is what says "quote". Paragraph
@@ -345,7 +409,7 @@ enum MarkdownStyleRenderer {
                                  range: (storage.string as NSString).paragraphRange(for: r))
 
         case .calloutTitle(let kind):
-            storage.addAttribute(.font, value: MarkdownStyleRenderer.boldBaseFont, range: r)
+            storage.addAttribute(.font, value: theme.boldBodyFont, range: r)
             storage.addAttribute(.foregroundColor,
                                  value: MarkdownBlockBackgrounds.Palette.calloutTint(kind,
                                                                                      tokens: tokens),
@@ -404,7 +468,8 @@ enum MarkdownStyleRenderer {
             // of that whitespace — and a fixed `headIndent` therefore put every
             // wrapped nested line to the LEFT of the text it should hang under.
             let leading = leadingIndentWidth(from: paragraph.location,
-                                             upTo: r.location, in: full)
+                                             upTo: r.location, in: full,
+                                             spaceAdvance: theme.spaceAdvance)
             storage.addAttribute(.paragraphStyle,
                                  value: MarkdownParagraphStyles.listItemStyle(
                                     depth: listDepth, leadingIndent: leading,
@@ -412,12 +477,23 @@ enum MarkdownStyleRenderer {
                                  range: paragraph)
 
         case .marker:
-            // Deliberately inert HERE. Marker spans exist so a later task can
-            // dim or collapse syntax characters; giving them an appearance now
-            // would change every note's look ahead of that decision, and the
-            // rendering above already styles the whole source range including
-            // its markers.
-            break
+            // Syntax recedes. Obsidian dims revealed markers rather than
+            // showing them at the same contrast as the prose they delimit, and
+            // that is most of why entering a construct there feels gentle
+            // instead of like a flash of raw source.
+            //
+            // Costs nothing when the marker is HIDDEN: `collapse` puts a
+            // 0.01 pt font on it, at which a foreground colour is unobservable.
+            // So this only ever describes the revealed state.
+            //
+            // 0.40 is below `LoreMetrics.secondaryText` (0.75) on purpose.
+            // That floor is about TEXT — captions, hints, prose the reader
+            // reads. These are syntax characters standing next to their own
+            // content, and the same exemption `.blockID` (0.25) already takes
+            // applies: they must be findable, not readable.
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.40),
+                                 range: r)
         }
     }
 
@@ -425,15 +501,20 @@ enum MarkdownStyleRenderer {
     /// `end` — i.e. how far a nested list item's bullet has been pushed right
     /// by source indentation alone.
     ///
-    /// Measured, not counted: the base font is monospaced, so one space's
-    /// advance times the count is exact, and caching that advance keeps this
-    /// off the per-span allocation path. A non-whitespace character before
-    /// `end` means this is not leading indentation and the answer is zero.
-    private static let spaceAdvance: CGFloat =
-        (" " as NSString).size(withAttributes: [.font: baseFont]).width
-
+    /// Counted here, MEASURED by the theme. Leading indentation is spaces and
+    /// tabs only, so one space's advance times the count is exact for any
+    /// font, proportional or not — what changes is that the advance is no
+    /// longer a constant, because the font now moves with density and zoom.
+    ///
+    /// The advance arrives as a parameter rather than being measured here.
+    /// This runs once per list-item span on the styling path, and
+    /// `size(withAttributes:)` per span was measurable on a list-heavy
+    /// document; `MarkdownTheme.spaceAdvance` measures it once per theme
+    /// instead. A non-whitespace character before `end` means this is not
+    /// leading indentation and the answer is zero.
     private static func leadingIndentWidth(from start: Int, upTo end: Int,
-                                           in text: NSString) -> CGFloat {
+                                           in text: NSString,
+                                           spaceAdvance: CGFloat) -> CGFloat {
         guard end > start, end <= text.length else { return 0 }
         var count = 0
         for offset in start..<end {

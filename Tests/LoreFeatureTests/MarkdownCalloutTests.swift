@@ -312,16 +312,20 @@ final class MarkdownCalloutTests: XCTestCase {
     /// stopped being drawn (2026-08-17, image 9).
     @MainActor
     func test_theTextIndentIsExactlyWhatTheDecorationNeeds() {
-        let indent = MarkdownBlockBackgrounds.calloutTextIndent
+        // The icon is drawn at the THEME's body size, not at a fixed one — so
+        // the indent is a function of it, and the two must still agree at
+        // whatever size the reader is running.
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let iconSize = theme.bodyFont.pointSize
+        let indent = MarkdownBlockBackgrounds.calloutTextIndent(iconSize: iconSize)
         let needed = MarkdownBlockBackgrounds.barWidth
             + MarkdownBlockBackgrounds.calloutIconGap
-            + MarkdownStyleRenderer.baseSize
+            + iconSize
             + MarkdownBlockBackgrounds.calloutIconGap
         XCTAssertEqual(indent, needed, accuracy: 0.001,
                        "the indent must be the decoration's own width, not a guess")
 
-        let style = MarkdownParagraphStyles.style(
-            for: .callout(.note), theme: MarkdownTheme(tokens: TestTokens.make()))
+        let style = MarkdownParagraphStyles.style(for: .callout(.note), theme: theme)
         XCTAssertEqual(style.firstLineHeadIndent, indent, accuracy: 0.001,
                        "and the paragraph must use that same number")
         XCTAssertEqual(style.headIndent, indent, accuracy: 0.001)

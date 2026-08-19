@@ -144,8 +144,10 @@ enum MarkdownParagraphStyles {
             // Constant whether or not the icon is currently drawn: shrinking it
             // on reveal would shift every line of the callout sideways as the
             // caret entered it, trading a small gap for a visible jump.
-            s.firstLineHeadIndent = MarkdownBlockBackgrounds.calloutTextIndent
-            s.headIndent = MarkdownBlockBackgrounds.calloutTextIndent
+            let indent = MarkdownBlockBackgrounds
+                .calloutTextIndent(iconSize: theme.bodyFont.pointSize)
+            s.firstLineHeadIndent = indent
+            s.headIndent = indent
             s.paragraphSpacing = theme.paragraphSpacing * 0.5
 
         case .codeBlock:

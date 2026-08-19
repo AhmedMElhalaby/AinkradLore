@@ -78,9 +78,13 @@ enum MarkdownTableLayout {
     /// Returns `nil` when there are no columns, or when even the minimum widths
     /// cannot fit — the caller then leaves the source alone, which is the
     /// standing rule for anything that cannot be rendered properly.
+    /// - Parameter bodyFont: the theme's prose face, used ONLY for the row
+    ///   height floor — the height an empty row still occupies. Every other
+    ///   measurement here comes from the storage, and therefore already
+    ///   reflects whatever font the renderer actually applied.
     static func layout(_ table: MarkdownTable, in storage: NSTextStorage,
-                       maxWidth: CGFloat) -> TableBox? {
-        let columnCount = table.columnWidths.count
+                       maxWidth: CGFloat, bodyFont: NSFont) -> TableBox? {
+        let columnCount = table.columnCount
         guard columnCount > 0, maxWidth > 0 else { return nil }
         guard CGFloat(columnCount) * minimumColumnWidth <= maxWidth else { return nil }
 
@@ -105,8 +109,7 @@ enum MarkdownTableLayout {
         // than pushing the row off the edge.
         var rows: [TableBox.Row] = []
         for (index, row) in table.rows.enumerated() {
-            var height = MarkdownStyleRenderer.baseFont.ascender
-                - MarkdownStyleRenderer.baseFont.descender
+            var height = bodyFont.ascender - bodyFont.descender
             var cells: [TableBox.Cell] = []
             for (column, cell) in row.cells.enumerated() where column < columnCount {
                 let inner = max(1, widths[column] - cellPadding * 2)

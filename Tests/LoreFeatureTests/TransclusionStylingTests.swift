@@ -81,7 +81,8 @@ final class TransclusionStylingTests: XCTestCase {
         guard case .transclusion(let box) = regions.first?.kind else {
             return XCTFail("expected a transclusion region")
         }
-        let line = TransclusionStyling.placeholderHeight(font: MarkdownStyleRenderer.baseFont)
+        let line = TransclusionStyling.placeholderHeight(
+            font: MarkdownTheme(tokens: TestTokens.make()).bodyFont)
         XCTAssertEqual(box.height, line, accuracy: 0.01)
         XCTAssertGreaterThan(box.height, 0)
     }

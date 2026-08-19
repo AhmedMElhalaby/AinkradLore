@@ -98,7 +98,10 @@ enum MarkdownBlockBackgrounds {
         init(tokens: HostThemeTokens) {
             self.tokens = tokens
             codePanel = NSColor(tokens.surfaceElevated).withAlphaComponent(0.55)
-            quoteBar = NSColor(tokens.foreground).withAlphaComponent(0.30)
+            // 0.45, not 0.30. At 0.30 on a dark surface the bar was close to
+            // invisible, which left an indent doing the whole job of saying
+            // "quote" — and an indent alone is what a list looks like.
+            quoteBar = NSColor(tokens.foreground).withAlphaComponent(0.45)
             listMarker = NSColor(tokens.foreground).withAlphaComponent(0.55)
             mathTint = NSColor(tokens.accentSecondary)
         }
@@ -253,6 +256,9 @@ enum MarkdownBlockBackgrounds {
     static let cornerRadius: CGFloat = 5
     /// Width of a blockquote's bar.
     static let barWidth: CGFloat = 3
+    /// Vertical breathing room inside a code panel, above the first line and
+    /// below the last.
+    static let codePanelPadding: CGFloat = 8
     /// The gap between a drawn list marker and the item's text.
     static let listMarkerGap: CGFloat = 5
     /// Below this rendered width a marker's source is COLLAPSED and its
@@ -281,8 +287,14 @@ enum MarkdownBlockBackgrounds {
     /// so a callout carried 15 pt of dead space — invisible while the icon
     /// covered it, and an obvious empty gutter the moment the caret revealed
     /// the source and the icon stopped being drawn (2026-08-17, image 9).
-    nonisolated static var calloutTextIndent: CGFloat {
-        barWidth + calloutIconGap + MarkdownStyleRenderer.baseSize + calloutIconGap
+    /// - Parameter iconSize: the icon's side, which is the theme's body point
+    ///   size — the icon is drawn to match the text beside it. A PARAMETER
+    ///   rather than a constant since the font stopped being one: this used to
+    ///   read `MarkdownStyleRenderer.baseSize`, and leaving it fixed while the
+    ///   drawing scaled would re-open the 15 pt dead gutter of 2026-08-17 at
+    ///   every density except the one it was written for.
+    nonisolated static func calloutTextIndent(iconSize: CGFloat) -> CGFloat {
+        barWidth + calloutIconGap + iconSize + calloutIconGap
     }
 
     /// Paints `regions` into the current context, behind `textView`'s text.
@@ -290,7 +302,11 @@ enum MarkdownBlockBackgrounds {
     /// Called from `drawBackground(in:)`, so the text is drawn on top of
     /// whatever this leaves behind.
     @MainActor
-    static func draw(_ regions: [Region], palette: Palette,
+    /// - Parameter font: the theme's prose face. Everything drawn here is
+    ///   sized from it — a substituted list marker, a callout's icon and its
+    ///   drawn title, a maths baseline — so decoration and text move together
+    ///   when density or zoom changes.
+    static func draw(_ regions: [Region], palette: Palette, font: NSFont,
                      in textView: NSTextView, dirtyRect: NSRect) {
         guard !regions.isEmpty else { return }
         let origin = textView.textContainerOrigin
@@ -302,7 +318,7 @@ enum MarkdownBlockBackgrounds {
         for region in regions {
             if case .listMarker(let glyph) = region.kind {
                 drawListMarker(glyph, at: region.range, columnX: x,
-                               palette: palette, in: textView,
+                               palette: palette, font: font, in: textView,
                                origin: origin, dirtyRect: dirtyRect)
                 continue
             }
@@ -320,7 +336,8 @@ enum MarkdownBlockBackgrounds {
                 // form must not be painted over the top of it.
                 if MarkdownMathStyling.drawsExpression(at: region.range, in: textView) {
                     MarkdownMathStyling.draw(box, at: region.range,
-                                             tint: palette.mathTint, in: textView,
+                                             tint: palette.mathTint, font: font,
+                                             in: textView,
                                              origin: origin, dirtyRect: dirtyRect)
                 }
                 continue
@@ -351,6 +368,7 @@ enum MarkdownBlockBackgrounds {
                             drawsIcon: drawsHeader,
                             at: region.range, columnX: x,
                             columnWidth: width, tokens: palette.tokens,
+                            font: font,
                             in: textView, origin: origin, dirtyRect: dirtyRect)
                 continue
             }
@@ -361,10 +379,13 @@ enum MarkdownBlockBackgrounds {
             case .codePanel:
                 // Full width, deliberately: the panel is a property of the
                 // BLOCK, not of the longest line in it.
+                // 8 pt above and below, not the 2 this carried. A fence sat
+                // so tight inside its own panel that the panel read as a
+                // highlight on the text rather than as a container for it.
                 let panel = NSRect(x: x,
-                                   y: rect.minY - 2,
+                                   y: rect.minY - codePanelPadding,
                                    width: width,
-                                   height: rect.height + 4)
+                                   height: rect.height + codePanelPadding * 2)
                 guard panel.intersects(dirtyRect) else { continue }
                 palette.codePanel.setFill()
                 NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
@@ -391,6 +412,7 @@ enum MarkdownBlockBackgrounds {
     @MainActor
     private static func drawListMarker(_ glyph: String, at range: NSRange,
                                        columnX x: CGFloat, palette: Palette,
+                                       font: NSFont,
                                        in textView: NSTextView, origin: NSPoint,
                                        dirtyRect: NSRect) {
         let markerRect = boundingRect(of: range, in: textView)
@@ -407,7 +429,6 @@ enum MarkdownBlockBackgrounds {
         line = line.offsetBy(dx: origin.x, dy: origin.y)
         let textStart = markerRect.minX + origin.x
 
-        let font = MarkdownStyleRenderer.baseFont
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font, .foregroundColor: palette.listMarker
         ]

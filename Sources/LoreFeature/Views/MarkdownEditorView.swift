@@ -50,7 +50,6 @@ extension MarkdownEditor {
         // collision that would have made this unusable.
         tv.usesFindBar = true
         tv.isIncrementalSearchingEnabled = true
-        tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.drawsBackground = true
         tv.backgroundColor = NSColor(tokens.background)
         tv.insertionPointColor = NSColor(tokens.accentPrimary)
@@ -60,6 +59,13 @@ extension MarkdownEditor {
         // `applyContainerGeometry`, which owns both together so they cannot
         // drift apart on resize.
         let initialTheme = MarkdownTheme(tokens: tokens, settings: settings)
+        // The view's OWN font, which is what typing attributes fall back to
+        // and what an empty document is set in before any styling pass runs.
+        // It was a monospaced 14 pt literal — the same constant the renderer
+        // used to carry, and the same defect: a document opened at
+        // Comfortable flashed at Compact's size for the instant before the
+        // first render, and a note with no spans at all never left it.
+        tv.font = initialTheme.bodyFont
         tv.textContainerInset = MarkdownEditorLayout.containerInset(
             forViewWidth: tv.bounds.width, theme: initialTheme)
         tv.textContainer?.widthTracksTextView = false
@@ -222,6 +228,12 @@ extension MarkdownEditor {
         // together so they cannot drift apart).
         if context.coordinator.settings != settings {
             context.coordinator.settings = settings
+            // The view's own font, alongside the geometry. `applyStyles` sets
+            // a font on the STORAGE, which covers every existing character —
+            // but not the typing attributes an empty document types into, so
+            // without this a note emptied and retyped at Comfortable would
+            // take its characters at the size the view was created with.
+            tv.font = context.coordinator.theme.bodyFont
             context.coordinator.applyContainerGeometry(forWidth: tv.bounds.width)
             // Called explicitly, not left to `applyContainerGeometry`'s own
             // call: that one only fires when the CONTAINER'S width or inset

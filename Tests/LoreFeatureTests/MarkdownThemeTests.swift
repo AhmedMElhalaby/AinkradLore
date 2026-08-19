@@ -249,9 +249,10 @@ extension MarkdownThemeTests {
         let inner = try XCTUnwrap(storage.attribute(
             .paragraphStyle, at: (body as NSString).range(of: "inner").location,
             effectiveRange: nil) as? NSParagraphStyle)
-        // Four spaces of source indent, in the monospaced base font.
-        let space = (" " as NSString).size(
-            withAttributes: [.font: MarkdownStyleRenderer.baseFont]).width
+        // Four spaces of source indent, in the THEME's body font — which is
+        // now proportional and moves with density and zoom. Leading indentation
+        // is spaces and tabs only, so one advance times the count stays exact.
+        let space = MarkdownTheme(tokens: tokens).spaceAdvance
         XCTAssertEqual(inner.headIndent, inner.firstLineHeadIndent + space * 4,
                        accuracy: 0.5,
                        "the hang must clear the source indentation, not ignore it")
