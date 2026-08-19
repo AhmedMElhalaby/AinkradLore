@@ -353,15 +353,19 @@ enum MarkdownStyleRenderer {
                                    theme: theme)
             }
 
+        // Both links: colour at rest, underline ON HOVER only — see
+        // `MarkdownEditor.Coordinator.hoverChanged(to:)`.
+        //
+        // `.link` used to carry a PERSISTENT underline and `.wikilink` none,
+        // justified by the wikilink's own visible `[[…]]`. But in the state
+        // the reader actually looks at, those brackets are COLLAPSED, so the
+        // asymmetry amounted to underlining one kind of link and not the
+        // other for a reason that is invisible at the moment it applies.
+        // Obsidian underlines both, and only under the pointer.
         case .link:
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
-            storage.addAttribute(.underlineStyle,
-                                 value: NSUnderlineStyle.single.rawValue, range: r)
 
         case .wikilink:
-            // Colour, no underline. A wikilink already carries its own visible
-            // `[[…]]` delimiters in Live Preview, so the underline was pure
-            // noise on top of a marker the reader can already see.
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentPrimary), range: r)
 
         case .embed:

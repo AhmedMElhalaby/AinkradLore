@@ -139,6 +139,11 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// elapses. Held so each move REPLACES the last intent rather than
         /// queueing another one.
         var hoverTask: Task<Void, Never>?
+        /// The link currently wearing the hover underline, so the next pointer
+        /// move can take it off again. Held rather than re-derived: the
+        /// underline is a TEMPORARY attribute and nothing else records where
+        /// it was put.
+        var hoveredLinkRange: NSRange?
         /// Resolves a link target to a file. Supplied by the shell; the same
         /// closure embeds already use, so a hover and an embed can never
         /// disagree about what a name points at.
