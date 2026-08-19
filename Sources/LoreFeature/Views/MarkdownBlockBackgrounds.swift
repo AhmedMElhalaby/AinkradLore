@@ -40,6 +40,19 @@ enum MarkdownBlockBackgrounds {
         case checkbox(Bool)
         /// A drawn horizontal rule, standing in for a collapsed `---`.
         case rule
+        /// The rounded pill behind an inline `` `code` `` span.
+        ///
+        /// Drawn for the same reason the tag pill is: `.backgroundColor` is a
+        /// per-glyph attribute, so it cannot be rounded or padded and it takes
+        /// the FULL LINE BOX — which is why the highlight sat taller than the
+        /// text and floated above it, the grey bar visible around
+        /// `feat/pr-172-frontend-adoption` in Ahmed's screenshots.
+        ///
+        /// Unlike a tag, inline code CAN wrap: it may contain spaces, so a
+        /// long span breaks across two lines. One union rect would paint a
+        /// block over both lines and the gap between them, so this is drawn
+        /// per LINE FRAGMENT.
+        case inlineCodePill
         /// The rounded pill behind an inline `#tag`.
         ///
         /// DRAWN rather than attributed, unlike the flat `.backgroundColor`
@@ -218,6 +231,7 @@ enum MarkdownBlockBackgrounds {
             let kind: Kind
             switch span.kind {
             case .thematicBreak: kind = .rule
+            case .inlineCode: kind = .inlineCodePill
             case .tag:
                 guard tagPills else { return nil }
                 kind = .tagPill
@@ -341,6 +355,12 @@ enum MarkdownBlockBackgrounds {
     /// How far a tag's pill extends past the tag's own glyphs. Horizontal is
     /// generous and vertical is not: a pill wants air at its ends, and a tall
     /// one collides with the line above.
+    /// How far an inline code pill extends past its glyphs, and how round it
+    /// is. Obsidian's is a small radius rather than a capsule — code is often
+    /// a single character, and a capsule around `x` reads as a badge.
+    static let inlineCodePaddingH: CGFloat = 4
+    static let inlineCodePaddingV: CGFloat = 2
+    static let inlineCodeRadius: CGFloat = 4
     static let tagPillPaddingH: CGFloat = 5
     static let tagPillPaddingV: CGFloat = 1
     /// Below this rendered width a marker's source is COLLAPSED and its
@@ -478,6 +498,23 @@ enum MarkdownBlockBackgrounds {
                 palette.codePanel.setFill()
                 NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
                              yRadius: cornerRadius).fill()
+            case .inlineCodePill:
+                // Per line fragment, and vertically inset to the TEXT rather
+                // than the line box: at a 1.5 line height the fragment is half
+                // again as tall as the glyphs, and filling it is what made the
+                // old attribute-based background look like it belonged to the
+                // line above.
+                for fragment in lineRects(of: region.range, in: textView) {
+                    var pill = fragment.offsetBy(dx: origin.x, dy: origin.y)
+                    let textHeight = font.ascender - font.descender
+                    let slack = max(0, pill.height - textHeight)
+                    pill = pill.insetBy(dx: 0, dy: slack / 2)
+                        .insetBy(dx: -inlineCodePaddingH, dy: -inlineCodePaddingV)
+                    guard pill.intersects(dirtyRect) else { continue }
+                    NSColor(palette.tokens.surfaceElevated).withAlphaComponent(0.9).setFill()
+                    NSBezierPath(roundedRect: pill, xRadius: inlineCodeRadius,
+                                 yRadius: inlineCodeRadius).fill()
+                }
             case .tagPill:
                 let pill = rect.insetBy(dx: -tagPillPaddingH, dy: -tagPillPaddingV)
                 guard pill.intersects(dirtyRect) else { continue }
@@ -642,6 +679,60 @@ enum MarkdownBlockBackgrounds {
                                         actualCharacterRange: nil)
         guard glyphs.length > 0 else { return .null }
         return manager.boundingRect(forGlyphRange: glyphs, in: container)
+    }
+
+    /// The rect of each LINE FRAGMENT `range` occupies, in text container
+    /// coordinates.
+    ///
+    /// `boundingRect` unions them, which is right for a block panel and wrong
+    /// for anything that must not paint the space between two lines. Same
+    /// TextKit 2 preference and the same reason: reading `layoutManager` on a
+    /// TextKit 2 view downgrades it.
+    @MainActor
+    static func lineRects(of range: NSRange, in textView: NSTextView) -> [NSRect] {
+        if let layout = textView.textLayoutManager,
+           let content = layout.textContentManager {
+            let document = content.documentRange
+            guard let start = content.location(document.location, offsetBy: range.location),
+                  let end = content.location(start, offsetBy: range.length),
+                  let textRange = NSTextRange(location: start, end: end)
+            else { return [] }
+            var rects: [NSRect] = []
+            layout.enumerateTextSegments(in: textRange, type: .standard,
+                                         options: []) { _, frame, _, _ in
+                if !frame.isEmpty { rects.append(frame) }
+                return true
+            }
+            return merged(rects)
+        }
+        guard let manager = textView.layoutManager,
+              let container = textView.textContainer else { return [] }
+        var rects: [NSRect] = []
+        let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        manager.enumerateLineFragments(forGlyphRange: glyphs) { _, used, _, lineGlyphs, _ in
+            let intersection = NSIntersectionRange(lineGlyphs, glyphs)
+            guard intersection.length > 0 else { return }
+            var rect = manager.boundingRect(forGlyphRange: intersection, in: container)
+            rect.origin.y = used.origin.y
+            rect.size.height = used.size.height
+            rects.append(rect)
+        }
+        return rects
+    }
+
+    /// Joins segments that share a line, so one pill is drawn per line rather
+    /// than one per style run. TextKit 2 reports a segment per run, and inline
+    /// code containing a collapsed marker is several runs.
+    private static func merged(_ rects: [NSRect]) -> [NSRect] {
+        var out: [NSRect] = []
+        for rect in rects.sorted(by: { $0.minY == $1.minY ? $0.minX < $1.minX : $0.minY < $1.minY }) {
+            if let last = out.last, abs(last.minY - rect.minY) < 0.5 {
+                out[out.count - 1] = last.union(rect)
+            } else {
+                out.append(rect)
+            }
+        }
+        return out
     }
 
     /// Whether a callout's icon and heading should be drawn: only while its

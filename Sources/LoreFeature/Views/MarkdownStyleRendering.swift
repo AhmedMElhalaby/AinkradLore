@@ -312,15 +312,13 @@ enum MarkdownStyleRenderer {
                                     ofSize: Self.monoSize(replacing: current, theme: theme),
                                     weight: .regular))
             }
-            // No accent tint, and a LIGHTER background than before (0.6 → 0.35).
-            // Mono against proportional prose is now the primary signal — it was
-            // not, while the body font was itself monospaced and the background
-            // was the only thing distinguishing code from the sentence around
-            // it. With the family carrying the meaning, a heavy panel behind
-            // every inline span is noise.
-            storage.addAttribute(.backgroundColor,
-                                 value: NSColor(tokens.surfaceElevated).withAlphaComponent(0.35),
-                                 range: r)
+            // The pill is DRAWN — see `MarkdownBlockBackgrounds.Kind
+            // .inlineCodePill`. It was a `.backgroundColor` here, which is a
+            // per-glyph attribute: it cannot round its corners, cannot pad its
+            // ends, and fills the whole LINE BOX rather than the text. At a
+            // 1.5 line height that is half again as tall as the glyphs, which
+            // is why the highlight looked like it belonged to the line above.
+            // Nothing is written here for it any more.
 
         case .codeBlock(let language):
             // REVISITED, not ignored. M2a defended an `accentSecondary` tint
