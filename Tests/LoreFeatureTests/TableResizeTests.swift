@@ -95,6 +95,45 @@ final class TableResizeTests: XCTestCase {
                              "cell text captured after the rows collapsed would be 0.01 pt")
     }
 
+    /// The BACKSTOP: a box measured at one width and then drawn at another
+    /// corrects itself, whatever put it out of step.
+    ///
+    /// Correcting `applyContainerGeometry` fixed resizing and left first-open
+    /// alone — the view is created at one width and laid out at another, and
+    /// the styling pass can land on either side of that. So the box records
+    /// the width it was measured against, and a disagreement schedules one
+    /// re-render regardless of how it arose. This drives the disagreement
+    /// directly rather than through a resize, which is exactly the case the
+    /// geometry path cannot see.
+    @MainActor
+    func test_aBoxMeasuredAtAnotherWidthRemeasuresItself() throws {
+        let (coordinator, tv) = editor(startingWidth: 900)
+        let expected = try XCTUnwrap(box(in: tv)).columnWidths
+
+        // Move the container WITHOUT telling the coordinator, which is what a
+        // mis-ordered first layout amounts to.
+        tv.textContainer?.size = NSSize(width: 150, height: CGFloat.greatestFiniteMagnitude)
+        coordinator.renderedSnapshot = nil
+        coordinator.applyStyles()
+        tv.layoutSubtreeIfNeeded()
+        let squeezed = try XCTUnwrap(box(in: tv))
+        XCTAssertLessThan(squeezed.totalWidth, 200, "precondition: it really is squeezed")
+        XCTAssertEqual(squeezed.measuredWidth, 150, accuracy: 0.5,
+                       "the box records the width it was measured against")
+
+        // Put the real width back and let the render loop notice on its own —
+        // no resize call, no forced snapshot.
+        tv.textContainer?.size = NSSize(width: 760, height: CGFloat.greatestFiniteMagnitude)
+        coordinator.refreshBlockBackgrounds(in: try XCTUnwrap(tv.textStorage), window: nil)
+        let recovered = expectation(description: "table remeasured")
+        DispatchQueue.main.async { DispatchQueue.main.async { recovered.fulfill() } }
+        wait(for: [recovered], timeout: 5)
+        tv.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(try XCTUnwrap(box(in: tv)).columnWidths, expected,
+                       "a box drawn at a width it was not measured for must correct itself")
+    }
+
     /// Narrowing again must also take effect, or a table would only ever grow.
     @MainActor
     func test_aTableIsRemeasuredWhenTheViewNarrowsToo() throws {

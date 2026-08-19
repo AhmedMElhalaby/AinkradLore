@@ -144,6 +144,10 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// underline is a TEMPORARY attribute and nothing else records where
         /// it was put.
         var hoveredLinkRange: NSRange?
+        /// Guards the one re-render a stale table box schedules, so a render
+        /// cannot queue another from its own tail. See
+        /// `remeasureTablesIfTheyWereMeasuredAtAnotherWidth`.
+        var isRemeasuringTables = false
         /// Resolves a link target to a file. Supplied by the shell; the same
         /// closure embeds already use, so a hover and an embed can never
         /// disagree about what a name points at.

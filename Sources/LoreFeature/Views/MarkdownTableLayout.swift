@@ -47,6 +47,16 @@ struct TableBox: Equatable {
     }
 
     let columnWidths: [CGFloat]
+    /// The column width this box was MEASURED against.
+    ///
+    /// Carried so the box can be checked against the width it is actually
+    /// being drawn at. Every other drawn construct here self-corrects because
+    /// its geometry is derived at draw time; a table's is not — the columns
+    /// are computed once, from a width that may since have changed, and
+    /// nothing in the drawing can tell. Recording it makes "this box is for a
+    /// different view than the one in front of you" an answerable question
+    /// instead of a silent wrong answer.
+    let measuredWidth: CGFloat
     let columnAlignments: [MarkdownTable.Alignment]
     let rows: [Row]
     /// The delimiter row's source line, whose height collapses to nothing —
@@ -124,6 +134,7 @@ enum MarkdownTableLayout {
         guard !rows.isEmpty else { return nil }
 
         return TableBox(columnWidths: widths,
+                        measuredWidth: maxWidth,
                         columnAlignments: table.columnAlignments,
                         rows: rows,
                         delimiterRange: table.delimiterRow.map {

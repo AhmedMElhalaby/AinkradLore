@@ -130,6 +130,48 @@ extension MarkdownEditor.Coordinator {
                                           in: storage.string as NSString)
             + tableRegions
             + transclusionRegions
+        remeasureTablesIfTheyWereMeasuredAtAnotherWidth(in: linkView)
+    }
+
+    /// Rebuilds the table boxes when they describe a width the editor no
+    /// longer has.
+    ///
+    /// The backstop for the defect Ahmed photographed twice. Tables are
+    /// measured once and stored, so they depend on being measured at the right
+    /// MOMENT — and on first open there is no such moment: the view is created
+    /// at one width, SwiftUI lays it out at another, and the styling pass can
+    /// land on either. Correcting `applyContainerGeometry` fixed the resize
+    /// case and left the opening case, which is how a table opened wide could
+    /// show columns squeezed to `minimumColumnWidth` while the same table
+    /// looked right the instant the window was dragged.
+    ///
+    /// So rather than chase the ordering, the box now carries the width it was
+    /// measured against and this compares it with the width in force. Any
+    /// disagreement — whatever caused it — schedules one re-render. That is
+    /// the self-correcting property the transclusion path already has, and the
+    /// property a stored measurement otherwise lacks.
+    ///
+    /// Scheduled rather than immediate: this runs from inside a render, and
+    /// re-entering `renderStyles` from its own tail is how a redraw loop
+    /// starts. `isRemeasuringTables` closes the door on the second one.
+    private func remeasureTablesIfTheyWereMeasuredAtAnotherWidth(in tv: NSTextView) {
+        guard !isRemeasuringTables else { return }
+        let current = textColumnWidth(of: tv)
+        let stale = tableRegions.contains { region in
+            guard case .table(let box, _) = region.kind else { return false }
+            return abs(box.measuredWidth - current) > 0.5
+        }
+        guard stale else { return }
+        isRemeasuringTables = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { self.isRemeasuringTables = false }
+            // Forced, for the reason `applyContainerGeometry` forces it: a
+            // width change is invisible to `isRenderStale`, which compares the
+            // text and the tokens only.
+            self.renderedSnapshot = nil
+            self.applyStyles()
+        }
     }
 
     /// The width a line of text actually has, which is what decides whether a
