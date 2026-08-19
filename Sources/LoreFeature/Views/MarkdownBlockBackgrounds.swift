@@ -31,6 +31,25 @@ enum MarkdownBlockBackgrounds {
         /// The associated value is what to DRAW, never what the document says —
         /// the source text is untouched, as everywhere else here.
         case listMarker(String)
+        /// The substitute for a COLLAPSED task marker: a real checkbox, drawn
+        /// in the gutter where `[ ]` / `[x]` used to be spelled out.
+        ///
+        /// A task item draws this INSTEAD of a bullet, not as well as one.
+        /// Obsidian shows one control per task, and a note that drew `• ☐` on
+        /// every line would read as two lists interleaved.
+        case checkbox(Bool)
+        /// A drawn horizontal rule, standing in for a collapsed `---`.
+        case rule
+        /// The rounded pill behind an inline `#tag`.
+        ///
+        /// DRAWN rather than attributed, unlike the flat `.backgroundColor`
+        /// this replaces. A per-glyph background cannot be padded or rounded,
+        /// so a "chip" was a tight square rectangle hugging the letters —
+        /// which reads as a selection highlight or a rendering fault, not as a
+        /// tag. A tag never wraps (it contains no spaces), so one bounding
+        /// rect is always the whole of it — which is why this is thirty lines
+        /// and the code panel, which does wrap, needed sixty.
+        case tagPill
         /// A tinted panel plus a coloured bar behind an Obsidian callout, and
         /// the icon and heading drawn on its first line.
         ///
@@ -160,15 +179,37 @@ enum MarkdownBlockBackgrounds {
     ///   actually SAYS — `1.` and `7.` must not both draw as `1.`. `nil` (the
     ///   default, used by callers that only care about the block decorations)
     ///   emits no list markers rather than guessing at one.
+    /// - Parameter tagPills: `EditorSettings.renderTagsAsChips`, resolved by
+    ///   the theme. The setting is honoured HERE rather than at the styling
+    ///   call site because the chip is now a drawn region rather than a text
+    ///   attribute — with it off, no region is emitted at all and a tag is
+    ///   simply tinted text.
     static func regions(for spans: [StyleSpan], length: Int,
                         limitedTo window: NSRange? = nil,
-                        in text: NSString? = nil) -> [Region] {
-        spans.compactMap { span in
+                        in text: NSString? = nil,
+                        tagPills: Bool = false) -> [Region] {
+        // The lines that carry a checkbox, so the bullet on those lines can be
+        // suppressed. Collected in one pass up front rather than searched per
+        // bullet, which would be quadratic on a long task list.
+        var taskLines: Set<Int> = []
+        if let text {
+            for span in spans {
+                guard case .checkbox = span.kind else { continue }
+                let r = NSRange(location: span.range.lowerBound, length: span.range.count)
+                guard NSMaxRange(r) <= text.length else { continue }
+                taskLines.insert(text.lineRange(for: r).location)
+            }
+        }
+        return spans.compactMap { span in
             var r = NSRange(location: span.range.lowerBound, length: span.range.count)
             guard r.length > 0, NSMaxRange(r) <= length else { return nil }
 
             let kind: Kind
             switch span.kind {
+            case .thematicBreak: kind = .rule
+            case .tag:
+                guard tagPills else { return nil }
+                kind = .tagPill
             case .codeBlock: kind = .codePanel
             case .blockQuote: kind = .quoteBar
             case .callout(let callout):
@@ -186,7 +227,22 @@ enum MarkdownBlockBackgrounds {
                                 title: header?.titleRange == nil
                                     ? callout.displayTitle : nil,
                                 marker: marker)
+            case .checkbox(let done):
+                // Drawn only where the source is collapsed, decided at draw
+                // time from geometry — the same self-correcting witness the
+                // callout heading and the list marker use, and for the same
+                // reason: reveal moves on a caret press, which does not
+                // rebuild these regions.
+                guard NSMaxRange(r) <= length else { return nil }
+                return Region(kind: .checkbox(done), range: r)
+
             case .marker(of: .listBullet):
+                // A TASK item's bullet is not drawn: its checkbox stands where
+                // the bullet would, and drawing both would put `• ☐` on every
+                // line of a task list.
+                if let text, taskLines.contains(text.lineRange(for: r).location) {
+                    return nil
+                }
                 // NOT clipped to the window: a marker is two or three
                 // characters, so intersecting it would draw half a `10.`. It is
                 // either wholly inside the styled window or it is not drawn.
@@ -261,6 +317,11 @@ enum MarkdownBlockBackgrounds {
     static let codePanelPadding: CGFloat = 8
     /// The gap between a drawn list marker and the item's text.
     static let listMarkerGap: CGFloat = 5
+    /// How far a tag's pill extends past the tag's own glyphs. Horizontal is
+    /// generous and vertical is not: a pill wants air at its ends, and a tall
+    /// one collides with the line above.
+    static let tagPillPaddingH: CGFloat = 5
+    static let tagPillPaddingV: CGFloat = 1
     /// Below this rendered width a marker's source is COLLAPSED and its
     /// substitute must be drawn; at or above it the real characters are on
     /// screen — the caret is in the block — and drawing would double them.
@@ -320,6 +381,12 @@ enum MarkdownBlockBackgrounds {
                 drawListMarker(glyph, at: region.range, columnX: x,
                                palette: palette, font: font, in: textView,
                                origin: origin, dirtyRect: dirtyRect)
+                continue
+            }
+            if case .checkbox(let done) = region.kind {
+                drawCheckbox(done, at: region.range, columnX: x,
+                             palette: palette, font: font, in: textView,
+                             origin: origin, dirtyRect: dirtyRect)
                 continue
             }
             if case .table(let box, let marker) = region.kind {
@@ -390,6 +457,21 @@ enum MarkdownBlockBackgrounds {
                 palette.codePanel.setFill()
                 NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
                              yRadius: cornerRadius).fill()
+            case .tagPill:
+                let pill = rect.insetBy(dx: -tagPillPaddingH, dy: -tagPillPaddingV)
+                guard pill.intersects(dirtyRect) else { continue }
+                NSColor(palette.tokens.accentPrimary).withAlphaComponent(0.14).setFill()
+                NSBezierPath(roundedRect: pill, xRadius: pill.height / 2,
+                             yRadius: pill.height / 2).fill()
+            case .rule:
+                // Centred in the line the paragraph style reserved, full
+                // measure. `barWidth`'s sibling constant rather than a literal
+                // 1: on a Retina display a hairline that is not a device pixel
+                // renders as a grey smear, and 1 pt is the honest minimum.
+                let line = NSRect(x: x, y: rect.midY - 0.5, width: width, height: 1)
+                guard line.intersects(dirtyRect) else { continue }
+                palette.quoteBar.setFill()
+                line.fill()
             case .quoteBar:
                 let bar = NSRect(x: x, y: rect.minY,
                                  width: barWidth, height: rect.height)
@@ -397,7 +479,7 @@ enum MarkdownBlockBackgrounds {
                 palette.quoteBar.setFill()
                 NSBezierPath(roundedRect: bar, xRadius: barWidth / 2,
                              yRadius: barWidth / 2).fill()
-            case .listMarker, .callout, .math, .table, .transclusion:
+            case .listMarker, .checkbox, .callout, .math, .table, .transclusion:
                 break   // handled above, before the rect is taken
             }
         }
@@ -441,6 +523,59 @@ enum MarkdownBlockBackgrounds {
                           width: size.width, height: size.height)
         guard rect.intersects(dirtyRect) else { return }
         (glyph as NSString).draw(in: rect, withAttributes: attributes)
+    }
+
+    /// Draws a collapsed task marker's substitute: a real checkbox.
+    ///
+    /// Deliberately the same shape as `drawListMarker` — same collapsed-width
+    /// witness, same gutter placement, same clamp against running out of
+    /// column — because it answers the same question about a different glyph.
+    /// The two are not merged into one function: a checkbox is an SF Symbol
+    /// with a fill state and a tint that means something, a bullet is a
+    /// character, and folding them together would mean a parameter list that
+    /// is really two functions wearing one name.
+    ///
+    /// The symbol is DRAWN, never inserted. The document still says `[x]`.
+    @MainActor
+    private static func drawCheckbox(_ done: Bool, at range: NSRange,
+                                     columnX x: CGFloat, palette: Palette,
+                                     font: NSFont,
+                                     in textView: NSTextView, origin: NSPoint,
+                                     dirtyRect: NSRect) {
+        let markerRect = boundingRect(of: range, in: textView)
+        guard !markerRect.isNull else { return }
+        // Collapsed means the caret is elsewhere and the box stands in for the
+        // source. Revealed means the writer is editing `[x]` itself, and
+        // painting a checkbox over it would double the control.
+        guard markerRect.width < collapsedMarkerWidth else { return }
+
+        let withContent = NSRange(location: range.location,
+                                  length: min(range.length + 1,
+                                              (textView.string as NSString).length
+                                                - range.location))
+        var line = boundingRect(of: withContent, in: textView)
+        if line.isNull || line.height <= 0 { line = markerRect }
+        guard line.height > 0 else { return }
+        line = line.offsetBy(dx: origin.x, dy: origin.y)
+        let textStart = markerRect.minX + origin.x
+
+        let side = font.pointSize
+        let drawX = max(x, textStart - side - listMarkerGap)
+        let box = NSRect(x: drawX, y: line.midY - side / 2, width: side, height: side)
+        guard box.intersects(dirtyRect) else { return }
+
+        guard let symbol = NSImage(systemSymbolName: done ? "checkmark.square.fill" : "square",
+                                   accessibilityDescription: done ? "checked" : "unchecked")
+        else { return }
+        let configured = symbol.withSymbolConfiguration(
+            .init(pointSize: side, weight: .regular)) ?? symbol
+        configured.isTemplate = true
+        // A done box is tinted; an empty one is quiet foreground, like the
+        // bullet it replaced. Colour marks the state, so an unchecked list does
+        // not read as a column of controls demanding attention.
+        (done ? NSColor(palette.tokens.accentTertiary) : palette.listMarker).set()
+        configured.draw(in: box, from: .zero, operation: .sourceOver,
+                        fraction: 1, respectFlipped: true, hints: nil)
     }
 
     /// The union of the line rects `range` occupies, in TEXT CONTAINER

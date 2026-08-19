@@ -284,11 +284,13 @@ enum MarkdownStyleRenderer {
             // `EditorSettings.renderTagsAsChips`.
             storage.addAttribute(.foregroundColor,
                                  value: NSColor(tokens.accentPrimary), range: r)
-            if theme.renderTagsAsChips {
-                storage.addAttribute(.backgroundColor,
-                                     value: NSColor(tokens.accentPrimary).withAlphaComponent(0.14),
-                                     range: r)
-            }
+            // The chip itself is DRAWN — see `MarkdownBlockBackgrounds.Kind
+            // .tagPill`. It used to be a `.backgroundColor` here, which is a
+            // per-glyph attribute and therefore cannot round its corners or
+            // pad its ends: the result was a tight rectangle around the
+            // letters that read as a selection, not as a tag. Nothing is
+            // written here for the chip any more; the setting is honoured
+            // where the region is built.
 
         case .blockID:
             // Near-invisible when the caret is elsewhere. It is machinery the
@@ -419,6 +421,16 @@ enum MarkdownStyleRenderer {
                                                                                      tokens: tokens),
                                  range: r)
 
+        case .thematicBreak:
+            // No text styling at all: every character of the line is notation,
+            // it collapses whole, and what the reader sees is the rule
+            // `MarkdownBlockBackgrounds` draws. Reserving the line's HEIGHT is
+            // the one thing needed here, or a collapsed rule leaves a 0.01 pt
+            // line with a rule painted through the paragraph below it.
+            storage.addAttribute(.paragraphStyle,
+                                 value: MarkdownParagraphStyles.thematicBreakStyle(theme: theme),
+                                 range: (storage.string as NSString).paragraphRange(for: r))
+
         case .table:
             // The table itself carries no text styling: its cells are ordinary
             // prose and style as such. What makes it a table is the alignment
@@ -443,8 +455,25 @@ enum MarkdownStyleRenderer {
                                      .withAlphaComponent(isRendered ? 1.0 : 0.85),
                                  range: r)
 
-        case .checkbox:
+        case .checkbox(let done):
             storage.addAttribute(.foregroundColor, value: NSColor(tokens.accentTertiary), range: r)
+            // A DONE task strikes and fades its own line — which is most of
+            // what makes a task list scannable, and the part a drawn box
+            // cannot say on its own. Obsidian does the same.
+            //
+            // Over the PARAGRAPH, for the reason the list case spells out:
+            // `endEditing` extends each paragraph's FIRST character's
+            // attributes across it, and the checkbox span starts partway in.
+            // The item's own children (a link, inline code) are appended after
+            // this span and still win over their own ranges, so a link inside
+            // a finished task keeps its colour and merely gains the line.
+            guard done else { break }
+            let paragraph = (storage.string as NSString).paragraphRange(for: r)
+            storage.addAttribute(.strikethroughStyle,
+                                 value: NSUnderlineStyle.single.rawValue, range: paragraph)
+            storage.addAttribute(.foregroundColor,
+                                 value: NSColor(tokens.foreground).withAlphaComponent(0.55),
+                                 range: paragraph)
 
         case .listItem:
             // Foreground unchanged by design: a list item is most of a note, and

@@ -106,6 +106,22 @@ enum MarkdownParagraphStyles {
         return s
     }
 
+    /// The line a thematic break occupies once its source has collapsed.
+    ///
+    /// A fixed height, like an embedded image's: the source is 0.01 pt while
+    /// hidden, so without this the rule would be drawn through a line only a
+    /// point tall and land on the paragraph beneath it. The height is the room
+    /// the rule needs plus air on both sides — a `---` is a separator, and a
+    /// separator with no space around it separates nothing.
+    static func thematicBreakStyle(theme: MarkdownTheme) -> NSParagraphStyle {
+        let s = NSMutableParagraphStyle()
+        let height = max(12, theme.paragraphSpacing * 1.5)
+        s.minimumLineHeight = height
+        s.maximumLineHeight = height
+        s.paragraphSpacing = theme.paragraphSpacing
+        return s
+    }
+
     static func style(for block: MarkdownBlock, theme: MarkdownTheme) -> NSParagraphStyle {
         let s = NSMutableParagraphStyle()
         s.lineHeightMultiple = theme.lineHeightMultiple

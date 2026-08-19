@@ -123,7 +123,8 @@ extension MarkdownEditor.Coordinator {
             MarkdownBlockBackgrounds.regions(for: styleCache.spans,
                                              length: storage.length,
                                              limitedTo: window,
-                                             in: storage.string as NSString)
+                                             in: storage.string as NSString,
+                                             tagPills: theme.renderTagsAsChips)
             + MarkdownMathStyling.regions(for: styleCache.spans,
                                           font: theme.bodyFont,
                                           in: storage.string as NSString)
