@@ -166,11 +166,30 @@ enum MarkdownTableStyling {
                           options: [.usesLineFragmentOrigin, .usesFontLeading])
             }
 
+            // A GRID, not a set of underlines.
+            //
+            // This drew one horizontal rule per row and nothing else, which
+            // reads as ruled paper rather than as a table: with no verticals a
+            // reader cannot see where one column ends and the next begins, and
+            // an empty cell is indistinguishable from a short one. Obsidian
+            // draws every edge, and a table is the one construct where the
+            // borders ARE the structure.
             rule.setFill()
-            // Under the header, a firm rule; between body rows, a hairline.
             let thickness: CGFloat = row.isHeader ? 1 : 0.5
             NSRect(x: rect.minX, y: rect.maxY - thickness,
                    width: box.totalWidth, height: thickness).fill()
+            // The row's top edge, so the first row is closed rather than open.
+            if row.isHeader {
+                NSRect(x: rect.minX, y: rect.minY,
+                       width: box.totalWidth, height: thickness).fill()
+            }
+            // One vertical per column boundary, plus the two outer edges.
+            // Hairlines throughout: a table wants to be read across, and
+            // verticals as heavy as the header rule fight the text.
+            for column in 0...box.columnWidths.count {
+                let x = rect.minX + box.columnOrigin(column)
+                NSRect(x: x, y: rect.minY, width: 0.5, height: rect.height).fill()
+            }
         }
     }
 

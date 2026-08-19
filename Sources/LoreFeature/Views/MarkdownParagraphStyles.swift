@@ -180,7 +180,9 @@ enum MarkdownParagraphStyles {
         let height = max(12, theme.paragraphSpacing * 1.5)
         s.minimumLineHeight = height
         s.maximumLineHeight = height
-        s.paragraphSpacing = theme.paragraphSpacing
+        // Zero, for the reason `.body` is zero: the blank lines an author puts
+        // around a rule are real lines and already space it.
+        s.paragraphSpacing = 0
         return s
     }
 
@@ -191,7 +193,31 @@ enum MarkdownParagraphStyles {
 
         switch block {
         case .body:
-            break
+            // NO paragraph spacing, and this is the single biggest correction
+            // in M9.
+            //
+            // `paragraphSpacing` is an AppKit paragraph attribute, and AppKit's
+            // paragraph is a run of text ending at a NEWLINE — not markdown's
+            // paragraph, which ends at a BLANK line. So 12 pt was being pushed
+            // between the two source lines of
+            //
+            //     Manual walkthrough for branch `x`.
+            //     Covers all 8 implemented tasks.
+            //
+            // which markdown says is ONE paragraph with a soft break, and
+            // Obsidian renders as two adjacent lines. Worse, a blank line is
+            // itself a paragraph: it took a full line box (27 pt) AND the
+            // spacing after the paragraph above it AND its own spacing after —
+            // 51 pt of dead air where the source asked for one blank line.
+            // Measured on a real note, that is what made the document read as
+            // sparse and broken next to Obsidian.
+            //
+            // Obsidian's Live Preview does not do this: every source line is a
+            // line, a blank line is a blank line, and the separation between
+            // paragraphs IS the blank line the author typed. Nothing is added.
+            // Setting this to zero is what matches it — the blank line already
+            // carries the gap, and doubling it was the bug.
+            s.paragraphSpacing = 0
 
         case .heading(let level):
             s.paragraphSpacingBefore = theme.headingSpacingBefore(level)
