@@ -103,6 +103,25 @@ public struct StyleSpan: Equatable, Sendable {
             case .math: return true
             }
         }
+
+        /// Whether the caret landing anywhere inside this span reveals ALL of
+        /// it, rather than only the line the caret is on.
+        ///
+        /// Two different reasons lead here. A span delimited by ONE marker
+        /// pair (`isDelimitedByASinglePair`) must reveal whole or the caret
+        /// stands in syntax whose other half is hidden.
+        ///
+        /// A TABLE is here for a second reason, found by watching what the
+        /// line-scoped rule actually does to one: the caret in a single row
+        /// put THAT row back to `| a | b |` while the rows above and below
+        /// stayed painted as a grid — a strip of raw markdown wedged inside a
+        /// table, which is the "glitching when I click on the table" Ahmed
+        /// reported. A table is one object on screen; it has to be one object
+        /// when it comes apart, too.
+        var revealsWholeOnCaretEntry: Bool {
+            if case .table = self { return true }
+            return isDelimitedByASinglePair
+        }
     }
     /// UTF-16 offsets into the EDITOR's full string, frontmatter included.
     /// Not Character offsets — `LinkSpan.targetRange` uses those, and mixing

@@ -251,10 +251,23 @@ final class MarkdownTableTests: XCTestCase {
         }
     }
 
-    /// And the converse: the caret's own row comes back at full size, so it can
-    /// be edited. The rest of the table stays drawn.
+    /// And the converse: entering the table brings its source back at full
+    /// size, so it can be edited — ALL of it, not just the caret's row.
+    ///
+    /// This test used to assert the opposite of its own last clause: that the
+    /// caret's row returned to source "while every other row stays drawn".
+    /// That passed, and it was the defect — Ahmed photographed the result on
+    /// 2026-08-19, a strip of raw `| a | b |` wedged between rows still
+    /// painted as a grid, and described it as the table glitching when he
+    /// clicked it. A table is one object on screen and has to come apart as
+    /// one, so the assertion is rewritten rather than relaxed.
+    ///
+    /// This is still not Obsidian, which keeps the grid painted and edits
+    /// cells in place. That needs one paragraph per cell and a markdown row is
+    /// one paragraph; see `MarkdownTableLayout`. What is pinned here is the
+    /// coherent fallback.
     @MainActor
-    func test_theCaretsRowReturnsToFullSizeSource() throws {
+    func test_theWholeTableReturnsToFullSizeSourceWithTheCaretInIt() throws {
         let body = "intro\n\n| Wave | Tasks |\n|---|---|\n| one | two |\n"
         let (coordinator, tv) = editor(body)
         try withExtendedLifetime(coordinator) { () -> Void in
@@ -271,8 +284,9 @@ final class MarkdownTableTests: XCTestCase {
             let body_ = (body as NSString).range(of: "| one | two |")
             let other = storage.attribute(.font, at: body_.location + 3,
                                           effectiveRange: nil) as? NSFont
-            XCTAssertLessThan(other?.pointSize ?? 99, 1.0,
-                              "while every other row stays drawn")
+            XCTAssertGreaterThan(other?.pointSize ?? 0, 1.0,
+                                 "and so must every OTHER row — half a grid and half "
+                                 + "raw markdown is not a table")
         }
     }
 
