@@ -107,6 +107,23 @@ struct LoreSettingsView: View {
                     }))
             }
 
+            AinkradFormRow(title: "Experimental CodeMirror editor",
+                           help: "Renders with CodeMirror instead of the native "
+                               + "editor. Tables and embeds can be edited in "
+                               + "place. Link completion, hover previews and "
+                               + "Cmd-click are not wired up yet, and a file "
+                               + "with mixed line endings will have them "
+                               + "normalised. Reopen the note after changing "
+                               + "this.") {
+                AinkradToggle(isOn: Binding(
+                    get: { store.editorSettings.usesCM6 },
+                    set: { on in
+                        var next = store.editorSettings
+                        next.usesCM6 = on
+                        store.setEditorSettings(next)
+                    }))
+            }
+
             // The editor's OWN settings — not inherited from the host theme.
             // The host owns hue; how large the text is and how wide the column
             // runs are properties of the document and the person reading it.

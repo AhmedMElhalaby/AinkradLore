@@ -179,6 +179,17 @@ private struct MarkdownDocumentEditor: View {
                     }
                 }
 
+            // E4T1: the CodeMirror surface, behind `EditorSettings.usesCM6`
+            // and OFF by default. Both surfaces bind the SAME `body_`, so the
+            // document is unaffected by which one is showing and switching is
+            // reversible. The affordances below — completion, hover preview,
+            // Cmd-click — are still native-only; that is E2, and it is the
+            // reason this defaults off rather than the flag being cosmetic.
+            if ctx.editorSettings.usesCM6 {
+                CM6EditorView(text: $body_, tokens: ctx.theme.tokens,
+                              settings: ctx.editorSettings)
+                    .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
+            } else {
             // Only markdown gets the link affordances: wikilinks are markdown
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
@@ -219,6 +230,7 @@ private struct MarkdownDocumentEditor: View {
                 .ainkradContextMenu(EditorMenuItems.build(selection: menuSelection,
                                                           suggestions: menuSuggestions,
                                                           actions: menuActions))
+            }
         }
         .background(ctx.theme.tokens.background)
         .onAppear {

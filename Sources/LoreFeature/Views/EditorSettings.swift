@@ -113,6 +113,21 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// because some people want the `#` typographically quiet in long prose.
     public var renderTagsAsChips: Bool = true
 
+    /// Render with CodeMirror instead of the native `NSTextView`.
+    ///
+    /// OFF by default, and it stays off until the parity checklist in the M10
+    /// plan is signed off. Both surfaces read and write the same document
+    /// string, so switching is reversible and costs nothing but a reload of the
+    /// pane.
+    ///
+    /// The flag exists because the two editors have different SHAPES of defect,
+    /// not different amounts. The native one cannot put a caret inside a
+    /// rendered table; CodeMirror can, and normalises the line endings of a
+    /// mixed-ending file on the way through (see `CM6LineEndings`). Being able
+    /// to fall back per reader, rather than per release, is what makes it
+    /// reasonable to ship the second one at all.
+    public var usesCM6: Bool = false
+
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
     /// line-height 1.5, paragraph spacing 12, measure 760). That is not
     /// nostalgia: `MarkdownThemeTests` asserts the scale relationships those
@@ -126,13 +141,15 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// first time it is opened reads as broken rather than as focused.
     public init(density: Density, measure: Measure, zoomStep: Int,
                 focusMode: Bool = false, typewriterMode: Bool = false,
-                renderTagsAsChips: Bool = true) {
+                renderTagsAsChips: Bool = true,
+                usesCM6: Bool = false) {
         self.density = density
         self.measure = measure
         self.zoomStep = Self.clampZoom(zoomStep)
         self.focusMode = focusMode
         self.typewriterMode = typewriterMode
         self.renderTagsAsChips = renderTagsAsChips
+        self.usesCM6 = usesCM6
     }
 
     /// Custom `Decodable` rather than the synthesised one: `EditorSettings` is
@@ -150,6 +167,7 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// all-or-nothing failure.
     private enum CodingKeys: String, CodingKey {
         case density, measure, zoomStep, focusMode, typewriterMode, renderTagsAsChips
+        case usesCM6
     }
 
     public init(from decoder: Decoder) throws {
@@ -165,6 +183,7 @@ public struct EditorSettings: Equatable, Sendable, Codable {
         typewriterMode = try container.decodeIfPresent(Bool.self, forKey: .typewriterMode) ?? false
         renderTagsAsChips = try container.decodeIfPresent(Bool.self, forKey: .renderTagsAsChips)
             ?? true
+        usesCM6 = try container.decodeIfPresent(Bool.self, forKey: .usesCM6) ?? false
     }
 
     /// Font FAMILY is deliberately not modelled here.
@@ -203,14 +222,14 @@ public struct EditorSettings: Equatable, Sendable, Codable {
         EditorSettings(density: density, measure: measure,
                        zoomStep: Self.clampZoom(zoomStep + step),
                        focusMode: focusMode, typewriterMode: typewriterMode,
-                       renderTagsAsChips: renderTagsAsChips)
+                       renderTagsAsChips: renderTagsAsChips, usesCM6: usesCM6)
     }
 
     /// Zoom reset to the density's own size (⌘0).
     public func zoomReset() -> EditorSettings {
         EditorSettings(density: density, measure: measure, zoomStep: 0,
                        focusMode: focusMode, typewriterMode: typewriterMode,
-                       renderTagsAsChips: renderTagsAsChips)
+                       renderTagsAsChips: renderTagsAsChips, usesCM6: usesCM6)
     }
 }
 

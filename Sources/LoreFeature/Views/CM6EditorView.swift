@@ -143,6 +143,10 @@ struct CM6EditorView: NSViewRepresentable {
                 "--text-faint": Self.css(tokens.foreground, alpha: 0.4),
                 "--body-size": "\(theme.bodyFont.pointSize)px",
                 "--line-height": "\(theme.lineHeightMultiple)",
+                // The measure, as a real cap. `nil` means "fill the width",
+                // which in CSS is `none` rather than a very large number.
+                "--measure": theme.maxMeasure.map { "\($0)px" } ?? "none",
+                "--content-inset": "\(theme.contentInset)px",
             ]
             let assignments = css.map {
                 "d.style.setProperty('\($0.key)', '\($0.value)');"
