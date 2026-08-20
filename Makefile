@@ -27,6 +27,11 @@ DEV_HOST := $(HOME)/Home/Projects/Ainkrad/Ainkrad/build/Build/Products/Debug/Ain
 AINKRAD := $(HOME)/Home/Projects/Ainkrad/Ainkrad
 DEBUG_APP := $(AINKRAD)/build/Build/Products/Debug/Ainkrad.app
 
+# The CM6 bundle. `dist/` is COMMITTED, so a clean checkout — and the release
+# script, and CI — build the plugin with no node installed. Only someone
+# changing the editor's JavaScript needs this target.
+editor: ; cd Editor && npm install && npm run build
+
 generate: ; xcodegen generate
 build: generate ; xcodebuild -scheme LorePlugin -configuration Debug -derivedDataPath build -destination 'platform=macOS' build
 # `ditto`, not `rm -rf` + `cp -R`: copying a bundle INTO a directory that

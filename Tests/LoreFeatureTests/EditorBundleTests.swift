@@ -1,0 +1,131 @@
+import AppKit
+import WebKit
+import XCTest
+
+/// E1T1: the vendored CodeMirror bundle loads, and renders what it claims to.
+///
+/// The spike proved the engine works. This proves THIS repo's copy of it works
+/// — a different question, and the one that breaks when a file is moved.
+final class EditorBundleTests: XCTestCase {
+
+    private var windows: [NSWindow] = []
+    private var webView: WKWebView!
+    override func tearDown() { windows.removeAll(); super.tearDown() }
+
+    /// The bundle as it sits in the repo. A built product path would test the
+    /// copy phase; this tests the source of truth.
+    private static var distURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // LoreFeatureTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Editor/dist")
+    }
+
+    // MARK: - it is actually there
+
+    func test_theBundleIsCommittedAndNotEmpty() throws {
+        for name in ["editor.js", "index.html"] {
+            let url = Self.distURL.appendingPathComponent(name)
+            let size = try FileManager.default
+                .attributesOfItem(atPath: url.path)[.size] as? Int ?? 0
+            XCTAssertGreaterThan(size, 512, "\(name) is missing or truncated")
+        }
+        // `index.html` was silently truncated to zero bytes once, by a shell
+        // redirect that created the file before the command feeding it failed.
+        // A size assertion is the cheapest guard against that whole class.
+        let html = try String(contentsOf: Self.distURL.appendingPathComponent("index.html"),
+                              encoding: .utf8)
+        XCTAssertTrue(html.contains("editor.js"), "the shell must load the bundle")
+        XCTAssertTrue(html.contains("--font-text"), "theming tokens must be present")
+    }
+
+    // MARK: - it runs
+
+    @MainActor
+    private func boot(_ text: String) throws {
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = webView
+        windows.append(window)
+        webView.loadFileURL(Self.distURL.appendingPathComponent("index.html"),
+                            allowingReadAccessTo: Self.distURL)
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if (try? js("typeof window.loreEditor !== 'undefined'")) as? Bool == true { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        _ = try js("window.loreEditor.init(\(Self.jsString(text)))")
+    }
+
+    @MainActor @discardableResult
+    private func js(_ source: String) throws -> Any? {
+        var result: Any?; var failure: Error?; var done = false
+        webView.evaluateJavaScript(source) { v, e in result = v; failure = e; done = true }
+        let deadline = Date().addingTimeInterval(20)
+        while !done, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        if let failure { throw failure }
+        return result
+    }
+
+    private static func jsString(_ s: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: [s])
+        let array = String(data: data, encoding: .utf8)!
+        return String(array.dropFirst().dropLast())
+    }
+
+    @MainActor
+    func test_theVendoredBundleBootsAndHoldsTheDocument() throws {
+        let doc = "# Title\n\nSome prose with `code` in it.\n"
+        try boot(doc)
+        XCTAssertEqual(try js("window.loreEditor.text()") as? String, doc)
+    }
+
+    /// THE assertion the spike did not make.
+    ///
+    /// CodeMirror's base theme sets `font-family: monospace` on `.cm-content`.
+    /// The spike put the family on `.cm-editor`, lost on specificity, and
+    /// rendered every document monospaced — while its S3 "theming passes"
+    /// result covered only colour and size. That is the same defect M9 spent a
+    /// milestone on: the font not being what the code appears to say. So the
+    /// COMPUTED family is asserted here, not the stylesheet's intent.
+    @MainActor
+    func test_proseIsProportionalAndCodeIsNot() throws {
+        try boot("Some prose with `code` in it.\n")
+        let prose = try js("getComputedStyle(document.querySelector('.cm-content')).fontFamily")
+            as? String ?? ""
+        XCTAssertFalse(prose.contains("monospace"),
+                       "prose must not be monospaced — got \(prose)")
+        XCTAssertTrue(prose.contains("system-ui") || prose.contains("apple-system"),
+                      "prose must use the host's text face — got \(prose)")
+
+        // And code still IS monospaced, or the distinction carries nothing.
+        //
+        // Located by its TEXT, not by a class name. The first version of this
+        // looked for `.tok-monospace`, which does not exist — CodeMirror's
+        // HighlightStyle generates its own opaque class names — so the
+        // selector fell through to "any span" and reported the font of
+        // whatever that happened to be. It printed a plausible value and
+        // asserted nothing, which is worse than no check at all.
+        let mono = try js("""
+        (() => {
+          const spans = [...document.querySelectorAll('.cm-content span')];
+          const el = spans.find(s => s.textContent === 'code');
+          return el ? getComputedStyle(el).fontFamily : 'NOT FOUND';
+        })()
+        """) as? String ?? ""
+        XCTAssertTrue(mono.contains("mono") || mono.contains("Menlo"),
+                      "inline code must be monospaced — got \(mono)")
+        print("BUNDLE prose=\(prose) code=\(mono)")
+    }
+
+    @MainActor
+    func test_tablesStillRenderAsGridsFromTheVendoredCopy() throws {
+        try boot("| A | B |\n|---|---|\n| one | two |\n")
+        XCTAssertEqual(try js("window.loreEditor.tableCount()") as? Int, 1)
+        XCTAssertEqual(try js("window.loreEditor.focusFirstCell()") as? Bool, true)
+    }
+}
