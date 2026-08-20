@@ -36,9 +36,17 @@ struct CM6EditorView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let coordinator = context.coordinator
-        let config = WKWebViewConfiguration()
-        config.userContentController.add(coordinator, name: Coordinator.bridgeName)
-        let webView = WKWebView(frame: .zero, configuration: config)
+        // Pooled, not created — see `CM6EditorSurfacePool`. A surface costs
+        // ~40 MB, so switching notes must reuse one rather than open another.
+        let (webView, isPreloaded) = CM6EditorSurfacePool.shared.acquire { config in
+            config.userContentController.add(coordinator, name: Coordinator.bridgeName)
+        }
+        if isPreloaded {
+            // A reused surface already has the handler of whoever had it last
+            // removed by `release`, so this one has to be installed now.
+            webView.configuration.userContentController.add(coordinator,
+                                                            name: Coordinator.bridgeName)
+        }
         webView.navigationDelegate = coordinator
         // No bounce, no zoom: this is a text editor, not a web page.
         webView.setValue(false, forKey: "drawsBackground")
@@ -46,12 +54,25 @@ struct CM6EditorView: NSViewRepresentable {
         coordinator.pendingDocument = text
         coordinator.pendingTheme = (tokens, settings)
 
+        if isPreloaded {
+            // `didFinish` will NOT fire again for a page that is already
+            // loaded, so the boot that normally happens there happens here.
+            coordinator.adoptPreloadedSurface()
+            return webView
+        }
         guard let index = Coordinator.bundledIndexURL else {
             assertionFailure("Editor/dist is missing from the plugin bundle")
             return webView
         }
         webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
         return webView
+    }
+
+    /// Hand the surface back when the pane goes away, rather than letting a
+    /// ~40 MB web view be deallocated and rebuilt for the next note.
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.webView = nil
+        CM6EditorSurfacePool.shared.release(webView, handlerName: Coordinator.bridgeName)
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
@@ -150,7 +171,21 @@ struct CM6EditorView: NSViewRepresentable {
             if text.wrappedValue != incoming { text.wrappedValue = incoming }
         }
 
+        /// The boot path for a POOLED surface, whose page is already loaded and
+        /// whose `didFinish` therefore never fires again.
+        func adoptPreloadedSurface() {
+            // Deliberately routed through the same code the fresh path uses,
+            // so the two cannot drift: a reused surface that initialised
+            // slightly differently from a new one is a bug that only appears
+            // on the second note opened.
+            finishLoading()
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            finishLoading()
+        }
+
+        private func finishLoading() {
             isLoaded = true
             if let document = pendingDocument {
                 ending = CM6LineEndings.dominant(in: document)
