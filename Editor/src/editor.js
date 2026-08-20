@@ -109,6 +109,16 @@ const tablePlugin = EditorView.decorations.compute(["doc", "selection"],
                                                    state => buildDecorations(state))
 
 let view = null
+
+// Is a change arriving FROM Swift right now?
+//
+// The edit loop this guards is the classic one: Swift pushes a document, CM6
+// reports it as a change, Swift treats that as user input and pushes again.
+// Under a fast typist the two chase each other and keystrokes are dropped —
+// silently, and only under load, which is the worst way to find out. So a
+// change Swift asked for is never reported back to Swift.
+let applyingFromSwift = false
+
 window.loreEditor = {
   init(text) {
     const state = EditorState.create({
@@ -127,10 +137,9 @@ window.loreEditor = {
                                           autocorrect: "on",
                                           autocapitalize: "off" }),
         EditorView.updateListener.of(u => {
-          if (u.docChanged && window.webkit?.messageHandlers?.lore) {
-            window.webkit.messageHandlers.lore.postMessage(
-              { kind: "doc", text: u.state.doc.toString() })
-          }
+          if (!u.docChanged || applyingFromSwift) return
+          window.webkit?.messageHandlers?.lore?.postMessage(
+            { kind: "doc", text: u.state.doc.toString() })
         }),
       ],
     })
@@ -138,6 +147,41 @@ window.loreEditor = {
     return view.state.doc.length
   },
   text() { return view.state.doc.toString() },
+
+  /// Test hooks. `insertAtEnd` is what a keystroke amounts to, and
+  /// `__setDocumentCalls` counts pushes that actually reached the editor —
+  /// which is how the "Swift must not echo" rule is asserted rather than
+  /// assumed.
+  insertAtEnd(ch) {
+    view.dispatch({ changes: { from: view.state.doc.length, insert: ch } })
+    return view.state.doc.length
+  },
+  __setDocumentCalls: 0,
+
+  /// Replace the whole document because SWIFT says so — a note being opened,
+  /// or an external change on disk.
+  ///
+  /// Returns false and does nothing when the text already matches, so an
+  /// echo costs no transaction and, more importantly, cannot move the caret.
+  setDocument(text) {
+    if (!view) return false
+    if (view.state.doc.toString() === text) return false
+    window.loreEditor.__setDocumentCalls++
+    applyingFromSwift = true
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        // The caret is clamped rather than preserved at its offset: the new
+        // document is a DIFFERENT document, so an offset from the old one
+        // means nothing in it.
+        selection: { anchor: Math.min(view.state.selection.main.anchor, text.length) },
+      })
+    } finally {
+      applyingFromSwift = false
+    }
+    return true
+  },
+
   lines() { return view.state.doc.lines },
   tableCount() { return document.querySelectorAll(".cm-lore-table").length },
   focusFirstCell() {

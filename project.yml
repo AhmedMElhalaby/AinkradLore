@@ -125,6 +125,13 @@ targets:
       - path: Tests/LoreFeatureTests
       - path: Tests/Fixtures
         buildPhase: resources
+      # The editor bundle, so `Bundle(for:).url(forResource:)` resolves in the
+      # TEST bundle too. Without it the document-contract tests would have to
+      # reach for a repo path, and would then be testing a file the plugin does
+      # not actually ship.
+      - path: Editor/dist
+        buildPhase: resources
+        name: EditorResources
     dependencies:
       - target: LoreFeature
       - package: GRDB
