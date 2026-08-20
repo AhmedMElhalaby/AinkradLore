@@ -3,7 +3,7 @@ import { EditorView, Decoration, WidgetType, keymap, drawSelection,
          rectangularSelection, highlightActiveLine } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { markdown } from "@codemirror/lang-markdown"
-import { syntaxHighlighting, HighlightStyle } from "@codemirror/language"
+import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language"
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel } from "@codemirror/search"
 import { tags as t } from "@lezer/highlight"
 
@@ -19,6 +19,183 @@ const highlight = HighlightStyle.define([
   { tag: t.monospace, fontFamily: "var(--font-mono)" },
   { tag: t.meta, color: "var(--text-faint)" },
 ])
+
+// ---------------------------------------------------- inline live preview
+//
+// E2T0. Without this the editor shows `## Heading` and `**bold**` with their
+// syntax on screen at all times, which is not Live Preview — it is a source
+// editor with colours, and it is what the first screenshot of a real note
+// showed.
+//
+// The rule is Obsidian's and the same one the native renderer already
+// implements (`MarkdownReveal`): syntax is hidden unless the CARET IS ON ITS
+// LINE, so the marker you need to edit is the one you are standing in. Line
+// scope, not block scope — a five-item list must not show all five bullets
+// because the caret is in one of them.
+
+/// Marker node types whose text is notation and nothing else.
+///
+/// Names come from lezer-markdown. `CodeMark` covers both inline backticks and
+/// a fence's ```; `HeaderMark` covers the `#` run and a setext underline.
+const MARKER_NODES = new Set([
+  "HeaderMark", "EmphasisMark", "StrikethroughMark", "CodeMark",
+  "QuoteMark", "LinkMark", "CodeInfo",
+])
+
+/// A drawn horizontal rule, standing in for `---`.
+class RuleWidget extends WidgetType {
+  toDOM() {
+    const hr = document.createElement("hr")
+    hr.className = "cm-lore-rule"
+    return hr
+  }
+  eq() { return true }
+  ignoreEvent() { return true }
+}
+
+/// The bullet a collapsed list marker is replaced by.
+///
+/// Depth cycles disc, circle, square — the same decision M9 measured against
+/// Obsidian. An ordered item keeps its own number, because a number is already
+/// its own distinguishing mark.
+class BulletWidget extends WidgetType {
+  constructor(text, depth) { super(); this.text = text; this.depth = depth }
+  eq(other) { return other.text === this.text && other.depth === this.depth }
+  toDOM() {
+    const span = document.createElement("span")
+    span.className = "cm-lore-bullet"
+    const ordered = /\d/.test(this.text)
+    span.textContent = ordered ? this.text.trim()
+                               : ["•", "◦", "▪"][this.depth % 3]
+    return span
+  }
+  ignoreEvent() { return true }
+}
+
+function livePreviewDecorations(state) {
+  const builder = new RangeSetBuilder()
+  const doc = state.doc
+  // The lines the caret (or selection) touches. Their syntax stays visible.
+  const revealed = new Set()
+  for (const range of state.selection.ranges) {
+    const from = doc.lineAt(range.from).number
+    const to = doc.lineAt(range.to).number
+    for (let n = from; n <= to; n++) revealed.add(n)
+  }
+
+  const hidden = []
+  const lineClasses = []
+  syntaxTree(state).iterate({
+    enter: node => {
+      const line = doc.lineAt(node.from).number
+      if (node.name === "HorizontalRule") {
+        if (!revealed.has(line)) {
+          hidden.push({ from: node.from, to: node.to,
+                        deco: Decoration.replace({ widget: new RuleWidget() }) })
+        }
+        return
+      }
+      if (node.name === "FencedCode" || node.name === "CodeBlock") {
+        // A panel behind the whole fence. Marked as LINE decorations rather
+        // than one range: a `Decoration.mark` over a multi-line span paints a
+        // ragged staircase — the same reason the native renderer draws a panel
+        // instead of using a per-glyph background.
+        const first = doc.lineAt(node.from).number
+        const last = doc.lineAt(node.to).number
+        for (let n = first; n <= last; n++) {
+          const line = doc.line(n)
+          lineClasses.push({ from: line.from, cls: n === first ? "cm-lore-code-first"
+                                                : n === last ? "cm-lore-code-last"
+                                                : "cm-lore-code" })
+        }
+        return
+      }
+      if (node.name === "ListMark") {
+        if (revealed.has(line)) return
+        const text = doc.sliceString(node.from, node.to)
+        // Indentation before the marker is the nesting depth. Four spaces or a
+        // tab per level, which is what the markdown itself uses.
+        const before = doc.sliceString(doc.lineAt(node.from).from, node.from)
+        const depth = Math.floor(before.replace(/\t/g, "    ").length / 4)
+        hidden.push({ from: node.from, to: node.to,
+                      deco: Decoration.replace({
+                        widget: new BulletWidget(text, depth) }) })
+        return
+      }
+      if (!MARKER_NODES.has(node.name)) return
+      if (revealed.has(line)) return
+      hidden.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
+    },
+  })
+
+  // RangeSetBuilder demands ascending order and the tree walk does not
+  // guarantee it across node kinds.
+  // Line decorations must be added in document order along with the rest, and
+  // RangeSetBuilder takes everything at a position together — so they are
+  // merged into one sorted stream rather than added in a second pass.
+  for (const l of lineClasses) {
+    hidden.push({ from: l.from, to: l.from, line: l.cls })
+  }
+  hidden.sort((a, b) => a.from - b.from || a.to - b.to)
+  let lastTo = -1
+  for (const h of hidden) {
+    // Overlapping replacements throw. A `CodeMark` inside a `HeaderMark`'s line
+    // is legal markdown and would otherwise take the editor down.
+    if (h.line) {
+      builder.add(h.from, h.from, Decoration.line({ class: h.line }))
+      continue
+    }
+    if (h.from < lastTo) continue
+    builder.add(h.from, h.to, h.deco)
+    lastTo = h.to
+  }
+  return builder.finish()
+}
+
+const livePreview = EditorView.decorations.compute(["doc", "selection"],
+                                                   state => livePreviewDecorations(state))
+
+/// Render a cell's inline markdown into `parent`.
+///
+/// E2T1a. The cell used to be set with `textContent`, so `**Web**` appeared
+/// with its asterisks INSIDE a rendered table — visible in the first real-note
+/// screenshot, and wrong in a way that reads as the table being half-rendered.
+///
+/// A deliberate SUBSET: bold, italic, inline code. Not a markdown parser — a
+/// cell is one line of inline content, and the alternative (running CodeMirror
+/// inside a widget inside CodeMirror) is not something to reach for to make
+/// three delimiters work. Anything unrecognised is left as literal text, which
+/// is the honest failure: the reader sees what they typed.
+///
+/// Nested emphasis (`**a *b* c**`) renders the outer level only. Recorded
+/// rather than hidden; it is rare in a table cell and the fix is a real parser.
+function renderInline(text, parent) {
+  const pattern = /(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|`[^`]+`)/g
+  let index = 0
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > index) {
+      parent.appendChild(document.createTextNode(text.slice(index, match.index)))
+    }
+    const token = match[0]
+    let node
+    if (token.startsWith("**") || token.startsWith("__")) {
+      node = document.createElement("strong")
+      node.textContent = token.slice(2, -2)
+    } else if (token.startsWith("`")) {
+      node = document.createElement("code")
+      node.textContent = token.slice(1, -1)
+    } else {
+      node = document.createElement("em")
+      node.textContent = token.slice(1, -1)
+    }
+    parent.appendChild(node)
+    index = pattern.lastIndex
+  }
+  if (index < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(index)))
+  }
+}
 
 // S2, the question this spike exists for. A table's source range is REPLACED
 // by a real <table> with contenteditable cells. Typing dispatches a change to
@@ -39,9 +216,12 @@ class TableWidget extends WidgetType {
       const tr = document.createElement("tr")
       row.forEach((cell, c) => {
         const td = document.createElement(r === 0 ? "th" : "td")
-        td.textContent = cell
+        renderInline(cell, td)
         td.contentEditable = "true"
         td.dataset.r = String(r); td.dataset.c = String(c)
+        // `input` rather than `beforeinput`: the cell's text is read AFTER
+        // the browser has applied the edit, so `textContent` is what the user
+        // now sees. Reading it before would write the previous value.
         td.addEventListener("input", () => {
           const range = this.cellRanges[r] && this.cellRanges[r][c]
           if (!range) return
@@ -128,7 +308,7 @@ window.loreEditor = {
         search(), highlightSelectionMatches(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         markdown(), syntaxHighlighting(highlight),
-        tablePlugin, EditorView.lineWrapping,
+        livePreview, tablePlugin, EditorView.lineWrapping,
         // CM6 turns the browser's own spellchecking OFF by default. On macOS
         // that also means NSSpellChecker never inspects the text, so a
         // misspelling is never underlined — S7b measured `spellcheck=false`.
@@ -152,6 +332,12 @@ window.loreEditor = {
   /// `__setDocumentCalls` counts pushes that actually reached the editor —
   /// which is how the "Swift must not echo" rule is asserted rather than
   /// assumed.
+  /// Put the caret at an offset — how a test says "the reader clicked here".
+  selectAt(offset) {
+    if (offset < 0) return false
+    view.dispatch({ selection: { anchor: Math.min(offset, view.state.doc.length) } })
+    return true
+  },
   insertAtEnd(ch) {
     view.dispatch({ changes: { from: view.state.doc.length, insert: ch } })
     return view.state.doc.length
