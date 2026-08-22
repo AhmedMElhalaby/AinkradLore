@@ -1,6 +1,6 @@
 import { EditorState, RangeSetBuilder } from "@codemirror/state"
 import { EditorView, Decoration, WidgetType, keymap, drawSelection,
-         rectangularSelection, highlightActiveLine } from "@codemirror/view"
+         rectangularSelection } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { markdown } from "@codemirror/lang-markdown"
 import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language"
@@ -72,6 +72,123 @@ class BulletWidget extends WidgetType {
   ignoreEvent() { return true }
 }
 
+/// A rendered `[[wikilink]]`.
+///
+/// E2T1b. Resolution stays in Swift — this widget knows the raw target and
+/// nothing else, and a click hands that target over the bridge exactly as the
+/// native editor hands it to `onOpenLink`. Keeping vault knowledge on the Swift
+/// side is what stops the editor surface from needing its own index.
+/// The DOM for a rendered wikilink, wherever it appears.
+///
+/// Shared by `WikilinkWidget` and by a table cell's `renderInline`, because a
+/// link inside a cell that merely LOOKS like a link — or worse, stays as
+/// `[[Design Doc]]` while every other link on the page is rendered — is the
+/// half-rendered table the first real-note screenshot showed.
+function wikilinkSpan(target, display) {
+  const a = document.createElement("span")
+  a.className = "cm-lore-wikilink"
+  a.textContent = display
+  a.dataset.target = target
+  // `mousedown`, not `click`: CM6 moves the caret on mousedown, and by the time
+  // a click lands the selection has already changed — which reveals the line
+  // and destroys the very widget being clicked.
+  a.addEventListener("mousedown", event => {
+    event.preventDefault()
+    event.stopPropagation()
+    window.webkit?.messageHandlers?.lore?.postMessage({
+      kind: "openLink", target, beside: event.metaKey,
+    })
+  })
+  return a
+}
+
+/// Split `target|display` — one place, so a cell and a widget cannot disagree
+/// about which half is which.
+function splitWikilink(inner) {
+  const bar = inner.indexOf("|")
+  const target = (bar === -1 ? inner : inner.slice(0, bar)).trim()
+  const display = bar === -1 ? target : inner.slice(bar + 1).trim()
+  return { target, display: display || target }
+}
+
+class WikilinkWidget extends WidgetType {
+  constructor(target, display) { super(); this.target = target; this.display = display }
+  eq(other) { return other.target === this.target && other.display === this.display }
+  toDOM() { return wikilinkSpan(this.target, this.display) }
+  // The widget handles its own mousedown; CM6 must not also treat it as a
+  // click in the text.
+  ignoreEvent() { return true }
+}
+
+/// The ranges in which `[[…]]` is documentation about a link, not a link.
+///
+/// The same exclusion `LinkParser` applies on the Swift side, and for the same
+/// reason: a `[[Design]]` written inside a fenced block is prose. Rendering it
+/// as a link here — while Swift's link graph excludes it — would give the
+/// reader something clickable that no backlink, and no rename, knows about.
+function codeRanges(state) {
+  const ranges = []
+  syntaxTree(state).iterate({
+    enter: node => {
+      if (node.name === "InlineCode" || node.name === "FencedCode" ||
+          node.name === "CodeBlock" || node.name === "CodeText") {
+        ranges.push({ from: node.from, to: node.to })
+      }
+    },
+  })
+  return ranges
+}
+
+/// Every `[[target]]` / `[[target|display]]` outside code.
+///
+/// An `![[embed]]` is deliberately SKIPPED: it is a different construct with a
+/// different rendering (E2T1c), and treating it as a plain link here would
+/// leave a stray `!` in front of the rendered result.
+function wikilinkRanges(state) {
+  const text = state.doc.toString()
+  const code = codeRanges(state)
+  const inCode = (from, to) => code.some(r => from < r.to && to > r.from)
+  const found = []
+  const pattern = /\[\[([^\[\]\n]+)\]\]/g
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const from = match.index
+    if (from > 0 && text[from - 1] === "!") continue
+    const to = from + match[0].length
+    if (inCode(from, to)) continue
+    const { target, display } = splitWikilink(match[1])
+    if (!target) continue
+    found.push({ from, to, target, display })
+  }
+  return found
+}
+
+/// Where `![[…]]` sits — the ranges in which NO marker may be hidden yet.
+///
+/// Found by the screenshot, not by a test. lezer parses `![[x]]` as an image,
+/// so its `!` and brackets are `LinkMark` nodes and E2T0's marker-hiding
+/// collapsed the whole thing to a bare `x` styled as a link. An embed that
+/// renders as a link to a file is worse than an embed that renders as its own
+/// source: the reader is shown a construct that does not exist. Until E2T1c
+/// renders embeds properly, their syntax stays on screen — visibly unfinished
+/// rather than quietly wrong.
+///
+/// The earlier test asserted `wikilinkTargets() === []` for an embed, which was
+/// true and proved nothing: the rendering came from a different code path.
+function embedRanges(state) {
+  const text = state.doc.toString()
+  const code = codeRanges(state)
+  const found = []
+  const pattern = /!\[\[([^\[\]\n]+)\]\]/g
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const from = match.index, to = from + match[0].length
+    if (code.some(r => from < r.to && to > r.from)) continue
+    found.push({ from, to })
+  }
+  return found
+}
+
 function livePreviewDecorations(state) {
   const builder = new RangeSetBuilder()
   const doc = state.doc
@@ -85,6 +202,8 @@ function livePreviewDecorations(state) {
 
   const hidden = []
   const lineClasses = []
+  const embeds = embedRanges(state)
+  const insideEmbed = (from, to) => embeds.some(r => from < r.to && to > r.from)
   syntaxTree(state).iterate({
     enter: node => {
       const line = doc.lineAt(node.from).number
@@ -124,9 +243,21 @@ function livePreviewDecorations(state) {
       }
       if (!MARKER_NODES.has(node.name)) return
       if (revealed.has(line)) return
+      if (insideEmbed(node.from, node.to)) return
       hidden.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
     },
   })
+
+  // Wikilinks go through the SAME builder as every other replacement so that
+  // one overlap guard covers them all. A `[[link]]` sits inside a LinkMark run
+  // as far as lezer is concerned, and two facets each replacing part of that
+  // run is how CM6 is made to throw.
+  for (const link of wikilinkRanges(state)) {
+    if (revealed.has(doc.lineAt(link.from).number)) continue
+    hidden.push({ from: link.from, to: link.to,
+                  deco: Decoration.replace({
+                    widget: new WikilinkWidget(link.target, link.display) }) })
+  }
 
   // RangeSetBuilder demands ascending order and the tree walk does not
   // guarantee it across node kinds.
@@ -170,7 +301,9 @@ const livePreview = EditorView.decorations.compute(["doc", "selection"],
 /// Nested emphasis (`**a *b* c**`) renders the outer level only. Recorded
 /// rather than hidden; it is rare in a table cell and the fix is a real parser.
 function renderInline(text, parent) {
-  const pattern = /(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|`[^`]+`)/g
+  // `[[…]]` is first in the alternation so a link is never mistaken for
+  // emphasis. Its own brackets contain no `*` or `_`, but a DISPLAY half may.
+  const pattern = /(\[\[[^\[\]\n]+\]\]|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|`[^`]+`)/g
   let index = 0
   let match
   while ((match = pattern.exec(text)) !== null) {
@@ -179,7 +312,10 @@ function renderInline(text, parent) {
     }
     const token = match[0]
     let node
-    if (token.startsWith("**") || token.startsWith("__")) {
+    if (token.startsWith("[[")) {
+      const { target, display } = splitWikilink(token.slice(2, -2))
+      node = wikilinkSpan(target, display)
+    } else if (token.startsWith("**") || token.startsWith("__")) {
       node = document.createElement("strong")
       node.textContent = token.slice(2, -2)
     } else if (token.startsWith("`")) {
@@ -304,7 +440,13 @@ window.loreEditor = {
     const state = EditorState.create({
       doc: text,
       extensions: [
-        history(), drawSelection(), rectangularSelection(), highlightActiveLine(),
+        history(), drawSelection(), rectangularSelection(),
+        // `highlightActiveLine()` is deliberately ABSENT. It paints a
+        // full-width grey band behind the caret's line, which Obsidian does
+        // not do and which the first wikilink screenshot showed as the loudest
+        // thing on the page — a bar wider than the text measure, drawn under
+        // the one line the reader is already looking at.
+
         search(), highlightSelectionMatches(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         markdown(), syntaxHighlighting(highlight),
@@ -369,6 +511,26 @@ window.loreEditor = {
   },
 
   lines() { return view.state.doc.lines },
+
+  /// E2T1b hooks. `wikilinkTargets` is what a test asserts the RENDERING
+  /// against; `clickWikilink` is what asserts the bridge message, because a
+  /// link that renders and does not open is the more likely of the two bugs.
+  wikilinkTexts() {
+    return Array.from(document.querySelectorAll(".cm-lore-wikilink"))
+                .map(n => n.textContent)
+  },
+  wikilinkTargets() {
+    return Array.from(document.querySelectorAll(".cm-lore-wikilink"))
+                .map(n => n.dataset.target)
+  },
+  clickWikilink(index, meta) {
+    const nodes = document.querySelectorAll(".cm-lore-wikilink")
+    const node = nodes[index || 0]
+    if (!node) return false
+    node.dispatchEvent(new MouseEvent("mousedown",
+                                      { bubbles: true, metaKey: !!meta }))
+    return true
+  },
   tableCount() { return document.querySelectorAll(".cm-lore-table").length },
   focusFirstCell() {
     const cell = document.querySelector(".cm-lore-table td")

@@ -5,9 +5,9 @@ export DEVELOPER_DIR
 # This was `.../Documents/DevPlugins` and had been writing where nothing reads
 # since `VaultMigration.swift:154` moved the directory under `Cache/`. A
 # sideload appeared to succeed, the host loaded its INSTALLED copy of the
-# plugin instead, and the difference is invisible unless you check with `lsof`
-# — which is how M9 spent four milestones believing it had verified a load it
-# had not.
+# plugin instead, and the difference is invisible unless you check the process's
+# mappings with `vmmap` — which is how M9 spent four milestones believing it had
+# verified a load it had not.
 DEV_PLUGINS := $(HOME)/Library/Application Support/com.ainkrad.app/Cache/DevPlugins
 # The Dev Host is a SEPARATE app with its own bundle identifier, so it reads a
 # different directory. `sideload` alone can never reach it — that is why the
@@ -27,6 +27,15 @@ DEV_HOST := $(HOME)/Home/Projects/Ainkrad/Ainkrad/build/Build/Products/Debug/Ain
 AINKRAD := $(HOME)/Home/Projects/Ainkrad/Ainkrad
 DEBUG_APP := $(AINKRAD)/build/Build/Products/Debug/Ainkrad.app
 
+# EVERY target here is a verb, and none of them produces a file of its own
+# name. Without this, make compares the target against a like-named PATH — and
+# on a case-insensitive filesystem `editor` matches the `Editor/` directory and
+# `build` matches `build/`, so the recipe is skipped and the tool reports
+# success having done nothing. `make editor` silently stopped rebuilding the
+# JavaScript bundle this way; `build` escaped only because its `generate`
+# prerequisite can never be up to date.
+.PHONY: editor generate build sideload run devhost test release
+
 # The CM6 bundle. `dist/` is COMMITTED, so a clean checkout — and the release
 # script, and CI — build the plugin with no node installed. Only someone
 # changing the editor's JavaScript needs this target.
@@ -45,7 +54,14 @@ sideload: build
 	             build/Build/Products/Debug/LorePlugin.bundle/Contents/MacOS/LorePlugin
 
 # Sideload and launch the DEBUG Ainkrad, then PROVE the bundle is mapped into
-# the running process. A copy is not a load; `lsof` is the only witness.
+# the running process. A copy is not a load.
+#
+# The witness is `vmmap`, NOT `lsof`. `lsof` lists open FILE DESCRIPTORS, and a
+# loaded Mach-O is mapped, not held open — dyld closes the descriptor once the
+# mapping exists. So `lsof` reports a loaded plugin only during the brief window
+# the file is still open, which is why it gave false negatives during M9 and,
+# worse, occasional false positives that were then reported as verification.
+# `vmmap` lists the mappings themselves, which is the thing being asserted.
 run: sideload
 	@pkill -x Ainkrad 2>/dev/null; sleep 2
 	open -n "$(DEBUG_APP)"
@@ -53,7 +69,7 @@ run: sideload
 	@for i in $$(seq 1 30); do \
 		sleep 2; \
 		pid=$$(pgrep -x Ainkrad | head -1); \
-		if [ -n "$$pid" ] && lsof -p $$pid 2>/dev/null \
+		if [ -n "$$pid" ] && vmmap $$pid 2>/dev/null \
 		     | grep -q "DevPlugins/LorePlugin.bundle/Contents/MacOS"; then \
 			echo "LOADED pid=$$pid"; exit 0; \
 		fi; \

@@ -182,12 +182,15 @@ private struct MarkdownDocumentEditor: View {
             // E4T1: the CodeMirror surface, behind `EditorSettings.usesCM6`
             // and OFF by default. Both surfaces bind the SAME `body_`, so the
             // document is unaffected by which one is showing and switching is
-            // reversible. The affordances below — completion, hover preview,
-            // Cmd-click — are still native-only; that is E2, and it is the
-            // reason this defaults off rather than the flag being cosmetic.
+            // reversible. Opening a link and Cmd-clicking it now reach the same
+            // closures the native editor is given (E2T1b); completion, hover
+            // preview and tags are still native-only, which is what keeps this
+            // defaulting off rather than the flag being cosmetic.
             if ctx.editorSettings.usesCM6 {
                 CM6EditorView(text: $body_, tokens: ctx.theme.tokens,
-                              settings: ctx.editorSettings)
+                              settings: ctx.editorSettings,
+                              onOpenLink: ctx.openLink,
+                              onOpenLinkBeside: ctx.openLinkBeside)
                     .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
             } else {
             // Only markdown gets the link affordances: wikilinks are markdown

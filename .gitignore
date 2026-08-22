@@ -1,5 +1,16 @@
 build/
 dist/
+# …EXCEPT the vendored CodeMirror bundle, which is a committed build product on
+# purpose: it is what lets a clean checkout, the release script and CI build the
+# plugin with no node installed. `dist/` above matches at every level, so
+# `Editor/dist` was being ignored and the editor surface existed only in the
+# working tree of whoever last ran `make editor`.
+!Editor/dist/
 *.xcodeproj/
 .DS_Store
 Editor/node_modules/
+# The screenshot helpers, compiled on demand from their `.swift` sources beside
+# them. Both were committed as ~100 KB Mach-O binaries and re-committed on every
+# rebuild; the sources are the deliverable, the binaries are a cache.
+scripts/.preview
+scripts/.window-bounds

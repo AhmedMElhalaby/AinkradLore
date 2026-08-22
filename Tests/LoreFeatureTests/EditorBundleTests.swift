@@ -40,6 +40,50 @@ final class EditorBundleTests: XCTestCase {
         XCTAssertTrue(html.contains("--font-text"), "theming tokens must be present")
     }
 
+    /// The half of "is committed" the size check above cannot see.
+    ///
+    /// This test was named `…IsCommitted…` while asserting only that the file
+    /// existed ON DISK — which it always does for whoever last ran
+    /// `make editor`. `.gitignore`'s `dist/` matches at every level, so
+    /// `Editor/dist` was in fact ignored: the editor surface lived in one
+    /// working tree, a clean checkout had no bundle, and the plugin's own
+    /// resource phase would have failed on it. Asking git is the only way to
+    /// assert this, so the test asks git.
+    func test_theBundleIsTrackedByGitAndNotIgnored() throws {
+        for name in ["editor.js", "index.html"] {
+            let path = "Editor/dist/\(name)"
+            let tracked = try Self.git(["ls-files", "--error-unmatch", path])
+            XCTAssertFalse(tracked.isEmpty, "\(path) is not tracked by git")
+            let ignored = try Self.git(["check-ignore", path])
+            XCTAssertTrue(ignored.isEmpty,
+                          "\(path) is ignored by .gitignore — a clean checkout has no editor")
+        }
+    }
+
+    /// `git`, run in the repo, returning stdout. A non-zero status is not a
+    /// failure here: `check-ignore` exits 1 precisely when nothing is ignored,
+    /// which is the passing case.
+    private static func git(_ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", repoRoot.path] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
     // MARK: - it runs
 
     @MainActor

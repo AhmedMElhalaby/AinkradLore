@@ -31,8 +31,16 @@ struct CM6EditorView: NSViewRepresentable {
     @Binding var text: String
     let tokens: HostThemeTokens
     let settings: EditorSettings
+    /// Open a `[[wikilink]]`'s target. The SAME closure the native editor is
+    /// given (`EditorContext.openLink`), because resolution is the shell's job
+    /// and neither editor surface should have an opinion about it.
+    var onOpenLink: (@MainActor (String) -> Void)?
+    /// Cmd-click. Native behaviour, kept identical here.
+    var onOpenLinkBeside: (@MainActor (String) -> Void)?
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onOpenLink: onOpenLink, onOpenLinkBeside: onOpenLinkBeside)
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let coordinator = context.coordinator
@@ -92,6 +100,8 @@ struct CM6EditorView: NSViewRepresentable {
         }
 
         private let text: Binding<String>
+        private let onOpenLink: (@MainActor (String) -> Void)?
+        private let onOpenLinkBeside: (@MainActor (String) -> Void)?
         var webView: WKWebView?
         /// Set before the page has loaded; applied on `didFinish`.
         var pendingDocument: String?
@@ -110,8 +120,12 @@ struct CM6EditorView: NSViewRepresentable {
         /// the way in and restored on the way out — see `CM6LineEndings`.
         private var ending: CM6LineEndings.Ending = .lf
 
-        init(text: Binding<String>) {
+        init(text: Binding<String>,
+             onOpenLink: (@MainActor (String) -> Void)? = nil,
+             onOpenLinkBeside: (@MainActor (String) -> Void)? = nil) {
             self.text = text
+            self.onOpenLink = onOpenLink
+            self.onOpenLinkBeside = onOpenLinkBeside
             super.init()
         }
 
@@ -165,14 +179,31 @@ struct CM6EditorView: NSViewRepresentable {
         func userContentController(_ controller: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
             guard let body = message.body as? [String: Any],
-                  body["kind"] as? String == "doc",
-                  let reported = body["text"] as? String else { return }
-            // CM6 speaks LF; the document speaks whatever it arrived with.
-            let incoming = CM6LineEndings.from(reported, to: ending)
-            lastFromEditor = incoming
-            // Only when it really differs: SwiftUI bindings are not free, and
-            // an identical write still invalidates the view.
-            if text.wrappedValue != incoming { text.wrappedValue = incoming }
+                  let kind = body["kind"] as? String else { return }
+            switch kind {
+            case "doc":
+                guard let reported = body["text"] as? String else { return }
+                // CM6 speaks LF; the document speaks whatever it arrived with.
+                let incoming = CM6LineEndings.from(reported, to: ending)
+                lastFromEditor = incoming
+                // Only when it really differs: SwiftUI bindings are not free,
+                // and an identical write still invalidates the view.
+                if text.wrappedValue != incoming { text.wrappedValue = incoming }
+            case "openLink":
+                // The RAW target, exactly as written. Not resolved, not
+                // decoded, not trimmed of its `#Heading` fragment — every one
+                // of those is `LinkResolver`'s decision, and a second opinion
+                // formed in JavaScript is how the editor and the link graph
+                // come to disagree about what a link points at.
+                guard let target = body["target"] as? String, !target.isEmpty else { return }
+                if body["beside"] as? Bool == true, let beside = onOpenLinkBeside {
+                    beside(target)
+                } else {
+                    onOpenLink?(target)
+                }
+            default:
+                return
+            }
         }
 
         /// The boot path for a POOLED surface, whose page is already loaded and

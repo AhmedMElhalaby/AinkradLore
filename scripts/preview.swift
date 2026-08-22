@@ -1,6 +1,15 @@
 // Mount the CodeMirror surface on a real note, so it can be looked at.
 //
-//   swiftc -O scripts/preview.swift -o scripts/.preview && ./scripts/.preview "<path>"
+//   swiftc -O scripts/preview.swift -o scripts/.preview
+//   ./scripts/.preview "<note.md>"                 # look at it
+//   ./scripts/.preview "<note.md>" --shot out.png  # snapshot it and exit
+//
+// `--shot` exists because `screencapture` cannot be trusted to photograph this
+// window: it captures whatever the WINDOW SERVER is currently compositing, so a
+// shot taken while Mission Control is up, or during the open animation, comes
+// back as a thumbnail or a skewed sheet — and looks like a rendering bug rather
+// than a capture bug. `takeSnapshot` asks the web view itself, which has no
+// opinion about window state.
 //
 // The sibling of `shoot.sh` for the CM6 surface. The settings flag lives in the
 // host's key-value store and cannot be flipped from outside the app, so this
@@ -16,8 +25,14 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var document = "# No note given\n\nPass a path as the first argument.\n"
+    /// Where to write a snapshot, if `--shot` was given.
+    var shotPath: String?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if let index = CommandLine.arguments.firstIndex(of: "--shot"),
+           index + 1 < CommandLine.arguments.count {
+            shotPath = CommandLine.arguments[index + 1]
+        }
         if CommandLine.arguments.count > 1,
            let text = try? String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8) {
             // Body only: the editor is bound to `note.body`, so previewing the
@@ -45,7 +60,29 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let json = String(data: try! JSONSerialization.data(withJSONObject: [document]),
                           encoding: .utf8)!
         let arg = String(json.dropFirst().dropLast())
-        webView.evaluateJavaScript("window.loreEditor.init(\(arg))")
+        webView.evaluateJavaScript("window.loreEditor.init(\(arg))") { _, _ in
+            guard let path = self.shotPath else { return }
+            // One turn of the run loop after init, so the decorations the
+            // document produces have been laid out. Snapshotting immediately
+            // photographs an empty editor, which is the picture that would be
+            // most reassuring and least true.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                self.webView.takeSnapshot(with: nil) { image, error in
+                    defer { NSApp.terminate(nil) }
+                    guard let image,
+                          let tiff = image.tiffRepresentation,
+                          let rep = NSBitmapImageRep(data: tiff),
+                          let png = rep.representation(using: .png, properties: [:])
+                    else {
+                        FileHandle.standardError.write(
+                            Data("snapshot failed: \(error.map(String.init(describing:)) ?? "no image")\n".utf8))
+                        return
+                    }
+                    try? png.write(to: URL(fileURLWithPath: path))
+                    print(path)
+                }
+            }
+        }
     }
 
     /// The same split `Frontmatter.parse` performs, kept deliberately dumb: a
