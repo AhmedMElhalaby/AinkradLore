@@ -295,6 +295,38 @@ class TagWidget extends WidgetType {
 /// `{ tagsAsChips, tasksToggleable }`.
 const settingsEffect = StateEffect.define()
 
+// ------------------------------------------------------- transclusions
+//
+// E2T1c. `![[Note.md]]` shows the note. The CONTENT comes from Swift — the
+// slicing of `![[note#Heading]]` and `![[note#^block-id]]`, the frontmatter
+// strip, the cycle and depth caps are all `TransclusionResolver`'s, which
+// already knows all of it. This side only asks and draws.
+//
+// Content arrives asynchronously, so it is state for the same reason the
+// settings are: the decoration facet recomputes when the field changes, and a
+// module-level cache would leave the placeholder on screen forever.
+
+/// `{ target, kind, text }` for one resolved embed.
+const transclusionEffect = StateEffect.define()
+
+const transclusionField = StateField.define({
+  create: () => ({}),
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(transclusionEffect)) continue
+      value = { ...value, [effect.value.target]: effect.value }
+    }
+    return value
+  },
+})
+
+/// Targets already asked for, so a redraw does not re-ask on every keystroke.
+///
+/// Deliberately NOT in the state field: it is a record of messages sent, not of
+/// document content, and putting it in the field would make every request part
+/// of the undo history.
+const requested = new Set()
+
 const settingsField = StateField.define({
   create: () => ({ tagsAsChips: true, tasksToggleable: true }),
   update(value, tr) {
@@ -587,6 +619,83 @@ class EmbedChipWidget extends WidgetType {
   ignoreEvent() { return true }
 }
 
+/// A transcluded note.
+///
+/// The content is rendered by a NESTED, read-only CodeMirror rather than by a
+/// second markdown renderer written for this widget. One engine, one set of
+/// decorations, so a heading inside an embed looks exactly like a heading
+/// outside it — and a second renderer is precisely the thing that made the
+/// native surface and its PDF export drift apart.
+///
+/// Nested embeds inside the slice are NOT expanded: the inner editor gets the
+/// rendering extensions without the transclusion one. That is the same "one
+/// flat slice" the native renderer draws, and it makes a cycle impossible here
+/// rather than merely capped.
+class TransclusionWidget extends WidgetType {
+  constructor(target, entry) { super(); this.target = target; this.entry = entry }
+  eq(other) {
+    return other.target === this.target &&
+           other.entry?.kind === this.entry?.kind &&
+           other.entry?.text === this.entry?.text
+  }
+  toDOM() {
+    const box = document.createElement("div")
+    box.className = "cm-lore-transclusion"
+    box.dataset.target = this.target
+
+    const title = document.createElement("div")
+    title.className = "cm-lore-transclusion-title"
+    title.textContent = this.target
+    box.appendChild(title)
+
+    if (!this.entry) {
+      const waiting = document.createElement("div")
+      waiting.className = "cm-lore-transclusion-waiting"
+      waiting.textContent = "…"
+      box.appendChild(waiting)
+      return box
+    }
+    if (this.entry.kind === "error" || this.entry.kind === "missingFragment") {
+      const problem = document.createElement("div")
+      problem.className = "cm-lore-transclusion-problem"
+      problem.textContent = this.entry.text
+      box.appendChild(problem)
+      return box
+    }
+
+    const body = document.createElement("div")
+    body.className = "cm-lore-transclusion-body"
+    box.appendChild(body)
+    this.nested = new EditorView({
+      state: EditorState.create({
+        doc: this.entry.text,
+        extensions: [
+          markdown(), syntaxHighlighting(highlight),
+          nestedLivePreview, tablePlugin, EditorView.lineWrapping,
+          EditorView.editable.of(false),
+          settingsField, transclusionField,
+        ],
+      }),
+      parent: body,
+    })
+    if (this.entry.kind === "truncated") {
+      const notice = document.createElement("div")
+      notice.className = "cm-lore-transclusion-problem"
+      notice.textContent = "Content truncated."
+      box.appendChild(notice)
+    }
+    return box
+  }
+  /// CM6 calls this when the widget leaves the document. Without it the nested
+  /// view outlives the embed — a whole EditorView per transclusion ever drawn,
+  /// still holding its DOM and its listeners.
+  destroy() {
+    this.nested?.destroy()
+    this.nested = null
+  }
+  ignoreEvent() { return true }
+}
+
 /// Markdown image syntax, `![alt](path)`, which lezer DOES give us a node for —
 /// but only as `Image`, so the target still has to be sliced out.
 function markdownImages(state) {
@@ -607,15 +716,23 @@ function markdownImages(state) {
   return found
 }
 
-function livePreviewDecorations(state) {
+function livePreviewDecorations(state, options = {}) {
   const builder = new RangeSetBuilder()
   const doc = state.doc
   // The lines the caret (or selection) touches. Their syntax stays visible.
+  //
+  // Inside a transclusion, NOTHING is revealed. The nested editor has a
+  // selection whether or not anyone put it there — it defaults to offset 0 —
+  // so an embedded note showed `## Heading` on its first line while every
+  // other line rendered. There is no caret in somebody else's text, so there
+  // is nothing to reveal for.
   const revealed = new Set()
-  for (const range of state.selection.ranges) {
-    const from = doc.lineAt(range.from).number
-    const to = doc.lineAt(range.to).number
-    for (let n = from; n <= to; n++) revealed.add(n)
+  if (options.revealCaretLine !== false) {
+    for (const range of state.selection.ranges) {
+      const from = doc.lineAt(range.from).number
+      const to = doc.lineAt(range.to).number
+      for (let n = from; n <= to; n++) revealed.add(n)
+    }
   }
 
   const hidden = []
@@ -727,13 +844,32 @@ function livePreviewDecorations(state) {
   // Embeds. An `![[…]]` whose target is an image or an attachment is replaced;
   // a markdown target is left as source, because rendering a note inside a note
   // is E2T1c and a half-rendered transclusion is worse than a visible `![[…]]`.
+  const expandTransclusions = options.expandTransclusions !== false
+  const provided = state.field(transclusionField, false) || {}
   for (const embed of embeds) {
     if (revealed.has(doc.lineAt(embed.from).number)) continue
     const target = splitWikilink(
       doc.sliceString(embed.from + 3, embed.to - 2)).target
     if (!target) continue
     const kind = embedKind(target)
-    if (kind === "transclusion") continue
+    if (kind === "transclusion") {
+      if (!expandTransclusions) continue
+      if (!requested.has(target)) {
+        requested.add(target)
+        // Asked for OUTSIDE this synchronous pass: posting from inside a
+        // decoration computation means a reply can arrive mid-compute and
+        // dispatch a transaction into a view that is still building one.
+        Promise.resolve().then(() => {
+          window.webkit?.messageHandlers?.lore?.postMessage(
+            { kind: "transclude", target })
+        })
+      }
+      hidden.push({ from: embed.from, to: embed.to,
+                    deco: Decoration.replace({
+                      widget: new TransclusionWidget(target, provided[target]),
+                      block: true }) })
+      continue
+    }
     hidden.push({ from: embed.from, to: embed.to,
                   deco: Decoration.replace({
                     widget: kind === "image" ? new EmbedImageWidget(target)
@@ -817,8 +953,15 @@ function livePreviewDecorations(state) {
 }
 
 const livePreview = EditorView.decorations.compute(
-  ["doc", "selection", settingsField],
+  ["doc", "selection", settingsField, transclusionField],
   state => livePreviewDecorations(state))
+
+/// The same decorations, with transclusions left as source. Used INSIDE a
+/// transclusion, which is what makes a cycle impossible rather than capped.
+const nestedLivePreview = EditorView.decorations.compute(
+  ["doc", "selection", settingsField],
+  state => livePreviewDecorations(state, { expandTransclusions: false,
+                                          revealCaretLine: false }))
 
 /// Render a cell's inline markdown into `parent`.
 ///
@@ -983,7 +1126,7 @@ window.loreEditor = {
 
         search(), highlightSelectionMatches(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
-        settingsField,
+        settingsField, transclusionField,
         markdown(), syntaxHighlighting(highlight),
         livePreview, tablePlugin, EditorView.lineWrapping,
         // CM6 turns the browser's own spellchecking OFF by default. On macOS
@@ -1103,6 +1246,24 @@ window.loreEditor = {
     return Array.from(document.querySelectorAll(".cm-lore-embed-image"))
                 .map(n => n.naturalWidth)
   },
+  /// Swift's answer to a `transclude` request.
+  provideTransclusion(target, kind, text) {
+    if (!view) return false
+    view.dispatch({ effects: transclusionEffect.of({ target, kind, text }) })
+    return true
+  },
+  transclusionTargets() {
+    return Array.from(document.querySelectorAll(".cm-lore-transclusion"))
+                .map(n => n.dataset.target)
+  },
+  transclusionText(index) {
+    const box = document.querySelectorAll(".cm-lore-transclusion")[index || 0]
+    return box ? box.innerText : null
+  },
+  transclusionRequests() { return Array.from(requested) },
+  /// Test hook: forget what has been asked for, so one test's requests cannot
+  /// decide another's assertions.
+  __resetTransclusionRequests() { requested.clear(); return true },
   embedMissingTargets() {
     return Array.from(document.querySelectorAll(".cm-lore-embed-missing"))
                 .map(n => n.dataset.target)

@@ -206,16 +206,20 @@ final class CM6EmbedTests: XCTestCase {
         XCTAssertEqual(try js("window.loreEditor.embedImageTargets()") as? [String], [])
     }
 
-    /// A note embedded in a note is E2T1c. Until then it keeps its syntax:
-    /// visibly unfinished beats quietly wrong.
+    /// A note target is neither an image nor a chip: it is a transclusion
+    /// (E2T1c), and a bare name with no extension is a note too.
+    ///
+    /// This test asserted "keeps its syntax" while that was the interim
+    /// behaviour, and E2T1c changed it deliberately. Recorded rather than
+    /// quietly rewritten, because the assertion moving is the POINT: this file
+    /// is about which of the three kinds a target resolves to.
     @MainActor
-    func test_aMarkdownTargetStillKeepsItsSyntax() throws {
+    func test_aMarkdownTargetIsATransclusionAndNotAnImageOrAChip() throws {
         try boot("![[Some Note.md]]\n\nand ![[Bare Name]]\n\n", resolving: [:])
         XCTAssertEqual(try js("window.loreEditor.embedImageTargets()") as? [String], [])
         XCTAssertEqual(try js("window.loreEditor.embedChipTargets()") as? [String], [])
-        let shown = try js("document.querySelector('.cm-content').innerText") as? String ?? ""
-        XCTAssertTrue(shown.contains("![[Some Note.md]]"), "got \(shown)")
-        XCTAssertTrue(shown.contains("![[Bare Name]]"), "got \(shown)")
+        XCTAssertEqual(try js("window.loreEditor.transclusionTargets()") as? [String],
+                       ["Some Note.md", "Bare Name"])
     }
 
     /// A remote image is not ours to serve.

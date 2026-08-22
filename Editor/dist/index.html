@@ -151,6 +151,31 @@
     max-width: 100%; height: auto; border-radius: 4px;
     display: inline-block; vertical-align: top;
   }
+  /* E2T1c. A transcluded note: somebody else's text, bounded so it reads that
+     way. A left rule in the accent tint and a hairline frame — the same two
+     signals `TransclusionStyling` draws natively. */
+  .cm-lore-transclusion {
+    border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+    border-left: 3px solid color-mix(in srgb, var(--accent-primary) 55%, transparent);
+    border-radius: 4px; margin: 6px 0; padding: 6px 10px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+  }
+  .cm-lore-transclusion-title {
+    color: color-mix(in srgb, var(--fg) 55%, transparent);
+    font-size: 0.85em; margin-bottom: 4px;
+  }
+  .cm-lore-transclusion-waiting,
+  .cm-lore-transclusion-problem {
+    color: color-mix(in srgb, var(--fg) 45%, transparent); font-size: 0.9em;
+  }
+  /* The nested editor must not add its own padding or its own scrollbar: it is
+     content inside a box, not a second editor. */
+  .cm-lore-transclusion-body .cm-editor { background: transparent; }
+  .cm-lore-transclusion-body .cm-scroller { overflow: visible; }
+  .cm-lore-transclusion-body .cm-content { padding: 0; }
+  .cm-lore-transclusion-body .cm-cursor { display: none; }
+  .cm-lore-transclusion-body .cm-gutters { display: none; }
+
   /* An embed whose target does not resolve. Dimmed and struck, so it reads as
      "this file is missing" rather than as a browser error — WebKit draws a grey
      box with a `?` for a failed image and does not show the alt text. */

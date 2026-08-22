@@ -177,6 +177,52 @@ struct CM6EditorView: NSViewRepresentable {
         /// current value when the push happens.
         var allowsTaskToggle = true
 
+        /// The shell's embed resolver, for `![[Note.md]]`. Set alongside the
+        /// asset handler, from the same place and for the same reason.
+        var resolveEmbedTarget: (@MainActor (String) -> URL?)?
+
+        /// Answer the page's request for a transcluded note.
+        ///
+        /// The slicing is `TransclusionResolver`'s, not this file's. That type
+        /// already knows what `![[note#Heading]]` and `![[note#^block-id]]`
+        /// mean, that a whole-note embed strips frontmatter, and what a cycle,
+        /// an over-deep chain and an over-large file should say — and it is pure
+        /// logic with no editor in it. A second slicer written in JavaScript
+        /// would disagree with this one the first time either changed.
+        private func provideTransclusion(of target: String) {
+            let content = resolve(target)
+            let (kind, text): (String, String) = switch content {
+            case .content(let slice): ("content", slice)
+            case .truncated(let slice): ("truncated", slice)
+            case .missingFragment(_, let fragment):
+                ("missingFragment", "No section \"\(fragment)\" in this note.")
+            case .circular: ("error", "This note embeds itself.")
+            case .tooDeep: ("error", "Embedded too deeply.")
+            case .unreadable(let message): ("error", message)
+            }
+            evaluate("window.loreEditor.provideTransclusion("
+                     + Self.jsString(target) + ", "
+                     + Self.jsString(kind) + ", "
+                     + Self.jsString(text) + ")")
+        }
+
+        private func resolve(_ target: String) -> TransclusionContent {
+            guard let url = resolveEmbedTarget?(target) else {
+                return .unreadable("Could not resolve \"\(target)\".")
+            }
+            // A single-document resolver over the file the shell already
+            // picked: the resolution has HAPPENED, and re-deriving it from a
+            // vault index here would be a second opinion about what this embed
+            // points at. Same construction as `TransclusionStyling`.
+            let resolver = LinkResolver(
+                documents: [(url: url, title: LinkResolver.basename(of: target),
+                             aliases: [])])
+            return TransclusionResolver.resolve(rawTarget: target, resolver: resolver,
+                                                path: []) {
+                try String(contentsOf: $0, encoding: .utf8)
+            }
+        }
+
         /// Point the surface's asset handler at this pane's resolver.
         ///
         /// Called on borrow, on every update and on release. A pooled surface's
@@ -189,6 +235,7 @@ struct CM6EditorView: NSViewRepresentable {
             let handler = webView.configuration
                 .urlSchemeHandler(forURLScheme: CM6AssetSchemeHandler.scheme)
             (handler as? CM6AssetSchemeHandler)?.resolve = resolve
+            resolveEmbedTarget = resolve
         }
 
         func push(tokens: HostThemeTokens, settings: EditorSettings) {
@@ -257,6 +304,9 @@ struct CM6EditorView: NSViewRepresentable {
             case "openTag":
                 guard let tag = body["tag"] as? String, !tag.isEmpty else { return }
                 onTagClick?(tag)
+            case "transclude":
+                guard let target = body["target"] as? String, !target.isEmpty else { return }
+                provideTransclusion(of: target)
             default:
                 return
             }

@@ -120,16 +120,23 @@ final class CM6WikilinkTests: XCTestCase {
     /// image, so E2T0's marker-hiding was collapsing it by a DIFFERENT code
     /// path than the one being asserted. So this now asserts what the reader
     /// sees, which is the only thing that would have caught it.
-    /// An IMAGE embed now renders (E2T5); a NOTE embed still shows its source,
-    /// because rendering a note inside a note is E2T1c. Either way it is never
-    /// a plain link.
+    /// An embed is never a plain link — whatever it becomes.
+    ///
+    /// It has become three different things across this milestone: source
+    /// (before E2T5), an image or a chip (E2T5), and a transclusion box for a
+    /// markdown target (E2T1c). What has to stay true through all of that is
+    /// that it is not silently collapsed into an ordinary wikilink, which is
+    /// what E2T0's marker-hiding was doing.
     @MainActor
     func test_anEmbedIsNeverRenderedAsAPlainLink() throws {
         try boot("An embed: ![[Some Note.md]]\n\n")
-        XCTAssertEqual(try targets(), [])
-        let shown = try js("document.querySelector('.cm-content').innerText") as? String ?? ""
-        XCTAssertTrue(shown.contains("![[Some Note.md]]"),
-                      "an unrendered embed must show its own source, not a fake link: \(shown)")
+        XCTAssertEqual(try targets(), [],
+                       "an embed must never appear among the plain wikilinks")
+        // A markdown target is a transclusion. There is no bridge in this
+        // harness, so the box stays a placeholder — which still has to name the
+        // note rather than show nothing.
+        XCTAssertEqual(try js("window.loreEditor.transclusionTargets()") as? [String],
+                       ["Some Note.md"])
     }
 
     /// A link in a table cell, which the table widget renders itself.
