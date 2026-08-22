@@ -84,6 +84,62 @@ final class EditorBundleTests: XCTestCase {
             .deletingLastPathComponent()
     }
 
+    // MARK: - the maths assets, in the bundle the plugin actually ships
+
+    /// Every font `katex.min.css` asks for must be IN THE BUNDLE, resolvable by
+    /// the name the stylesheet uses.
+    ///
+    /// This is the test for a trap that had already been laid: the fonts were
+    /// copied to `dist/fonts/` and the stylesheet asked for `url(fonts/X.woff2)`,
+    /// which resolves perfectly from the repo — and Xcode's resources phase
+    /// FLATTENS a folder added to a target, so the plugin shipped them at
+    /// `Resources/X.woff2` and every one of those URLs would have 404'd. Maths
+    /// would have rendered with fallback glyphs in the app while every test
+    /// passed. So this asks the BUNDLE, not the directory.
+    func test_everyMathFontTheStylesheetAsksForIsInTheBundle() throws {
+        let css = try String(contentsOf: Self.distURL
+            .appendingPathComponent("katex.min.css"), encoding: .utf8)
+        let references = Self.fontReferences(in: css)
+        XCTAssertGreaterThan(references.count, 5,
+                             "the stylesheet should reference several fonts")
+        // No subdirectory may appear in a reference, for the reason above.
+        for reference in references {
+            XCTAssertFalse(reference.contains("/"),
+                           "\(reference) is in a subdirectory; the bundle is flat")
+        }
+        let bundle = Bundle(for: Self.self)
+        for reference in references {
+            let name = (reference as NSString).deletingPathExtension
+            let ext = (reference as NSString).pathExtension
+            XCTAssertNotNil(bundle.url(forResource: name, withExtension: ext),
+                            "\(reference) is missing from the shipped bundle")
+        }
+    }
+
+    /// The stylesheet has to be LINKED, or none of the above matters.
+    func test_thePageLinksTheMathStylesheet() throws {
+        let html = try String(contentsOf: Self.distURL
+            .appendingPathComponent("index.html"), encoding: .utf8)
+        XCTAssertTrue(html.contains("katex.min.css"), "the maths stylesheet must be linked")
+        XCTAssertNotNil(Bundle(for: Self.self)
+            .url(forResource: "katex.min", withExtension: "css"))
+    }
+
+    /// `url(KaTeX_Main-Regular.woff2)` -> `KaTeX_Main-Regular.woff2`.
+    private static func fontReferences(in css: String) -> Set<String> {
+        var found: Set<String> = []
+        var rest = Substring(css)
+        while let open = rest.range(of: "url(") {
+            rest = rest[open.upperBound...]
+            guard let close = rest.firstIndex(of: ")") else { break }
+            let value = rest[..<close]
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+            if value.hasSuffix(".woff2") { found.insert(value) }
+            rest = rest[close...]
+        }
+        return found
+    }
+
     // MARK: - it runs
 
     @MainActor

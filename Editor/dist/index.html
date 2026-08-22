@@ -151,6 +151,20 @@
     max-width: 100%; height: auto; border-radius: 4px;
     display: inline-block; vertical-align: top;
   }
+  /* E2T6. Maths. KaTeX brings its own typography; these rules only place it.
+
+     An expression KaTeX cannot parse is left as plain source and NOT given a
+     class of its own — the earlier version styled a class nothing generated,
+     and its line decoration crashed the range builder. Unparseable maths reads
+     as source, which is `MarkdownMath`'s rule for the same case. */
+  .cm-lore-math { display: inline-block; vertical-align: baseline; }
+  .cm-lore-math-block { display: block; margin: 8px 0; text-align: center; }
+  /* KaTeX's error rendering is a red copy of the source. It must never appear:
+     an unparseable expression is skipped and left as plain source instead. This
+     rule exists so that if one ever does slip through it is obvious in a
+     screenshot rather than subtly mis-coloured. */
+  .katex-error { outline: 2px dashed red; }
+
   /* E2T1c. A transcluded note: somebody else's text, bounded so it reads that
      way. A left rule in the accent tint and a hairline frame — the same two
      signals `TransclusionStyling` draws natively. */
@@ -209,4 +223,5 @@
     outline: 2px solid var(--accent-primary); outline-offset: -2px;
   }
 </style></head>
+<link rel="stylesheet" href="katex.min.css">
 <body><div id="root"></div><script src="editor.js"></script></body></html>

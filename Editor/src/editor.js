@@ -509,6 +509,174 @@ function calloutBlocks(state) {
   return blocks
 }
 
+// ----------------------------------------------------------------- math
+//
+// E2T6. `$inline$` and `$$block$$`, rendered by KaTeX.
+//
+// ## Why KaTeX, measured rather than assumed
+//
+// The plan required the bundle cost to be measured before choosing. Built and
+// weighed, both minified:
+//
+//     KaTeX ....... 261 KB JS + 24 KB CSS + 296 KB woff2 = 581 KB
+//     MathJax ..... 1777 KB JS, no font files (SVG paths)
+//
+// KaTeX at a third the total. MathJax's one real advantage — no font files, so
+// no missing-glyph boxes while fonts load — is not worth 1.2 MB in a plugin
+// bundle, and the fonts here are local files in the same directory as the page
+// rather than a network fetch, so the race it avoids barely exists.
+//
+// ## What the native renderer could not do
+//
+// `MarkdownMath` draws maths with a hand-written parser and layout engine
+// because AppKit has no TeX renderer that does not drag in a web view. It is
+// all-or-nothing per expression: anything its parser refuses is left as tinted
+// source. This surface IS a web view, so that constraint is gone — but the rule
+// it produced is kept, because it is a good rule. An expression KaTeX cannot
+// parse stays as source and stays tinted, rather than half-rendering.
+
+/// `$inline$` and `$$block$$`, outside code.
+///
+/// The scan mirrors `MarkdownMath.spans`: a `$` opens, two `$` open a block,
+/// and the closing delimiter must be the same width. Suppressed inside code for
+/// the same reason a wikilink is — `$5 and $10` in prose is not mathematics,
+/// and neither is a `$` in a shell snippet.
+function mathRanges(state) {
+  const text = state.doc.toString()
+  const code = codeRanges(state)
+  const inCode = at => code.some(r => at >= r.from && at < r.to)
+  const found = []
+  const isSpace = ch => ch === " " || ch === "\t" || ch === "\n" || ch === "\r"
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== "$" || inCode(i)) { i++; continue }
+    const isBlock = text[i + 1] === "$"
+    const width = isBlock ? 2 : 1
+    const delimiter = isBlock ? "$$" : "$"
+    // An inline opener followed by whitespace is not an opener. `$ x$` is
+    // prose; so is the first `$` of "costs $ 5".
+    if (!isBlock && isSpace(text[i + 1])) { i += 1; continue }
+    let close = -1
+    let j = i + width
+    while (j < text.length) {
+      if (text[j] === "\\") { j += 2; continue }
+      // An inline expression never crosses a line, which is `MarkdownMath`'s
+      // rule and what stops a lone `$` from swallowing the rest of the note.
+      if (!isBlock && (text[j] === "\n" || text[j] === "\r")) break
+      if (text.startsWith(delimiter, j)) {
+        // An inline `$…$` must not be the opening half of a `$$`.
+        if (!isBlock && text[j + 1] === "$") { j += 2; continue }
+        // THE rule that stops "$5 and then $10 more" from being an
+        // expression: a closing delimiter is never preceded by whitespace.
+        // Transcribed from `MarkdownMath.closingDelimiter`, where it is the
+        // reason a vault full of prices does not fill with rendered maths.
+        //
+        // Applied to inline only. A block may span lines —
+        //
+        //     $$
+        //     x = y
+        //     $$
+        //
+        // — which is how Obsidian is written and used, and which the native
+        // renderer's shared whitespace rule rejects. A deliberate divergence:
+        // this surface can render it, and the parity goal is Obsidian's
+        // behaviour rather than the native renderer's limits.
+        if (!isBlock && isSpace(text[j - 1])) { j += 1; continue }
+        close = j
+        break
+      }
+      j++
+    }
+    if (close === -1) { i += 1; continue }
+    const body = text.slice(i + width, close)
+    if (!body.trim()) { i += width; continue }
+    found.push({ from: i, to: close + width, body, isBlock })
+    i = close + width
+  }
+  return found
+}
+
+/// KaTeX, once it has arrived. See `src/katex-entry.js` for why it is not
+/// simply imported: it costs ~29.5 MB of resident memory PER SURFACE, and most
+/// notes contain no mathematics at all.
+let katex = null
+let katexLoading = false
+
+/// Signals that KaTeX is available, so the decoration facet recomputes.
+const katexEffect = StateEffect.define()
+
+const katexField = StateField.define({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) if (effect.is(katexEffect)) return true
+    return value
+  },
+})
+
+/// Fetch KaTeX, once, and redraw when it lands.
+///
+/// Until it does, expressions stay as source — which is already what an
+/// unparseable expression does, so there is no third state to design.
+function loadKatex(view) {
+  if (katex || katexLoading) return
+  katexLoading = true
+  const script = document.createElement("script")
+  script.src = "katex.js"
+  script.onload = () => {
+    katex = window.__loreKatex || null
+    // A transaction, not a direct redraw: the facet depends on this field, and
+    // that dependency is what makes the redraw happen at all.
+    if (katex) view.dispatch({ effects: katexEffect.of(true) })
+  }
+  script.onerror = () => {
+    // Left unloaded rather than retried on every keystroke. Maths stays source,
+    // which is readable — a retry loop against a missing file would not be.
+    katexLoading = false
+    console.error("[Lore] katex.js failed to load; maths stays as source")
+  }
+  document.head.appendChild(script)
+}
+
+/// One rendered expression.
+///
+/// KaTeX is given `throwOnError: false`, and the result is checked: an
+/// expression it cannot parse renders as KaTeX's own error markup, which is a
+/// red version of the source. That is not what this surface wants — the native
+/// renderer's rule is that unparseable maths stays SOURCE, tinted, so the
+/// reader can still tell notation from prose. So a failure is caught and the
+/// widget reports it, and the decoration is skipped entirely.
+class MathWidget extends WidgetType {
+  constructor(body, isBlock) { super(); this.body = body; this.isBlock = isBlock }
+  eq(other) { return other.body === this.body && other.isBlock === this.isBlock }
+  toDOM() {
+    const host = document.createElement(this.isBlock ? "div" : "span")
+    host.className = this.isBlock ? "cm-lore-math-block" : "cm-lore-math"
+    host.dataset.tex = this.body
+    katex.render(this.body, host, {
+      displayMode: this.isBlock,
+      throwOnError: false,
+      output: "html",
+    })
+    return host
+  }
+  ignoreEvent() { return true }
+}
+
+/// Whether KaTeX can render this at all.
+///
+/// Asked BEFORE deciding to decorate, so an expression it refuses is left as
+/// source rather than replaced by red error text. `renderToString` is used for
+/// the check because it throws where `render` into a node would not.
+function mathParses(body, isBlock) {
+  if (!katex) return false
+  try {
+    katex.renderToString(body, { displayMode: isBlock, throwOnError: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --------------------------------------------------------------- embeds
 //
 // E2T5. `![[picture.png]]` and `![](picture.png)` become real images; anything
@@ -673,7 +841,7 @@ class TransclusionWidget extends WidgetType {
           markdown(), syntaxHighlighting(highlight),
           nestedLivePreview, tablePlugin, EditorView.lineWrapping,
           EditorView.editable.of(false),
-          settingsField, transclusionField,
+          settingsField, transclusionField, katexField,
         ],
       }),
       parent: body,
@@ -765,6 +933,8 @@ function livePreviewDecorations(state, options = {}) {
   for (const w of wikilinkRanges(state)) reserved.push({ from: w.from, to: w.to })
   const images = markdownImages(state)
   for (const i of images) reserved.push({ from: i.from, to: i.to })
+  const maths = mathRanges(state)
+  for (const m of maths) reserved.push({ from: m.from, to: m.to })
   const isReserved = (from, to) => reserved.some(r => from < r.to && to > r.from)
   const taskLineNumbers = new Set(tasks.map(t => t.line))
   syntaxTree(state).iterate({
@@ -839,6 +1009,33 @@ function livePreviewDecorations(state, options = {}) {
     hidden.push({ from: link.from, to: link.to,
                   deco: Decoration.replace({
                     widget: new WikilinkWidget(link.target, link.display) }) })
+  }
+
+  // Maths. An expression KaTeX refuses is left as source and merely tinted —
+  // `MarkdownMath`'s all-or-nothing rule, kept: half-rendering would leave the
+  // reader unable to tell which parts are notation and which are content.
+  for (const math of maths) {
+    // No line decoration here. One was added at the block's own start position,
+    // and a `Decoration.replace({block: true})` sorts BEFORE a
+    // `Decoration.line` at the same position — `RangeSetBuilder` threw
+    // "Ranges must be added sorted by `from` position and `startSide`" and took
+    // the whole surface down. It was also unused: nothing styled that class.
+    // EVERY line the expression spans, not just its first and last. A block
+    // written across three lines has a middle one, and the caret sitting on it
+    // left the maths rendered with no way to edit the source it was standing
+    // in.
+    const first = doc.lineAt(math.from).number
+    const last = doc.lineAt(math.to).number
+    let caretInside = false
+    for (let n = first; n <= last && !caretInside; n++) {
+      if (revealed.has(n)) caretInside = true
+    }
+    if (caretInside) continue
+    if (!mathParses(math.body, math.isBlock)) continue
+    hidden.push({ from: math.from, to: math.to,
+                  deco: Decoration.replace({
+                    widget: new MathWidget(math.body, math.isBlock),
+                    block: math.isBlock }) })
   }
 
   // Embeds. An `![[…]]` whose target is an image or an attachment is replaced;
@@ -953,13 +1150,13 @@ function livePreviewDecorations(state, options = {}) {
 }
 
 const livePreview = EditorView.decorations.compute(
-  ["doc", "selection", settingsField, transclusionField],
+  ["doc", "selection", settingsField, transclusionField, katexField],
   state => livePreviewDecorations(state))
 
 /// The same decorations, with transclusions left as source. Used INSIDE a
 /// transclusion, which is what makes a cycle impossible rather than capped.
 const nestedLivePreview = EditorView.decorations.compute(
-  ["doc", "selection", settingsField],
+  ["doc", "selection", settingsField, katexField],
   state => livePreviewDecorations(state, { expandTransclusions: false,
                                           revealCaretLine: false }))
 
@@ -1136,6 +1333,14 @@ window.loreEditor = {
         EditorView.contentAttributes.of({ spellcheck: "true",
                                           autocorrect: "on",
                                           autocapitalize: "off" }),
+        katexField,
+        // Load KaTeX the first time a document that could contain maths is
+        // seen. The gate is `includes("$")` rather than a real scan: the scan
+        // walks the whole document, and this runs on every update.
+        EditorView.updateListener.of(u => {
+          if (katex || katexLoading) return
+          if (u.state.doc.toString().includes("$")) loadKatex(u.view)
+        }),
         EditorView.updateListener.of(u => {
           if (!u.docChanged || applyingFromSwift) return
           window.webkit?.messageHandlers?.lore?.postMessage(
@@ -1261,6 +1466,23 @@ window.loreEditor = {
     return box ? box.innerText : null
   },
   transclusionRequests() { return Array.from(requested) },
+  /// Whether KaTeX has been fetched. The POINT of the split bundle is that
+  /// this stays false for a note with no mathematics in it.
+  mathEngineLoaded() { return !!katex },
+  mathCount() { return document.querySelectorAll(".cm-lore-math, .cm-lore-math-block").length },
+  mathBlockCount() { return document.querySelectorAll(".cm-lore-math-block").length },
+  mathSources() {
+    return Array.from(document.querySelectorAll(".cm-lore-math, .cm-lore-math-block"))
+                .map(n => n.dataset.tex)
+  },
+  /// Whether KaTeX produced real markup rather than its error rendering. The
+  /// `.katex-error` class is what an unparseable expression becomes, and it must
+  /// never appear on this surface.
+  mathErrorCount() { return document.querySelectorAll(".katex-error").length },
+  mathRendersTo(index) {
+    const node = document.querySelectorAll(".cm-lore-math, .cm-lore-math-block")[index || 0]
+    return node ? node.innerHTML.includes("katex") : null
+  },
   /// Test hook: forget what has been asked for, so one test's requests cannot
   /// decide another's assertions.
   __resetTransclusionRequests() { requested.clear(); return true },
