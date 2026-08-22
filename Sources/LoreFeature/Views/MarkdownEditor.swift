@@ -139,6 +139,15 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// elapses. Held so each move REPLACES the last intent rather than
         /// queueing another one.
         var hoverTask: Task<Void, Never>?
+        /// The link currently wearing the hover underline, so the next pointer
+        /// move can take it off again. Held rather than re-derived: the
+        /// underline is a TEMPORARY attribute and nothing else records where
+        /// it was put.
+        var hoveredLinkRange: NSRange?
+        /// Guards the one re-render a stale table box schedules, so a render
+        /// cannot queue another from its own tail. See
+        /// `remeasureTablesIfTheyWereMeasuredAtAnotherWidth`.
+        var isRemeasuringTables = false
         /// Resolves a link target to a file. Supplied by the shell; the same
         /// closure embeds already use, so a hover and an embed can never
         /// disagree about what a name points at.
@@ -154,6 +163,34 @@ public struct MarkdownEditor: NSViewRepresentable {
         /// document the user is already looking at rather than only the next
         /// one they open.
         var settings: EditorSettings
+
+        /// The scale and the faces the current `tokens` and `settings` imply.
+        ///
+        /// CACHED against both, rather than constructed per access. It was
+        /// constructed per access — `MarkdownTheme(tokens:settings:)` inline at
+        /// half a dozen call sites — which was free while the type held only
+        /// numbers. It no longer does: building one resolves two fonts and
+        /// measures a space advance (see `MarkdownTheme.spaceAdvance`), and the
+        /// render and decoration paths below ask for the theme several times
+        /// per pass.
+        ///
+        /// Self-invalidating by comparison rather than by a `didSet` on each
+        /// input: both are `Equatable`, `updateNSView` assigns them freely, and
+        /// a cache that has to be manually poisoned is a cache that eventually
+        /// is not.
+        private var themeCache: (tokens: HostThemeTokens,
+                                 settings: EditorSettings,
+                                 theme: MarkdownTheme)?
+
+        var theme: MarkdownTheme {
+            if let cached = themeCache,
+               cached.tokens == tokens, cached.settings == settings {
+                return cached.theme
+            }
+            let built = MarkdownTheme(tokens: tokens, settings: settings)
+            themeCache = (tokens, settings, built)
+            return built
+        }
         var completions: (@MainActor (String) -> [IndexRow])?
         /// See `MarkdownEditor.tagCompletions`.
         var tagCompletions: (@MainActor (String) -> [String])?

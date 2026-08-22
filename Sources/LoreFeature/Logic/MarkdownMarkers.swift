@@ -16,6 +16,12 @@ public enum MarkerOwner: Equatable, Sendable {
     /// collapses — but present so a future syntax that DOES want to
     /// distinguish "this marker belongs to a tag" from the other owners can.
     case tag
+    /// A `---` rule's whole line: every character of it is notation, and the
+    /// drawn rule replaces all of it.
+    case thematicBreak
+    /// A task item's `[ ]` / `[x]`, which collapses so the drawn checkbox can
+    /// stand in its place — the same substitution `listBullet` makes.
+    case checkbox
     /// A callout's `[!type]` header, which collapses like any other syntax
     /// so the rendered block shows a title rather than its own declaration.
     case callout
@@ -187,6 +193,47 @@ enum MarkdownMarkers {
         guard divider.location != NSNotFound else { return [] }
         return [NSRange(location: range.location, length: 1),
                 NSRange(location: divider.location, length: limit - divider.location)]
+    }
+
+    /// An inline image `![alt](source)`, split into the source's own range and
+    /// the notation around it.
+    ///
+    /// Shaped to match `wikilinkBrackets`' answer for `![[target]]` so both
+    /// embed spellings feed the SAME `.embed` span and the same
+    /// `EmbedRendering` path: a content range over what identifies the image,
+    /// and marker ranges over everything else, which the reveal machinery then
+    /// collapses and restores exactly as it does for a wikilink.
+    ///
+    /// The alt text lives INSIDE the opening marker rather than getting a span
+    /// of its own. It is not what the image is — an embed resolves by source —
+    /// and giving it a content span would mean an image whose alt text stayed
+    /// on screen beside the picture.
+    ///
+    /// Returns `nil` for anything that is not exactly this shape: a reference
+    /// image, an autolink, a malformed pair. The rule this file follows —
+    /// a wrong marker range HIDES the user's content once collapsed, so
+    /// "emit nothing" is the only safe failure.
+    static func inlineImage(in range: NSRange, text: NSString)
+        -> (source: NSRange, markers: [NSRange])? {
+        guard range.location >= 0, range.length >= 5,
+              range.location + range.length <= text.length else { return nil }
+        let limit = range.location + range.length
+        guard text.character(at: range.location) == 0x21,          // !
+              text.character(at: range.location + 1) == 0x5B,      // [
+              text.character(at: limit - 1) == 0x29 else { return nil }   // )
+        // The LAST `](` opens the destination, so an alt text containing
+        // brackets does not shear the split.
+        let body = NSRange(location: range.location + 1, length: range.length - 1)
+        let divider = text.range(of: "](", options: .backwards, range: body)
+        guard divider.location != NSNotFound else { return nil }
+
+        let sourceStart = divider.location + 2
+        let sourceEnd = limit - 1
+        guard sourceEnd > sourceStart else { return nil }
+        let source = NSRange(location: sourceStart, length: sourceEnd - sourceStart)
+        return (source,
+                [NSRange(location: range.location, length: sourceStart - range.location),
+                 NSRange(location: sourceEnd, length: 1)])
     }
 
     /// `[[` and `]]` around a wikilink whose CONTENT span covers only the

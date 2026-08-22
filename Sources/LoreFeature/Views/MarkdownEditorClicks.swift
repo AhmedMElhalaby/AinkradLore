@@ -135,6 +135,18 @@ final class LinkTextView: NSTextView {
     var blockBackgroundPalette: MarkdownBlockBackgrounds.Palette? {
         didSet { if blockBackgroundPalette != oldValue { needsDisplay = true } }
     }
+    /// The theme's prose face, which the decoration is SIZED from: a drawn
+    /// list marker, a callout's icon and title, a maths baseline. Set beside
+    /// the palette and for the same reason — the drawing happens in
+    /// `drawBackground`, which has no theme of its own, and these two are the
+    /// whole of what it needs from one.
+    ///
+    /// Redraws on change, like the palette: density and ⌘+/⌘− move the font,
+    /// and decoration that kept its old size would drift away from the text
+    /// it belongs to.
+    var blockBackgroundFont: NSFont? {
+        didSet { if blockBackgroundFont != oldValue { needsDisplay = true } }
+    }
 
     /// Resolved image embeds to paint where their (collapsed) source text
     /// sits — see `MarkdownEditor.Coordinator.applyEmbeds`. Drawn in
@@ -153,6 +165,8 @@ final class LinkTextView: NSTextView {
         super.drawBackground(in: rect)
         if let palette = blockBackgroundPalette {
             MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
+                                          font: blockBackgroundFont
+                                              ?? MarkdownStyleRenderer.fallbackFont,
                                           in: self, dirtyRect: rect)
         }
         drawEmbedImages(in: rect)

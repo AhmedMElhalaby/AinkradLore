@@ -17,10 +17,15 @@ struct MarkdownTable: Equatable {
         /// The trimmed content, or an empty range at the cell's start when the
         /// cell holds only whitespace.
         let range: Range<Int>
-        /// Rendered width in CHARACTERS, which in a monospaced font is the
-        /// width in columns. Swift `Character`s rather than UTF-16 units: an
-        /// emoji is one grapheme and two units, and padding by units would
-        /// indent every row containing one.
+        /// Length in CHARACTERS. No longer a rendered width — nothing
+        /// measures a cell from this any more, since `MarkdownTableLayout`
+        /// asks the text storage instead and is therefore correct for a
+        /// proportional font. What survives is the one question it can still
+        /// answer honestly: whether the cell is EMPTY, which is how `row`
+        /// tells a row's opening and closing `|` from real columns.
+        ///
+        /// Swift `Character`s rather than UTF-16 units, as before: an emoji is
+        /// one grapheme and two units.
         let width: Int
     }
 
@@ -41,8 +46,15 @@ struct MarkdownTable: Equatable {
     let rows: [Row]
     /// The `|---|:--:|` line, which carries no content and is hidden whole.
     let delimiterRow: Row?
-    /// Width in characters of each column: the widest cell in it.
-    let columnWidths: [Int]
+    /// How many columns the table has: the widest row's cell count.
+    ///
+    /// Was `columnWidths: [Int]` — the width in CHARACTERS of each column,
+    /// which only meant anything on screen while the editor's base font was
+    /// monospaced. The kern-padding renderer that consumed it is gone (see
+    /// `MarkdownTableStyling`), and `MarkdownTableLayout` measures cells from
+    /// the text storage instead, so the only surviving question this answered
+    /// is how many columns there are.
+    let columnCount: Int
     /// One entry per column, defaulting to `.left` — GFM's own default, and
     /// the answer for a table whose delimiter row carries no colons at all.
     let columnAlignments: [Alignment]
@@ -89,12 +101,6 @@ struct MarkdownTable: Equatable {
             .map(\.element)
 
         let columns = content.map(\.cells.count).max() ?? 0
-        var widths = [Int](repeating: 0, count: columns)
-        for row in content {
-            for (column, cell) in row.cells.enumerated() where column < columns {
-                widths[column] = max(widths[column], cell.width)
-            }
-        }
         var alignments = [Alignment](repeating: .left, count: columns)
         if let delimiter {
             for (column, cell) in delimiter.cells.enumerated() where column < columns {
@@ -102,7 +108,7 @@ struct MarkdownTable: Equatable {
             }
         }
         return MarkdownTable(rows: content, delimiterRow: delimiter,
-                             columnWidths: widths, columnAlignments: alignments)
+                             columnCount: columns, columnAlignments: alignments)
     }
 
     /// Splits one line into cells and pipes.

@@ -107,7 +107,7 @@ enum MarkdownReveal {
     static func wideSpans(in text: String, spans: [StyleSpan]) -> [Range<Int>] {
         let ns = text as NSString
         return spans.compactMap { span in
-            guard span.kind.isDelimitedByASinglePair,
+            guard span.kind.revealsWholeOnCaretEntry,
                   span.range.lowerBound >= 0, span.range.upperBound <= ns.length,
                   span.range.lowerBound < span.range.upperBound else { return nil }
             let range = NSRange(location: span.range.lowerBound, length: span.range.count)

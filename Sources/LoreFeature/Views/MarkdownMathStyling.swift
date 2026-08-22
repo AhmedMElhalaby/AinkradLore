@@ -123,6 +123,7 @@ enum MarkdownMathStyling {
     /// subtraction — get this backwards and a fraction renders upside down,
     /// which is at least an obvious failure rather than a subtle one.
     static func draw(_ box: MathBox, at range: NSRange, tint: NSColor,
+                     font: NSFont,
                      in textView: NSTextView, origin: NSPoint, dirtyRect: NSRect) {
         let rect = MarkdownBlockBackgrounds.boundingRect(of: range, in: textView)
         guard !rect.isNull, !rect.isEmpty else { return }
@@ -131,7 +132,6 @@ enum MarkdownMathStyling {
 
         // The baseline of the line the expression sits on. The collapsed run
         // has no useful height of its own, so the LINE's rect provides it.
-        let font = MarkdownStyleRenderer.baseFont
         let baselineY = placed.maxY - (placed.height - (font.ascender - font.descender)) / 2
             + font.descender
 

@@ -27,16 +27,55 @@ final class EditorSettingsTests: XCTestCase {
         XCTAssertEqual(theme.maxMeasure, 760)
     }
 
-    /// The heading ramp became DERIVED (body × ratio) rather than fixed, so
-    /// zoom moves it. At default settings it must still land on exactly the
-    /// old absolute sizes.
-    func test_defaultHeadingRampMatchesTheOldAbsoluteSizes() {
+    /// The heading ramp at default settings.
+    ///
+    /// This test used to pin [30, 24, 20, 17.5, 16, 15.5] — the sizes from
+    /// before `EditorSettings` existed — and its job then was exactly right:
+    /// prove that making the ramp DERIVED (body × ratio) had not changed
+    /// anyone's document. That job is done, and M9.1 changes the ramp on
+    /// purpose, so the numbers are updated rather than the assertion relaxed.
+    ///
+    /// The old ramp was flat at the bottom: h5 was 1 pt above body and h6 half
+    /// a point, which made the last two levels indistinguishable from each
+    /// other and nearly from prose. The new ratios are Obsidian's, with h6 at
+    /// 1.05 rather than its 1.00 so `MarkdownThemeTests`' "even h6 outranks
+    /// body" rule survives.
+    func test_defaultHeadingRampIsTheObsidianRatios() {
         let theme = MarkdownTheme(tokens: tokens, settings: .default)
-        let expected: [CGFloat] = [30, 24, 20, 17.5, 16, 15.5]
+        let expected: [CGFloat] = [27, 24, 21, 18.75, 16.875, 15.75]
         for (index, size) in expected.enumerated() {
             XCTAssertEqual(theme.headingSize(index + 1), size, accuracy: 0.001,
-                           "h\(index + 1) drifted from the pre-settings ramp")
+                           "h\(index + 1) drifted from the intended ramp")
         }
+        // Every step is a VISIBLE one, which is the property the old ramp lost
+        // at the bottom and the reason this changed at all.
+        for level in 1..<6 {
+            XCTAssertGreaterThanOrEqual(
+                theme.headingSize(level) - theme.headingSize(level + 1), 1.1,
+                "h\(level) and h\(level + 1) must be told apart by size")
+        }
+    }
+
+    /// The BODY font tracks density and zoom.
+    ///
+    /// The test that would have caught M9.1's central defect. `bodySize` was
+    /// computed correctly here and read by nothing except the heading ramp, so
+    /// changing density moved the headings and left the prose at a hard-coded
+    /// 14 pt — a control that appeared to work and did not.
+    func test_theBodyFontTracksDensityAndZoom() {
+        for density in EditorSettings.Density.allCases {
+            let settings = EditorSettings(density: density, measure: .standard, zoomStep: 0)
+            let theme = MarkdownTheme(tokens: tokens, settings: settings)
+            XCTAssertEqual(theme.bodyFont.pointSize, settings.bodySize, accuracy: 0.001,
+                           "\(density) must actually change the prose size")
+            XCTAssertFalse(theme.bodyFont.isFixedPitch, "prose is proportional")
+            XCTAssertTrue(theme.monoFont.isFixedPitch, "code is not")
+            XCTAssertLessThan(theme.monoFont.pointSize, theme.bodyFont.pointSize,
+                              "mono reads larger at equal points, so it is set smaller")
+        }
+        let zoomed = MarkdownTheme(tokens: tokens,
+                                   settings: EditorSettings.default.zoomed(by: 2))
+        XCTAssertEqual(zoomed.bodyFont.pointSize, 18, accuracy: 0.001)
     }
 
     /// An out-of-range level from a malformed document still clamps.
@@ -52,7 +91,7 @@ final class EditorSettingsTests: XCTestCase {
         let zoomed = EditorSettings.default.zoomed(by: 2)     // ×1.2
         let theme = MarkdownTheme(tokens: tokens, settings: zoomed)
         XCTAssertEqual(theme.bodySize, 18, accuracy: 0.001)
-        XCTAssertEqual(theme.headingSize(1), 36, accuracy: 0.001,
+        XCTAssertEqual(theme.headingSize(1), 18 * 1.80, accuracy: 0.001,
                        "headings must scale with the body, not stay fixed")
     }
 

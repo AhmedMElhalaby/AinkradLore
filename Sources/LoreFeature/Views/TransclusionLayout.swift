@@ -76,7 +76,7 @@ enum TransclusionLayout {
     /// indistinguishable from an empty note.
     private static func attributedString(for content: TransclusionContent,
                                          theme: MarkdownTheme) -> NSAttributedString {
-        let font = MarkdownStyleRenderer.baseFont.withSize(theme.bodySize)
+        let font = theme.bodyFont
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineHeightMultiple = theme.lineHeightMultiple
 

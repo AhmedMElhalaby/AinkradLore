@@ -196,7 +196,6 @@ extension MarkdownEditor.Coordinator {
         let window = styleCache.isOverViewportCap
             ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
         lastViewportWindow = window
-        let theme = MarkdownTheme(tokens: tokens, settings: settings)
         MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
                                     tokens: tokens, theme: theme,
                                     limitedTo: window)
@@ -426,7 +425,7 @@ extension MarkdownEditor.Coordinator {
                                       depths: revealIndex.depths,
                                       in: ns, to: storage,
                                       tokens: tokens,
-                                      theme: MarkdownTheme(tokens: tokens, settings: settings))
+                                      theme: theme)
         // Re-run RIGHT AFTER `restyle`, scoped to this one block, so an
         // embed's collapse/paragraph-style/drawn-image never has a frame
         // where it looks wrong. `restyle` above just reset this block's
@@ -476,6 +475,7 @@ extension MarkdownEditor.Coordinator {
             tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
                                                         revealed: revealed,
                                                         maxWidth: textColumnWidth(of: tv),
+                                                        bodyFont: theme.bodyFont,
                                                         in: storage)
             MarkdownStyleRenderer.collapse(hidden.filter { rowMarkers.contains($0) },
                                            in: storage)
@@ -487,7 +487,7 @@ extension MarkdownEditor.Coordinator {
         // REVEALED hides nothing and still has to lose its padding, which is
         // this same call reaching the opposite answer.
         MarkdownMathStyling.reserveSpace(blockSpans, revealed: revealed,
-                                         font: MarkdownStyleRenderer.baseFont,
+                                         font: theme.bodyFont,
                                          in: storage)
         // `restyle` above reset this block's paragraph styles, which pops a
         // transcluded embed's reserved gap shut and leaves a stale region

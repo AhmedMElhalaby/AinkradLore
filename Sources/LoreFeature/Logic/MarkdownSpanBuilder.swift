@@ -37,6 +37,9 @@ public struct StyleSpan: Equatable, Sendable {
         case callout(MarkdownCallout.Kind)
         /// A callout's title — the author's own, on the header line.
         case calloutTitle(MarkdownCallout.Kind)
+        /// A `---` / `***` / `___` rule, whole. The source collapses and a
+        /// line is drawn across the measure in its place.
+        case thematicBreak
         /// A GFM pipe table, whole.
         case table
         /// A table's header row, which renders bolder than its body.
@@ -93,12 +96,31 @@ public struct StyleSpan: Equatable, Sendable {
             case .blockID:
                 return false
             case .heading, .listItem, .blockQuote, .callout, .calloutTitle,
-                 .table, .tableHeader, .checkbox, .marker:
+                 .table, .tableHeader, .checkbox, .marker, .thematicBreak:
                 return false
             // A `$…$` expression is delimited by ONE pair, so it reveals
             // whole rather than splitting across a line break.
             case .math: return true
             }
+        }
+
+        /// Whether the caret landing anywhere inside this span reveals ALL of
+        /// it, rather than only the line the caret is on.
+        ///
+        /// Two different reasons lead here. A span delimited by ONE marker
+        /// pair (`isDelimitedByASinglePair`) must reveal whole or the caret
+        /// stands in syntax whose other half is hidden.
+        ///
+        /// A TABLE is here for a second reason, found by watching what the
+        /// line-scoped rule actually does to one: the caret in a single row
+        /// put THAT row back to `| a | b |` while the rows above and below
+        /// stayed painted as a grid — a strip of raw markdown wedged inside a
+        /// table, which is the "glitching when I click on the table" Ahmed
+        /// reported. A table is one object on screen; it has to be one object
+        /// when it comes apart, too.
+        var revealsWholeOnCaretEntry: Bool {
+            if case .table = self { return true }
+            return isDelimitedByASinglePair
         }
     }
     /// UTF-16 offsets into the EDITOR's full string, frontmatter included.
@@ -248,6 +270,39 @@ extension MarkdownASTCollector {
         descendInto(table)
     }
 
+    /// A thematic break. Its whole line is the marker — there is no content
+    /// to keep — so the source collapses and `MarkdownBlockBackgrounds` draws
+    /// a rule where it was.
+    mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) {
+        guard let range = resolve(thematicBreak.range) else { return }
+        styleSpans.append(StyleSpan(range: swiftRange(range), kind: .thematicBreak))
+        appendMarkers([range], .thematicBreak)
+    }
+
+    /// `![alt](source)` — an image written in ordinary markdown rather than as
+    /// an Obsidian `![[embed]]`.
+    ///
+    /// Emitted as the SAME `.embed` kind the wikilink path produces, so
+    /// `EmbedRendering` renders it with no changes at all: one resolver, one
+    /// decode cache, one draw path, one set of geometry rules. A vault written
+    /// in Obsidian rarely contains this spelling, but anything imported does —
+    /// `HTMLToMarkdown` produces it — and until now those rendered as raw
+    /// source in the middle of the note.
+    ///
+    /// No code-fence guard is needed here, unlike the wikilink path's: fenced
+    /// content is never inline-parsed, so an `![](…)` inside a fence does not
+    /// reach the AST as an `Image` at all.
+    mutating func visitImage(_ image: Image) {
+        guard let range = resolve(image.range),
+              let parts = MarkdownMarkers.inlineImage(in: range, text: text)
+        else { return }
+        let full = swiftRange(range)
+        styleSpans.append(StyleSpan(range: swiftRange(parts.source),
+                                    kind: .embed(target: text.substring(with: parts.source),
+                                                 fullRange: full)))
+        appendMarkers(parts.markers, .link)
+    }
+
     mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
         if let ns = resolve(blockQuote.range) {
             let range = swiftRange(ns)
@@ -283,6 +338,16 @@ extension MarkdownASTCollector {
                let markerRange = checkboxMarkerRange(in: itemRange) {
                 styleSpans.append(StyleSpan(range: swiftRange(markerRange),
                                             kind: .checkbox(checkbox == .checked)))
+                // The brackets COLLAPSE, and a real checkbox is drawn in the
+                // gutter instead — the same substitution the list bullet makes,
+                // and for the same reason: `[x]` is notation, and a reader
+                // scanning a task list wants a control, not its spelling.
+                //
+                // The trailing space goes with them. Hiding `[x]` and keeping
+                // the space that followed it indents the item's text by one,
+                // which is exactly what `MarkdownMarkers.linePrefix` documents
+                // and avoids for `#` and `>`.
+                appendMarkers(checkboxMarkerWithTrailingSpace(markerRange), .checkbox)
             }
         }
         descendInto(listItem)
@@ -307,6 +372,18 @@ extension MarkdownASTCollector {
             .map { text.range(of: $0, options: [], range: line) }
             .filter { $0.location != NSNotFound }
             .min { $0.location < $1.location }
+    }
+
+    /// `[x]` plus the single space GFM requires after it.
+    ///
+    /// The space is included only when it is really there: a malformed item
+    /// with no space is not something this should widen over, and the
+    /// "emit what is verified, never a guess" rule this file follows applies
+    /// to a marker's LENGTH as much as to its existence.
+    private func checkboxMarkerWithTrailingSpace(_ marker: NSRange) -> [NSRange] {
+        let end = marker.location + marker.length
+        guard end < text.length, text.character(at: end) == 0x20 else { return [marker] }
+        return [NSRange(location: marker.location, length: marker.length + 1)]
     }
 
     /// Marker spans are ADDITIVE — the content span keeps the range it always

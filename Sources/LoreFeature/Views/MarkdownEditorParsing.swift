@@ -23,7 +23,6 @@ extension MarkdownEditor.Coordinator {
     /// (`containerInset`/`containerWidth`), so they cannot drift apart again.
     func applyContainerGeometry(forWidth width: CGFloat) {
         guard let tv = textView else { return }
-        let theme = MarkdownTheme(tokens: tokens, settings: settings)
         let inset = MarkdownEditorLayout.containerInset(forViewWidth: width, theme: theme)
         let containerWidth = MarkdownEditorLayout.containerWidth(forViewWidth: width, theme: theme)
         let insetChanged = tv.textContainerInset != inset
@@ -42,6 +41,39 @@ extension MarkdownEditor.Coordinator {
         // from carrying around a measurement it already knows it cannot use,
         // rather than discovering that one geometry check at a time.
         transclusionCache.invalidateMeasurements()
+
+        // A TABLE's box does not self-correct, and that is the difference from
+        // the transclusion case above.
+        //
+        // `MarkdownTableStyling.prepare` measures every column against the
+        // width available and stores the result in `tableRegions`, which is
+        // rebuilt only by a full render or an edit — never by a resize. So a
+        // table measured while the view was still at its initial width kept
+        // those columns forever: on first open that is a container narrow
+        // enough to squeeze every column to `minimumColumnWidth`, which is
+        // exactly the 2 x 48 pt grid Ahmed photographed, with the cell text
+        // wrapped into a 32 pt column and effectively invisible.
+        //
+        // Re-rendering is the honest fix rather than re-running `prepare` on
+        // its own: `prepare` has to happen BETWEEN the two collapse passes (it
+        // captures each cell's attributed text, which is microscopic once the
+        // rows collapse), and only the full path sequences those correctly.
+        //
+        // Guarded on the document actually containing a table, so the ordinary
+        // note pays nothing for this on every resize step.
+        guard widthChanged, styleCache.spans.contains(where: {
+            if case .table = $0.kind { return true }
+            return false
+        }) else { return }
+        // The snapshot has to be dropped first. `isRenderStale` compares the
+        // TEXT and the TOKENS and nothing else — neither of which a resize
+        // touches — so `applyStyles()` on its own returns immediately and the
+        // stale box survives. This is the same forcing the settings path does
+        // in `MarkdownEditorView.updateNSView`, for the same reason: a change
+        // that is invisible to the staleness check still has to reach the
+        // screen.
+        renderedSnapshot = nil
+        applyStyles()
     }
 
     // MARK: - Live transclusion updates

@@ -23,6 +23,7 @@ extension MarkdownBlockBackgrounds {
                                     at range: NSRange, columnX x: CGFloat,
                                     columnWidth width: CGFloat,
                                     tokens: HostThemeTokens,
+                                    font: NSFont,
                                     in textView: NSTextView, origin: NSPoint,
                                     dirtyRect: NSRect) {
         var rect = boundingRect(of: range, in: textView)
@@ -35,8 +36,16 @@ extension MarkdownBlockBackgrounds {
         // A wash, not a fill: the body text sits on this, and a callout that
         // out-shouts its own contents is decoration rather than emphasis.
         tint.withAlphaComponent(0.10).setFill()
-        NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
-                     yRadius: cornerRadius).fill()
+        let outline = NSBezierPath(roundedRect: panel, xRadius: cornerRadius,
+                                   yRadius: cornerRadius)
+        outline.fill()
+        // A border as well as the wash. Obsidian draws both, and the wash
+        // alone at 0.10 leaves the panel's edge undefined against a surface
+        // that is nearly the same value — the callout reads as a smudge behind
+        // the text rather than as a box around it.
+        tint.withAlphaComponent(0.25).setStroke()
+        outline.lineWidth = 1
+        outline.stroke()
         tint.withAlphaComponent(0.85).setFill()
         NSBezierPath(roundedRect: NSRect(x: x, y: panel.minY, width: barWidth,
                                          height: panel.height),
@@ -51,8 +60,11 @@ extension MarkdownBlockBackgrounds {
         guard !line.isNull, line.height > 0 else { return }
         line = line.offsetBy(dx: origin.x, dy: origin.y)
 
-        let font = MarkdownStyleRenderer.boldBaseFont
-        let iconSize = MarkdownStyleRenderer.baseSize
+        // The icon matches the TEXT's size, and the drawn title matches its
+        // weight — both from the theme's own face, so a callout at Comfortable
+        // is not decorated at Compact's scale.
+        let titleFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        let iconSize = font.pointSize
         let iconX = x + barWidth + calloutIconGap
         if drawsIcon,
            let icon = NSImage(systemSymbolName: kind.symbolName, accessibilityDescription: nil) {
@@ -71,7 +83,7 @@ extension MarkdownBlockBackgrounds {
         // `.calloutTitle`; only its absence is drawn over.
         guard let title else { return }
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: tint
+            .font: titleFont, .foregroundColor: tint
         ]
         let size = (title as NSString).size(withAttributes: attributes)
         (title as NSString).draw(at: NSPoint(x: iconX + iconSize + calloutIconGap,

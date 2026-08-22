@@ -439,6 +439,7 @@ extension MarkdownEditor.Coordinator {
             tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
                                                         revealed: revealedRange,
                                                         maxWidth: textColumnWidth(of: tv),
+                                                        bodyFont: theme.bodyFont,
                                                         in: storage)
         }
         // Drains whatever the restyled blocks above asked for — one

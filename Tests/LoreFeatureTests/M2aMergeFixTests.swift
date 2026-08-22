@@ -196,20 +196,52 @@ final class M2aFontCompositionTests: XCTestCase {
         let headingSize = font(storage, at: 2).pointSize
         let code = font(storage, at: 6)                      // inside "code"
         XCTAssertEqual(headingSize, Self.theme.headingSize(1), accuracy: 0.01)
-        XCTAssertEqual(code.pointSize, headingSize)
+        // Scaled to the HEADING, not snapped back to body-code size — the
+        // point M2a fixed. The mono ratio applies either way, so the code in a
+        // 27 pt heading is 27 × 0.92 rather than 27 exactly.
+        XCTAssertEqual(code.pointSize, headingSize * MarkdownTheme.monoRatio,
+                       accuracy: 0.01)
         XCTAssertTrue(code.isFixedPitch, "inline code must still be monospaced")
     }
 
-    /// Top-level appearance is UNCHANGED by composition — the fix must not
-    /// quietly restyle every note that has no nesting in it.
-    func test_topLevelRunsAreUnchanged() {
+    /// Top-level runs take the THEME's font, and composition adds traits to it
+    /// rather than replacing it.
+    ///
+    /// This test used to assert the opposite of two of these things —
+    /// `font(storage, at: 0).isFixedPitch` and `pointSize ==
+    /// MarkdownStyleRenderer.baseSize` — and it passed, because both were
+    /// true: the editor set every paragraph of prose in a monospaced 14 pt
+    /// constant. That is the M9.1 defect, written down as an assertion, which
+    /// is why this is REWRITTEN rather than relaxed. Body text is now
+    /// proportional and sized by `EditorSettings`, and the old assertions
+    /// would have to be deleted to make that possible — so they are replaced
+    /// by the ones that say what should have been true all along.
+    func test_topLevelRunsUseTheThemeFontAndComposeTraits() {
         let storage = styled("plain **b** _i_ `c`\n")
-        XCTAssertEqual(font(storage, at: 0).pointSize, MarkdownStyleRenderer.baseSize)
-        XCTAssertTrue(font(storage, at: 0).isFixedPitch, "base font is monospaced")
-        XCTAssertTrue(traits(font(storage, at: 8)).contains(.boldFontMask))
-        XCTAssertTrue(traits(font(storage, at: 13)).contains(.italicFontMask))
-        XCTAssertTrue(font(storage, at: 17).isFixedPitch)
-        XCTAssertEqual(font(storage, at: 17).pointSize, MarkdownStyleRenderer.baseSize)
+        let body = font(storage, at: 0)
+
+        XCTAssertEqual(body.pointSize, Self.theme.bodyFont.pointSize, accuracy: 0.01)
+        XCTAssertFalse(body.isFixedPitch, "prose is set in a PROPORTIONAL face")
+
+        // Bold and italic COMPOSE onto the body face: same family, extra
+        // trait. Re-basing onto a fresh `.systemFont` kept the size and lost
+        // the family, which is what made a bold run inside monospaced text
+        // change typeface mid-sentence.
+        let bold = font(storage, at: 8)
+        let italic = font(storage, at: 13)
+        XCTAssertTrue(traits(bold).contains(.boldFontMask))
+        XCTAssertTrue(traits(italic).contains(.italicFontMask))
+        XCTAssertEqual(bold.familyName, body.familyName,
+                       "bold must be the body FAMILY with a trait added")
+        XCTAssertEqual(italic.familyName, body.familyName)
+
+        // Inline code is the one run that changes family, which is now the
+        // whole of what marks it as code — and it is set below the body size,
+        // since a monospaced face reads larger at equal points.
+        let code = font(storage, at: 17)
+        XCTAssertTrue(code.isFixedPitch, "inline code is monospaced")
+        XCTAssertEqual(code.pointSize, Self.theme.monoFont.pointSize, accuracy: 0.01)
+        XCTAssertLessThan(code.pointSize, body.pointSize)
     }
 }
 
