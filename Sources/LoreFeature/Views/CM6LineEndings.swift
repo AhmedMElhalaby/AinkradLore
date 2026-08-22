@@ -27,11 +27,21 @@ import Foundation
 /// recorded on the way in and restored on the way out.
 ///
 /// A document with MIXED endings cannot round-trip — CM6 has one separator and
-/// there is nowhere to record which line had which. Such a file is normalised
-/// to its dominant ending, and that is a real change to the user's bytes. It is
-/// declared here rather than hidden: mixed endings inside a single file are
-/// almost always an accident already, and the alternative is refusing to open
-/// the note at all.
+/// there is nowhere to record which line had which.
+///
+/// So such a document never reaches this surface. `MarkdownDocumentEditor
+/// .chooseSurface(for:)` opens it in the NATIVE editor instead, where the text
+/// storage is the document character for character and every byte survives.
+/// `isConsistent` exists for that decision; the normalisation below is the
+/// fallback for a document that somehow arrives here anyway, and it logs when
+/// it fires.
+///
+/// This replaced an earlier answer — normalise to the dominant ending and
+/// declare it — which was rejected on the grounds that changing the user's
+/// bytes before they have typed anything is the one thing this editor may never
+/// do, whether or not it is declared. Refusing to open the note was rejected
+/// too. Sending it to the editor that can hold it costs the reader only the
+/// affordances CM6 adds, on a file that is almost always mixed by accident.
 enum CM6LineEndings {
 
     enum Ending: String {
@@ -83,18 +93,38 @@ enum CM6LineEndings {
     /// To what CodeMirror will hold anyway, done deliberately in Swift so the
     /// conversion is one function with tests rather than a side effect of a
     /// third-party document model.
+    ///
+    /// The guard is on UTF-16 units, not on Characters. It was
+    /// `text.contains("\r")`, and that is FALSE for a pure-CRLF document:
+    /// Swift treats `"\r\n"` as a single grapheme cluster, which does not equal
+    /// `Character("\r")`. So the whole function short-circuited and returned
+    /// Windows text unconverted, while claiming in its own name to have
+    /// converted it. Measured:
+    ///
+    ///     "windows\r\nlines\r\n".contains("\r")  ->  false
+    ///     .count 14, .utf16.count 16
     static func toLF(_ text: String) -> String {
-        guard text.contains("\r") else { return text }
+        guard text.utf16.contains(0x0D) else { return text }
         return text.replacingOccurrences(of: "\r\n", with: "\n")
                    .replacingOccurrences(of: "\r", with: "\n")
     }
 
     /// Back to the document's own ending.
+    ///
+    /// IDEMPOTENT, deliberately: `toLF` is applied first, so text that already
+    /// carries the target ending is returned unchanged rather than converted
+    /// twice. Without it, `from("a\r\nb", to: .crlf)` replaced the `\n` inside
+    /// each existing `\r\n` and produced `0D 0D 0A` — CR CR LF, a stray
+    /// carriage return on every line of a Windows note. It reached that state
+    /// only because `toLF` above was silently doing nothing, so one bug hid the
+    /// other; both are fixed here rather than one, because either alone leaves
+    /// a function that corrupts text when called the obvious way.
     static func from(_ text: String, to ending: Ending) -> String {
+        let lf = toLF(text)
         switch ending {
-        case .lf: return text
-        case .crlf: return text.replacingOccurrences(of: "\n", with: "\r\n")
-        case .cr: return text.replacingOccurrences(of: "\n", with: "\r")
+        case .lf: return lf
+        case .crlf: return lf.replacingOccurrences(of: "\n", with: "\r\n")
+        case .cr: return lf.replacingOccurrences(of: "\n", with: "\r")
         }
     }
 }

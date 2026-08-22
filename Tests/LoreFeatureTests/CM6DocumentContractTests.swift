@@ -107,14 +107,21 @@ final class CM6DocumentContractTests: XCTestCase {
             XCTAssertEqual(try editorText(), doc, "\(name) must survive exactly")
         }
 
-        // Mixed: normalised to the dominant ending, and the loss is asserted
-        // rather than left to be discovered.
+        // Mixed: normalised to the dominant ending.
+        //
+        // This is the surface's FALLBACK, not its policy. A mixed document does
+        // not reach here at all — `MarkdownDocumentEditor.chooseSurface(for:)`
+        // opens it in the native editor, where every byte survives. The
+        // behaviour is still pinned, because a fallback nobody tests is a
+        // fallback nobody knows the shape of, and because this is the exact
+        // loss that justifies the routing rule.
         let mixed = "a\r\nb\r\nc\nd\r\n"
         XCTAssertFalse(CM6LineEndings.isConsistent(mixed))
         XCTAssertEqual(CM6LineEndings.dominant(in: mixed), .crlf)
         try boot(mixed)
         XCTAssertEqual(try editorText(), "a\r\nb\r\nc\r\nd\r\n",
-                       "mixed endings become the dominant one — a real change, declared")
+                       "mixed endings become the dominant one — which is why such a "
+                       + "document is routed to the native editor instead")
     }
 
     func test_lineEndingDetection() {
