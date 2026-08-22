@@ -37,9 +37,18 @@ struct CM6EditorView: NSViewRepresentable {
     var onOpenLink: (@MainActor (String) -> Void)?
     /// Cmd-click. Native behaviour, kept identical here.
     var onOpenLinkBeside: (@MainActor (String) -> Void)?
+    /// A tag chip was clicked. The same `onTagClick` the sidebar's chip row
+    /// uses, so a click in the body does exactly what a click in the sidebar
+    /// does.
+    var onTagClick: (@MainActor (String) -> Void)?
+    /// A read-only session can never persist a toggle, so it must not offer
+    /// one — `EditorContext.isReadOnly`, inverted, exactly as the native
+    /// editor's `allowsTaskToggle`.
+    var allowsTaskToggle: Bool = true
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onOpenLink: onOpenLink, onOpenLinkBeside: onOpenLinkBeside)
+        Coordinator(text: $text, onOpenLink: onOpenLink,
+                    onOpenLinkBeside: onOpenLinkBeside, onTagClick: onTagClick)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -61,6 +70,7 @@ struct CM6EditorView: NSViewRepresentable {
         coordinator.webView = webView
         coordinator.pendingDocument = text
         coordinator.pendingTheme = (tokens, settings)
+        coordinator.allowsTaskToggle = allowsTaskToggle
 
         if isPreloaded {
             // `didFinish` will NOT fire again for a page that is already
@@ -84,6 +94,7 @@ struct CM6EditorView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.allowsTaskToggle = allowsTaskToggle
         context.coordinator.push(document: text)
         context.coordinator.push(tokens: tokens, settings: settings)
     }
@@ -102,6 +113,7 @@ struct CM6EditorView: NSViewRepresentable {
         private let text: Binding<String>
         private let onOpenLink: (@MainActor (String) -> Void)?
         private let onOpenLinkBeside: (@MainActor (String) -> Void)?
+        private let onTagClick: (@MainActor (String) -> Void)?
         var webView: WKWebView?
         /// Set before the page has loaded; applied on `didFinish`.
         var pendingDocument: String?
@@ -122,10 +134,12 @@ struct CM6EditorView: NSViewRepresentable {
 
         init(text: Binding<String>,
              onOpenLink: (@MainActor (String) -> Void)? = nil,
-             onOpenLinkBeside: (@MainActor (String) -> Void)? = nil) {
+             onOpenLinkBeside: (@MainActor (String) -> Void)? = nil,
+             onTagClick: (@MainActor (String) -> Void)? = nil) {
             self.text = text
             self.onOpenLink = onOpenLink
             self.onOpenLinkBeside = onOpenLinkBeside
+            self.onTagClick = onTagClick
             super.init()
         }
 
@@ -143,6 +157,10 @@ struct CM6EditorView: NSViewRepresentable {
             evaluate("window.loreEditor.setDocument("
                      + Self.jsString(CM6LineEndings.toLF(document)) + ")")
         }
+
+        /// Set by `updateNSView` before every theme push, so it is always the
+        /// current value when the push happens.
+        var allowsTaskToggle = true
 
         func push(tokens: HostThemeTokens, settings: EditorSettings) {
             guard isLoaded else { pendingTheme = (tokens, settings); return }
@@ -166,6 +184,12 @@ struct CM6EditorView: NSViewRepresentable {
                 "d.style.setProperty('\($0.key)', '\($0.value)');"
             }.joined()
             evaluate("(() => { const d = document.documentElement; \(assignments) })()")
+            // Not everything is a CSS variable. These two change what is
+            // DECORATED, not how it looks, so they have to reach the editor as
+            // state and force a redraw — a setting that only takes effect on
+            // the next document opened is a setting that looks broken.
+            evaluate("window.loreEditor.setTagsAsChips(\(settings.renderTagsAsChips))")
+            evaluate("window.loreEditor.setTasksToggleable(\(allowsTaskToggle))")
         }
 
         private func evaluate(_ source: String) {
@@ -201,6 +225,9 @@ struct CM6EditorView: NSViewRepresentable {
                 } else {
                     onOpenLink?(target)
                 }
+            case "openTag":
+                guard let tag = body["tag"] as? String, !tag.isEmpty else { return }
+                onTagClick?(tag)
             default:
                 return
             }

@@ -1,4 +1,4 @@
-import { EditorState, RangeSetBuilder } from "@codemirror/state"
+import { EditorState, RangeSetBuilder, StateField, StateEffect } from "@codemirror/state"
 import { EditorView, Decoration, WidgetType, keymap, drawSelection,
          rectangularSelection } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
@@ -189,6 +189,294 @@ function embedRanges(state) {
   return found
 }
 
+/// Ranges in which a `#` is part of a LINK, not a tag.
+///
+/// `[text](https://x.test/page#anchor)` and `[[Target#Heading]]` both contain a
+/// `#` that means something else. The native scanner excludes both, from two
+/// different sources for the same reason lezer gives here: `[[…]]` is not
+/// CommonMark, so the tree knows nothing about it.
+function linkRanges(state) {
+  const ranges = []
+  syntaxTree(state).iterate({
+    enter: node => {
+      if (node.name === "Link" || node.name === "Image" || node.name === "URL") {
+        ranges.push({ from: node.from, to: node.to })
+      }
+    },
+  })
+  for (const w of wikilinkRanges(state)) ranges.push({ from: w.from, to: w.to })
+  for (const e of embedRanges(state)) ranges.push({ from: e.from, to: e.to })
+  return ranges
+}
+
+/// `#tag`, `#nested/tag`.
+///
+/// A deliberate transcription of `MarkdownExtensions.scanTags`, disqualification
+/// for disqualification, because the tags this surface shows must be exactly the
+/// tags the index holds — a tag rendered here that the sidebar does not list is
+/// a tag the reader cannot click through to anything.
+///
+/// The `#` STAYS in the span. Obsidian keeps it, and a chip without it is
+/// indistinguishable from a link chip.
+function tagRanges(state) {
+  const text = state.doc.toString()
+  const excluded = codeRanges(state).concat(linkRanges(state))
+  const isExcluded = at => excluded.some(r => at >= r.from && at < r.to)
+  const found = []
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== "#" || isExcluded(i)) { i++; continue }
+    // A heading: `#`(s) at line start, then a space. The AST owns it.
+    const atLineStart = i === 0 || text[i - 1] === "\n"
+    if (atLineStart) {
+      let h = i
+      while (h < text.length && text[h] === "#") h++
+      if (text[h] === " ") { i = h; continue }
+    }
+    let j = i + 1
+    let hasNonDigit = false
+    while (j < text.length) {
+      const ch = text[j]
+      const code = text.charCodeAt(j)
+      const isDigit = ch >= "0" && ch <= "9"
+      const isLetter = /[A-Za-z]/.test(ch) || code > 0x7f
+      const isJoiner = ch === "_" || ch === "-" || ch === "/"
+      if (!(isDigit || isLetter || isJoiner)) break
+      if (isLetter || isJoiner) hasNonDigit = true
+      j++
+    }
+    const name = text.slice(i + 1, j)
+    // At least one non-digit, or `#1234` — an issue reference — becomes a tag
+    // and every changelog in the vault fills with them.
+    if (!hasNonDigit || !name) { i++; continue }
+    // A trailing `/` is notation the author is mid-typing. It is trimmed from
+    // the NAME but stays inside the span, so the chip does not visibly clip
+    // under the caret.
+    const trimmed = name.endsWith("/") ? name.slice(0, -1) : name
+    if (!trimmed) { i++; continue }
+    found.push({ from: i, to: j, name: trimmed })
+    i = j
+  }
+  return found
+}
+
+/// A tag chip. Clicking it filters the vault, exactly as the sidebar's chip
+/// row does — the same `onTagClick` the native editor is handed.
+class TagWidget extends WidgetType {
+  constructor(text, name) { super(); this.text = text; this.name = name }
+  eq(other) { return other.text === this.text && other.name === this.name }
+  toDOM() {
+    const span = document.createElement("span")
+    span.className = "cm-lore-tag"
+    span.textContent = this.text
+    span.dataset.tag = this.name
+    span.addEventListener("mousedown", event => {
+      event.preventDefault()
+      event.stopPropagation()
+      window.webkit?.messageHandlers?.lore?.postMessage(
+        { kind: "openTag", tag: this.name })
+    })
+    return span
+  }
+  ignoreEvent() { return true }
+}
+
+// ------------------------------------------------------- editor settings
+//
+// These two are STATE, not module variables.
+//
+// They were module-level `let`s with a `view.dispatch({})` to redraw, and that
+// silently did nothing: the decoration facet is computed from `["doc",
+// "selection"]`, an empty transaction changes neither, so CM6 correctly reused
+// its cached decorations. Turning chips off left every chip on screen. Putting
+// the settings in a StateField and naming that field as a dependency is what
+// makes "redraw when this changes" true rather than intended.
+
+/// `{ tagsAsChips, tasksToggleable }`.
+const settingsEffect = StateEffect.define()
+
+const settingsField = StateField.define({
+  create: () => ({ tagsAsChips: true, tasksToggleable: true }),
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(settingsEffect)) return { ...value, ...effect.value }
+    }
+    return value
+  },
+})
+
+/// A task checkbox that can actually be clicked.
+///
+/// E2T4, and the clearest single case for this whole milestone: the native
+/// editor draws a checkbox and routes a click back through
+/// `MarkdownEditorClicks` to edit the text underneath a picture. Here the
+/// checkbox IS an input, and toggling it dispatches a one-character change to
+/// the document — no drawn stand-in, no hit-testing against a painted rect.
+class CheckboxWidget extends WidgetType {
+  constructor(checked, from, toggleable) {
+    super(); this.checked = checked; this.from = from; this.toggleable = toggleable
+  }
+  // `toggleable` is part of identity: without it, turning the session
+  // read-only leaves every already-drawn checkbox enabled, because CM6 keeps a
+  // widget whose `eq` says nothing changed.
+  eq(other) {
+    return other.checked === this.checked && other.from === this.from &&
+           other.toggleable === this.toggleable
+  }
+  toDOM(view) {
+    const box = document.createElement("input")
+    box.type = "checkbox"
+    box.className = "cm-lore-checkbox"
+    box.checked = this.checked
+    // A read-only session can never persist this, so it must not offer to —
+    // the same reasoning as the native `allowsTaskToggle`.
+    box.disabled = !this.toggleable
+    box.addEventListener("mousedown", event => {
+      // The caret must not move to this line: that would reveal the source and
+      // replace the box mid-click.
+      event.preventDefault()
+      event.stopPropagation()
+      if (!this.toggleable) return
+      // One character. `[ ]` -> `[x]` is a single-unit change, which keeps the
+      // undo grain at "toggled one task" and leaves every other offset in the
+      // document exactly where it was.
+      view.dispatch({ changes: { from: this.from + 1, to: this.from + 2,
+                                 insert: this.checked ? " " : "x" } })
+    })
+    return box
+  }
+  ignoreEvent() { return true }
+}
+
+/// `- [ ] thing` / `* [x] done`, with the marker's own range.
+///
+/// Scanned by line rather than taken from the tree: `markdown()` here is
+/// CommonMark, which has no task-list node — the same reason the tables in this
+/// file are hand-rolled.
+function taskLines(state) {
+  const found = []
+  const doc = state.doc
+  for (let n = 1; n <= doc.lines; n++) {
+    const line = doc.line(n)
+    const match = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([ xX])\]($|\s)/.exec(line.text)
+    if (!match) continue
+    const from = line.from + match[1].length
+    found.push({ from, to: from + 3, checked: match[2] !== " ", line: n })
+  }
+  return found
+}
+
+// ------------------------------------------------------------- callouts
+//
+// E2T3. `> [!note] An optional title` — a block quote whose first line opens
+// with `[!type]`. Not CommonMark, so lezer gives us the quote and this gives us
+// what the quote MEANS, exactly as `MarkdownCallout` does on the Swift side.
+
+/// Every spelling Obsidian accepts, mapped to a kind. Transcribed from
+/// `MarkdownCallout.Kind.named` — a vault written against Obsidian contains
+/// `[!tldr]` and `[!caution]` interchangeably with `[!abstract]` and
+/// `[!warning]`, and an unrecognised type must fall back to a plain quote
+/// rather than render as stray punctuation.
+const CALLOUT_ALIASES = {
+  note: "note",
+  abstract: "abstract", summary: "abstract", tldr: "abstract",
+  info: "info",
+  todo: "todo",
+  tip: "tip", hint: "tip", important: "tip",
+  success: "success", check: "success", done: "success",
+  question: "question", help: "question", faq: "question",
+  warning: "warning", caution: "warning", attention: "warning",
+  failure: "failure", fail: "failure", missing: "failure",
+  danger: "danger", error: "danger",
+  bug: "bug",
+  example: "example",
+  quote: "quote", cite: "quote",
+}
+
+/// What Obsidian shows when the author gave no title.
+///
+/// DRAWN, never inserted: putting it in the text would change the document and
+/// every offset the index and the link graph hold with it.
+const CALLOUT_TITLES = {
+  note: "Note", abstract: "Abstract", info: "Info", todo: "Todo", tip: "Tip",
+  success: "Success", question: "Question", warning: "Warning",
+  failure: "Failure", danger: "Danger", bug: "Bug", example: "Example",
+  quote: "Quote",
+}
+
+/// The glyph beside the title.
+///
+/// Unicode, not SF Symbols: those are an AppKit facility and this surface is a
+/// web view, so the native renderer's `pencil`/`flame`/`ant` cannot be reached
+/// from here. Bundling an icon font or inlining thirteen SVG paths buys a
+/// closer match than the parity gap justifies, so these are chosen to read as
+/// the same SIGNAL — a warning triangle is a warning triangle.
+const CALLOUT_ICONS = {
+  note: "\u270E", abstract: "\u2261", info: "\u24D8", todo: "\u2611",
+  tip: "\u25C6", success: "\u2713", question: "?", warning: "\u26A0",
+  failure: "\u2715", danger: "\u26A1", bug: "\u2691", example: "\u2263",
+  quote: "\u275D",
+}
+
+/// The header a callout's opening line declares, or null for a plain quote.
+function calloutHeader(text) {
+  const match = /^(\s*>\s*)(\[!([A-Za-z]+)\]([+-]?))(\s*)(.*)$/.exec(text)
+  if (!match) return null
+  const kind = CALLOUT_ALIASES[match[3].toLowerCase()]
+  if (!kind) return null
+  return {
+    kind,
+    markerStart: match[1].length,
+    markerEnd: match[1].length + match[2].length,
+    // The author's own title is real document text and stays as text; only
+    // the `[!type]` notation is replaced.
+    title: match[6].trim(),
+  }
+}
+
+/// The icon, and — when the author wrote no title of their own — the default
+/// one, standing in for the `[!type]` notation.
+class CalloutMarkerWidget extends WidgetType {
+  constructor(kind, needsTitle) { super(); this.kind = kind; this.needsTitle = needsTitle }
+  eq(other) { return other.kind === this.kind && other.needsTitle === this.needsTitle }
+  toDOM() {
+    const span = document.createElement("span")
+    span.className = "cm-lore-callout-marker"
+    const icon = document.createElement("span")
+    icon.className = "cm-lore-callout-icon"
+    icon.textContent = CALLOUT_ICONS[this.kind]
+    span.appendChild(icon)
+    if (this.needsTitle) {
+      const title = document.createElement("span")
+      title.className = "cm-lore-callout-default-title"
+      title.textContent = CALLOUT_TITLES[this.kind]
+      span.appendChild(title)
+    }
+    return span
+  }
+  ignoreEvent() { return true }
+}
+
+/// Every callout in the document, as line spans.
+///
+/// A callout runs from its `> [!type]` line for as long as the quote does —
+/// consecutive lines beginning with `>`. Found by line scan for the same reason
+/// the header is: the construct is not in the tree.
+function calloutBlocks(state) {
+  const doc = state.doc
+  const blocks = []
+  let n = 1
+  while (n <= doc.lines) {
+    const header = calloutHeader(doc.line(n).text)
+    if (!header) { n++; continue }
+    let last = n
+    while (last + 1 <= doc.lines && /^\s*>/.test(doc.line(last + 1).text)) last++
+    blocks.push({ first: n, last, header })
+    n = last + 1
+  }
+  return blocks
+}
+
 function livePreviewDecorations(state) {
   const builder = new RangeSetBuilder()
   const doc = state.doc
@@ -202,8 +490,34 @@ function livePreviewDecorations(state) {
 
   const hidden = []
   const lineClasses = []
+
+  // RESERVED RANGES — the ranges this file replaces with a widget of its own.
+  //
+  // Every one of them also contains lezer marker nodes: `[x]` and `[!note]`
+  // both look like the start of a link, so `LinkMark` covers their brackets.
+  // The builder's overlap guard takes whichever decoration comes FIRST at a
+  // position and drops the rest, so the bracket-hiding won and the widget was
+  // silently discarded — a checked task rendered as a bare `x`, and a callout
+  // header as `!note`. Found in a screenshot; nothing in the tests could see
+  // it, because each construct's own scanner was working perfectly.
+  //
+  // So: collect the ranges first, and suppress lezer's markers inside them.
+  const settings = state.field(settingsField)
+  const tasks = taskLines(state)
+  const callouts = calloutBlocks(state)
   const embeds = embedRanges(state)
-  const insideEmbed = (from, to) => embeds.some(r => from < r.to && to > r.from)
+  const tags = settings.tagsAsChips ? tagRanges(state) : []
+  const reserved = embeds.slice()
+  for (const t of tasks) reserved.push({ from: t.from, to: t.to })
+  for (const tag of tags) reserved.push({ from: tag.from, to: tag.to })
+  for (const c of callouts) {
+    const line = doc.line(c.first)
+    reserved.push({ from: line.from + c.header.markerStart,
+                    to: line.from + c.header.markerEnd })
+  }
+  for (const w of wikilinkRanges(state)) reserved.push({ from: w.from, to: w.to })
+  const isReserved = (from, to) => reserved.some(r => from < r.to && to > r.from)
+  const taskLineNumbers = new Set(tasks.map(t => t.line))
   syntaxTree(state).iterate({
     enter: node => {
       const line = doc.lineAt(node.from).number
@@ -231,6 +545,11 @@ function livePreviewDecorations(state) {
       }
       if (node.name === "ListMark") {
         if (revealed.has(line)) return
+        // A task item shows its checkbox, not a bullet AND a checkbox.
+        if (taskLineNumbers.has(line)) {
+          hidden.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
+          return
+        }
         const text = doc.sliceString(node.from, node.to)
         // Indentation before the marker is the nesting depth. Four spaces or a
         // tab per level, which is what the markdown itself uses.
@@ -241,9 +560,23 @@ function livePreviewDecorations(state) {
                         widget: new BulletWidget(text, depth) }) })
         return
       }
+      // A markdown link's target is notation too. Without this, `[a
+      // link](https://x.test/p)` renders as `a linkhttps://x.test/p` — the
+      // brackets hidden and the URL left sitting against the label, which the
+      // screenshot showed and which no marker rule would ever have caught,
+      // because `URL` is content as far as lezer is concerned.
+      //
+      // Only a PARENTHESISED target: an autolink's URL is the visible text,
+      // and hiding it would leave the reader nothing at all.
+      if (node.name === "URL") {
+        if (revealed.has(line)) return
+        if (doc.sliceString(Math.max(0, node.from - 1), node.from) !== "(") return
+        hidden.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
+        return
+      }
       if (!MARKER_NODES.has(node.name)) return
       if (revealed.has(line)) return
-      if (insideEmbed(node.from, node.to)) return
+      if (isReserved(node.from, node.to)) return
       hidden.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
     },
   })
@@ -257,6 +590,51 @@ function livePreviewDecorations(state) {
     hidden.push({ from: link.from, to: link.to,
                   deco: Decoration.replace({
                     widget: new WikilinkWidget(link.target, link.display) }) })
+  }
+
+  // Callouts: a tinted panel per line, plus the header's notation replaced by
+  // an icon and, when the author wrote none, the default title.
+  for (const block of callouts) {
+    for (let n = block.first; n <= block.last; n++) {
+      const cls = ["cm-lore-callout", "cm-lore-callout-" + block.header.kind,
+                   n === block.first ? "cm-lore-callout-head" : "cm-lore-callout-body",
+                   n === block.last ? "cm-lore-callout-last" : ""].join(" ").trim()
+      lineClasses.push({ from: doc.line(n).from, cls })
+    }
+    if (revealed.has(block.first)) continue
+    const line = doc.line(block.first)
+    hidden.push({
+      from: line.from + block.header.markerStart,
+      to: line.from + block.header.markerEnd,
+      deco: Decoration.replace({
+        widget: new CalloutMarkerWidget(block.header.kind, !block.header.title) }),
+    })
+  }
+
+  // Task checkboxes, and the strike-through on a completed one. The line
+  // class goes on whether or not the caret is present: a done task reads as
+  // done in Obsidian even while you are editing it.
+  for (const task of tasks) {
+    if (task.checked) lineClasses.push({ from: doc.line(task.line).from,
+                                         cls: "cm-lore-task-done" })
+    if (revealed.has(task.line)) continue
+    hidden.push({ from: task.from, to: task.to,
+                  deco: Decoration.replace({
+                    widget: new CheckboxWidget(task.checked, task.from,
+                                               settings.tasksToggleable) }) })
+  }
+
+  // Tags. Replaced rather than MARKED because the chip needs its own click
+  // target and its own box; a `Decoration.mark` would give the pill a ragged
+  // edge wherever it wrapped.
+  if (settings.tagsAsChips) {
+    for (const tag of tags) {
+      if (revealed.has(doc.lineAt(tag.from).number)) continue
+      hidden.push({ from: tag.from, to: tag.to,
+                    deco: Decoration.replace({
+                      widget: new TagWidget(doc.sliceString(tag.from, tag.to),
+                                            tag.name) }) })
+    }
   }
 
   // RangeSetBuilder demands ascending order and the tree walk does not
@@ -283,8 +661,9 @@ function livePreviewDecorations(state) {
   return builder.finish()
 }
 
-const livePreview = EditorView.decorations.compute(["doc", "selection"],
-                                                   state => livePreviewDecorations(state))
+const livePreview = EditorView.decorations.compute(
+  ["doc", "selection", settingsField],
+  state => livePreviewDecorations(state))
 
 /// Render a cell's inline markdown into `parent`.
 ///
@@ -449,6 +828,7 @@ window.loreEditor = {
 
         search(), highlightSelectionMatches(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+        settingsField,
         markdown(), syntaxHighlighting(highlight),
         livePreview, tablePlugin, EditorView.lineWrapping,
         // CM6 turns the browser's own spellchecking OFF by default. On macOS
@@ -511,6 +891,62 @@ window.loreEditor = {
   },
 
   lines() { return view.state.doc.lines },
+
+  /// `EditorSettings.renderTagsAsChips`. Redraws, because a setting that
+  /// only takes effect on the next document is a setting that looks broken.
+  setTagsAsChips(on) {
+    if (!view) return false
+    view.dispatch({ effects: settingsEffect.of({ tagsAsChips: !!on }) })
+    return view.state.field(settingsField).tagsAsChips
+  },
+  /// `EditorContext.isReadOnly`, inverted, pushed from Swift.
+  setTasksToggleable(on) {
+    if (!view) return false
+    view.dispatch({ effects: settingsEffect.of({ tasksToggleable: !!on }) })
+    return view.state.field(settingsField).tasksToggleable
+  },
+  checkboxStates() {
+    return Array.from(document.querySelectorAll(".cm-lore-checkbox"))
+                .map(n => n.checked)
+  },
+  checkboxDisabled() {
+    return Array.from(document.querySelectorAll(".cm-lore-checkbox"))
+                .map(n => n.disabled)
+  },
+  clickCheckbox(index) {
+    const node = document.querySelectorAll(".cm-lore-checkbox")[index || 0]
+    if (!node) return false
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))
+    return true
+  },
+  doneLineCount() { return document.querySelectorAll(".cm-lore-task-done").length },
+  calloutKinds() {
+    return Array.from(document.querySelectorAll(".cm-lore-callout-head"))
+                .map(n => (/cm-lore-callout-([a-z]+)/.exec(
+                  Array.from(n.classList).find(c =>
+                    c.startsWith("cm-lore-callout-") &&
+                    !["cm-lore-callout-head", "cm-lore-callout-body",
+                      "cm-lore-callout-last"].includes(c)) || "") || [])[1])
+  },
+  calloutTitles() {
+    return Array.from(document.querySelectorAll(".cm-lore-callout-head"))
+                .map(n => n.innerText.trim())
+  },
+  calloutLineCount() { return document.querySelectorAll(".cm-lore-callout").length },
+  tagNames() {
+    return Array.from(document.querySelectorAll(".cm-lore-tag"))
+                .map(n => n.dataset.tag)
+  },
+  tagTexts() {
+    return Array.from(document.querySelectorAll(".cm-lore-tag"))
+                .map(n => n.textContent)
+  },
+  clickTag(index) {
+    const node = document.querySelectorAll(".cm-lore-tag")[index || 0]
+    if (!node) return false
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))
+    return true
+  },
 
   /// E2T1b hooks. `wikilinkTargets` is what a test asserts the RENDERING
   /// against; `clickWikilink` is what asserts the bridge message, because a

@@ -60,7 +60,15 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let json = String(data: try! JSONSerialization.data(withJSONObject: [document]),
                           encoding: .utf8)!
         let arg = String(json.dropFirst().dropLast())
-        webView.evaluateJavaScript("window.loreEditor.init(\(arg))") { _, _ in
+        // The caret parks at the END. At offset 0 line 1 is the caret's line,
+        // so its syntax is correctly REVEALED — and a snapshot then shows the
+        // first line as source while every other line is rendered, which reads
+        // as the first line being broken. Cost two rounds of looking at `#` and
+        // at unrendered tags before the cause was the caret.
+        webView.evaluateJavaScript("""
+        window.loreEditor.init(\(arg));
+        window.loreEditor.selectAt(window.loreEditor.text().length);
+        """) { _, _ in
             guard let path = self.shotPath else { return }
             // One turn of the run loop after init, so the decorations the
             // document produces have been laid out. Snapshotting immediately

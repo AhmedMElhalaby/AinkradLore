@@ -190,7 +190,9 @@ private struct MarkdownDocumentEditor: View {
                 CM6EditorView(text: $body_, tokens: ctx.theme.tokens,
                               settings: ctx.editorSettings,
                               onOpenLink: ctx.openLink,
-                              onOpenLinkBeside: ctx.openLinkBeside)
+                              onOpenLinkBeside: ctx.openLinkBeside,
+                              onTagClick: ctx.onTagClick,
+                              allowsTaskToggle: !ctx.isReadOnly)
                     .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
             } else {
             // Only markdown gets the link affordances: wikilinks are markdown

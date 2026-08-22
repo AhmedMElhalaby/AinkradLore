@@ -70,6 +70,81 @@
   .cm-lore-wikilink { color: var(--accent-primary); cursor: pointer; }
   .cm-lore-wikilink:hover { text-decoration: underline; }
 
+  /* E2T2. Obsidian's tag pill: the `#` stays, the shape is a chip. */
+  .cm-lore-tag {
+    color: var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 14%, transparent);
+    border-radius: 999px; padding: 1px 7px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .cm-lore-tag:hover {
+    background: color-mix(in srgb, var(--accent-primary) 26%, transparent);
+  }
+
+  /* E2T4. A real input, sized to sit on the text baseline rather than above
+     it — a checkbox that floats is the tell that it is a control bolted onto
+     prose instead of part of the line. */
+  .cm-lore-checkbox {
+    appearance: none; -webkit-appearance: none;
+    width: 1em; height: 1em; margin: 0 0.45em 0 0;
+    vertical-align: -0.1em;
+    border: 1.5px solid color-mix(in srgb, var(--fg) 45%, transparent);
+    border-radius: 3px; background: transparent; cursor: pointer;
+    display: inline-block; position: relative;
+  }
+  .cm-lore-checkbox:checked {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+  }
+  .cm-lore-checkbox:checked::after {
+    content: "\2713"; position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8em; color: var(--bg);
+  }
+  .cm-lore-checkbox:disabled { cursor: default; opacity: 0.5; }
+  /* A done task, struck and dimmed — the same treatment the native renderer
+     applies to `.checkbox(true)`. The checkbox itself is spared, or the tick
+     is struck through too. */
+  .cm-lore-task-done { color: color-mix(in srgb, var(--fg) 45%, transparent);
+                       text-decoration: line-through; }
+  .cm-lore-task-done .cm-lore-checkbox { text-decoration: none; }
+
+  /* E2T3. Thirteen callout kinds, one stylesheet.
+
+     The hue is per-kind and FIXED — danger is red in every theme or it is not
+     saying "danger" — while saturation, lightness and the panel tint are all
+     derived from the theme, so the result sits correctly on a light or a dark
+     surface. Same division as `MarkdownBlockBackgrounds.Palette`. */
+  .cm-lore-callout {
+    --callout: hsl(var(--callout-hue) 65% 58%);
+    background: color-mix(in srgb, hsl(var(--callout-hue) 65% 58%) 9%, transparent);
+    border-left: 3px solid var(--callout);
+    padding-left: 12px;
+  }
+  .cm-lore-callout-head { padding-top: 6px; font-weight: 600; color: var(--callout);
+                          border-radius: 4px 4px 0 0; }
+  .cm-lore-callout-body { color: var(--fg); }
+  .cm-lore-callout-last { padding-bottom: 6px; border-radius: 0 0 4px 4px; }
+  /* A one-line callout is both the first line and the last. */
+  .cm-lore-callout-head.cm-lore-callout-last { border-radius: 4px; }
+  .cm-lore-callout-icon { margin-right: 6px; }
+  .cm-lore-callout-default-title { font-weight: 600; }
+
+  .cm-lore-callout-note,    .cm-lore-callout-info     { --callout-hue: 210; }
+  .cm-lore-callout-abstract, .cm-lore-callout-tip     { --callout-hue: 175; }
+  .cm-lore-callout-todo,    .cm-lore-callout-question { --callout-hue: 45; }
+  .cm-lore-callout-success                            { --callout-hue: 140; }
+  .cm-lore-callout-warning                            { --callout-hue: 30; }
+  .cm-lore-callout-failure, .cm-lore-callout-danger   { --callout-hue: 0; }
+  .cm-lore-callout-bug                                { --callout-hue: 350; }
+  .cm-lore-callout-example                            { --callout-hue: 275; }
+  /* `quote` is a callout with no colour of its own — Obsidian renders it as an
+     ordinary quote with a heading, so it borrows the foreground. */
+  .cm-lore-callout-quote {
+    --callout: color-mix(in srgb, var(--fg) 45%, transparent);
+    background: transparent;
+  }
+
   .cm-lore-table { border-collapse: collapse; margin: 8px 0; }
   .cm-lore-table th, .cm-lore-table td {
     border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
