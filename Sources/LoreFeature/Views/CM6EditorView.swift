@@ -45,6 +45,10 @@ struct CM6EditorView: NSViewRepresentable {
     /// one — `EditorContext.isReadOnly`, inverted, exactly as the native
     /// editor's `allowsTaskToggle`.
     var allowsTaskToggle: Bool = true
+    /// Resolves an `![[target]]` to a file. The shell's own resolver, which is
+    /// also the reason the page can never name a path of its own — see
+    /// `CM6AssetSchemeHandler`.
+    var resolveEmbedTarget: (@MainActor (String) -> URL?)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, onOpenLink: onOpenLink,
@@ -57,6 +61,12 @@ struct CM6EditorView: NSViewRepresentable {
         // ~40 MB, so switching notes must reuse one rather than open another.
         let (webView, isPreloaded) = CM6EditorSurfacePool.shared.acquire { config in
             config.userContentController.add(coordinator, name: Coordinator.bridgeName)
+            // Once per configuration, and never again: registering a scheme
+            // handler twice traps. The pool reuses configurations, so the
+            // handler is installed here and its RESOLVER is replaced below on
+            // every borrow.
+            config.setURLSchemeHandler(CM6AssetSchemeHandler(),
+                                       forURLScheme: CM6AssetSchemeHandler.scheme)
         }
         if isPreloaded {
             // A reused surface already has the handler of whoever had it last
@@ -71,6 +81,7 @@ struct CM6EditorView: NSViewRepresentable {
         coordinator.pendingDocument = text
         coordinator.pendingTheme = (tokens, settings)
         coordinator.allowsTaskToggle = allowsTaskToggle
+        coordinator.adopt(assetHandlerOf: webView, resolving: resolveEmbedTarget)
 
         if isPreloaded {
             // `didFinish` will NOT fire again for a page that is already
@@ -90,11 +101,15 @@ struct CM6EditorView: NSViewRepresentable {
     /// ~40 MB web view be deallocated and rebuilt for the next note.
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.webView = nil
+        // The next borrower installs its own; until then the surface resolves
+        // nothing, rather than still serving this note's attachments.
+        coordinator.adopt(assetHandlerOf: webView, resolving: nil)
         CM6EditorSurfacePool.shared.release(webView, handlerName: Coordinator.bridgeName)
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.allowsTaskToggle = allowsTaskToggle
+        context.coordinator.adopt(assetHandlerOf: webView, resolving: resolveEmbedTarget)
         context.coordinator.push(document: text)
         context.coordinator.push(tokens: tokens, settings: settings)
     }
@@ -161,6 +176,20 @@ struct CM6EditorView: NSViewRepresentable {
         /// Set by `updateNSView` before every theme push, so it is always the
         /// current value when the push happens.
         var allowsTaskToggle = true
+
+        /// Point the surface's asset handler at this pane's resolver.
+        ///
+        /// Called on borrow, on every update and on release. A pooled surface's
+        /// configuration outlives its borrower, so a handler left pointing at
+        /// the previous note would serve that note's attachments to this one —
+        /// the same failure mode, and the same fix, as removing the script
+        /// message handler by name in `CM6EditorSurfacePool.release`.
+        func adopt(assetHandlerOf webView: WKWebView,
+                   resolving resolve: (@MainActor (String) -> URL?)?) {
+            let handler = webView.configuration
+                .urlSchemeHandler(forURLScheme: CM6AssetSchemeHandler.scheme)
+            (handler as? CM6AssetSchemeHandler)?.resolve = resolve
+        }
 
         func push(tokens: HostThemeTokens, settings: EditorSettings) {
             guard isLoaded else { pendingTheme = (tokens, settings); return }

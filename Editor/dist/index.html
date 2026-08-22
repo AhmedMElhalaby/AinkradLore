@@ -145,6 +145,31 @@
     background: transparent;
   }
 
+  /* E2T5. An embedded image never widens the editor: `max-width` is the
+     measure, and the height follows so nothing is squashed. */
+  .cm-lore-embed-image {
+    max-width: 100%; height: auto; border-radius: 4px;
+    display: inline-block; vertical-align: top;
+  }
+  /* An embed whose target does not resolve. Dimmed and struck, so it reads as
+     "this file is missing" rather than as a browser error — WebKit draws a grey
+     box with a `?` for a failed image and does not show the alt text. */
+  .cm-lore-embed-missing {
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--fg) 30%, transparent);
+  }
+
+  /* A PDF or a Word file: the same pill the native renderer draws, because
+     putting a second document's renderer inside the editor is a different
+     project. */
+  .cm-lore-embed-chip {
+    color: var(--accent-primary); cursor: pointer;
+    background: var(--surface-elevated);
+    border-radius: 4px; padding: 1px 6px;
+    text-decoration: underline;
+  }
+
   .cm-lore-table { border-collapse: collapse; margin: 8px 0; }
   .cm-lore-table th, .cm-lore-table td {
     border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);

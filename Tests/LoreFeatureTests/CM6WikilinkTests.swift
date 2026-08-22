@@ -120,12 +120,15 @@ final class CM6WikilinkTests: XCTestCase {
     /// image, so E2T0's marker-hiding was collapsing it by a DIFFERENT code
     /// path than the one being asserted. So this now asserts what the reader
     /// sees, which is the only thing that would have caught it.
+    /// An IMAGE embed now renders (E2T5); a NOTE embed still shows its source,
+    /// because rendering a note inside a note is E2T1c. Either way it is never
+    /// a plain link.
     @MainActor
-    func test_anEmbedKeepsItsSyntaxUntilItCanBeRendered() throws {
-        try boot("An embed: ![[Some Image.png]]\n\n")
+    func test_anEmbedIsNeverRenderedAsAPlainLink() throws {
+        try boot("An embed: ![[Some Note.md]]\n\n")
         XCTAssertEqual(try targets(), [])
         let shown = try js("document.querySelector('.cm-content').innerText") as? String ?? ""
-        XCTAssertTrue(shown.contains("![[Some Image.png]]"),
+        XCTAssertTrue(shown.contains("![[Some Note.md]]"),
                       "an unrendered embed must show its own source, not a fake link: \(shown)")
     }
 

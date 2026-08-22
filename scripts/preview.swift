@@ -19,7 +19,39 @@
 // It loads the SHIPPED bundle — Editor/dist — not a copy, so what is on screen
 // is what the plugin contains.
 import AppKit
+import UniformTypeIdentifiers
 import WebKit
+
+/// Serves `![[picture.png]]` the way the plugin's `CM6AssetSchemeHandler` does,
+/// but resolving against the note's own directory rather than a vault index —
+/// this is a preview tool, and it has no business importing the resolver.
+final class Assets: NSObject, WKURLSchemeHandler {
+    var root: URL?
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        guard let url = task.request.url,
+              let target = String(url.path.dropFirst()).removingPercentEncoding,
+              let root,
+              case let file = root.appendingPathComponent(target),
+              // A preview tool still does not serve outside its own folder.
+              file.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path),
+              let data = try? Data(contentsOf: file) else {
+            task.didReceive(HTTPURLResponse(url: task.request.url!, statusCode: 404,
+                                            httpVersion: nil, headerFields: nil)!)
+            task.didFinish()
+            return
+        }
+        let type = UTType(filenameExtension: root.appendingPathComponent(target)
+                            .pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        task.didReceive(URLResponse(url: url, mimeType: type,
+                                    expectedContentLength: data.count,
+                                    textEncodingName: nil))
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
 
 final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var window: NSWindow!
@@ -27,6 +59,7 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var document = "# No note given\n\nPass a path as the first argument.\n"
     /// Where to write a snapshot, if `--shot` was given.
     var shotPath: String?
+    let assets = Assets()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if let index = CommandLine.arguments.firstIndex(of: "--shot"),
@@ -38,11 +71,16 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             // Body only: the editor is bound to `note.body`, so previewing the
             // frontmatter would be previewing something the editor never sees.
             document = Self.body(of: text)
+            assets.root = URL(fileURLWithPath: CommandLine.arguments[1])
+                .deletingLastPathComponent()
         }
         let dist = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Editor/dist")
 
-        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 800))
+        let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(assets, forURLScheme: "lore-asset")
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 800),
+                            configuration: config)
         webView.navigationDelegate = self
         window = NSWindow(contentRect: webView.frame,
                           styleMask: [.titled, .closable, .resizable],

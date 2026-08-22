@@ -477,6 +477,136 @@ function calloutBlocks(state) {
   return blocks
 }
 
+// --------------------------------------------------------------- embeds
+//
+// E2T5. `![[picture.png]]` and `![](picture.png)` become real images; anything
+// else attached becomes the same chip the native renderer draws; a markdown
+// target keeps its syntax, because rendering a note inside a note is E2T1c.
+
+/// Case-insensitive, and the same set as `EmbedRendering.imageExtensions`: a
+/// target is written by hand and Obsidian vaults are full of screenshots saved
+/// with an upper-case extension.
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "tif", "bmp", "svg",
+])
+/// `EmbedRendering.markdownExtensions`.
+const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown"])
+
+function lastExtension(name) {
+  const dot = name.lastIndexOf(".")
+  return dot === -1 ? "" : name.slice(dot + 1).toLowerCase()
+}
+
+/// The extension that decides what an embed becomes.
+///
+/// `#` is BOTH a fragment separator and a legal filename character, so the
+/// whole target is tried first and the pre-fragment part only as a fallback.
+/// Splitting on `#` first — which is what this did — turned
+/// `![[Screen Shot #2 (v1).png]]` into a target with no extension at all, and
+/// an image silently became a note embed. `![[note.md#Heading]]` still resolves
+/// through the fallback, because `md#heading` is not a known extension.
+function extensionOf(target) {
+  const whole = lastExtension(target)
+  if (IMAGE_EXTENSIONS.has(whole) || MARKDOWN_EXTENSIONS.has(whole)) return whole
+  return lastExtension(target.split("#")[0])
+}
+
+/// What an embed of `target` should become. Mirrors `EmbedRendering.kind`.
+function embedKind(target) {
+  const ext = extensionOf(target)
+  if (IMAGE_EXTENSIONS.has(ext)) return "image"
+  if (MARKDOWN_EXTENSIONS.has(ext)) return "transclusion"
+  if (!ext) return "transclusion"   // a bare note name is a note
+  return "chip"
+}
+
+/// The URL the page asks for. Must match `CM6AssetSchemeHandler.url(forTarget:)`
+/// exactly, including the encoding: a target may contain spaces, `#`, `?` and
+/// `&`, every one of which would otherwise truncate or re-route the request.
+function assetURL(target) {
+  return "lore-asset:///" + target.replace(/[^A-Za-z0-9]/g, ch =>
+    Array.from(new TextEncoder().encode(ch))
+         .map(b => "%" + b.toString(16).toUpperCase().padStart(2, "0")).join(""))
+}
+
+/// An inline image.
+///
+/// `alt` carries the raw target, so a broken embed says WHICH file is missing
+/// rather than showing a generic broken-image glyph.
+class EmbedImageWidget extends WidgetType {
+  constructor(target) { super(); this.target = target }
+  eq(other) { return other.target === this.target }
+  toDOM() {
+    // A wrapper, because a failed image has to be REPLACED rather than styled:
+    // `alt` text is not shown in place of a broken image in WebKit — a
+    // grey box with a `?` glyph is, which is what the screenshot showed for a
+    // missing attachment. `EmbedRendering` leaves an unresolved embed looking
+    // like an unresolved link, and so does this.
+    const wrap = document.createElement("span")
+    wrap.className = "cm-lore-embed"
+    const img = document.createElement("img")
+    img.className = "cm-lore-embed-image"
+    img.src = assetURL(this.target)
+    img.alt = this.target
+    img.dataset.target = this.target
+    img.addEventListener("error", () => {
+      const missing = document.createElement("span")
+      missing.className = "cm-lore-embed-missing"
+      missing.textContent = this.target
+      missing.dataset.target = this.target
+      missing.title = "Not found"
+      wrap.replaceChildren(missing)
+    })
+    wrap.appendChild(img)
+    return wrap
+  }
+  ignoreEvent() { return true }
+}
+
+/// A non-image, non-markdown attachment: a PDF, a Word file, a zip.
+///
+/// A chip, not an inline rendering — the native renderer's reasoning holds here
+/// too: putting a second document's renderer inside the editor is a different
+/// project. Clicking it opens the file through the same path a link does.
+class EmbedChipWidget extends WidgetType {
+  constructor(target) { super(); this.target = target }
+  eq(other) { return other.target === this.target }
+  toDOM() {
+    const span = document.createElement("span")
+    span.className = "cm-lore-embed-chip"
+    span.textContent = this.target
+    span.dataset.target = this.target
+    span.addEventListener("mousedown", event => {
+      event.preventDefault()
+      event.stopPropagation()
+      window.webkit?.messageHandlers?.lore?.postMessage(
+        { kind: "openLink", target: this.target, beside: event.metaKey })
+    })
+    return span
+  }
+  ignoreEvent() { return true }
+}
+
+/// Markdown image syntax, `![alt](path)`, which lezer DOES give us a node for —
+/// but only as `Image`, so the target still has to be sliced out.
+function markdownImages(state) {
+  const found = []
+  const doc = state.doc
+  syntaxTree(state).iterate({
+    enter: node => {
+      if (node.name !== "Image") return
+      const text = doc.sliceString(node.from, node.to)
+      const match = /^!\[([^\]]*)\]\(([^)]*)\)$/.exec(text)
+      if (!match) return
+      // A remote image is not ours to serve: the scheme handler resolves vault
+      // targets, and an `https://` target must be left to the page.
+      if (/^[a-z][a-z0-9+.-]*:/i.test(match[2])) return
+      found.push({ from: node.from, to: node.to, target: match[2].trim() })
+    },
+  })
+  return found
+}
+
 function livePreviewDecorations(state) {
   const builder = new RangeSetBuilder()
   const doc = state.doc
@@ -516,6 +646,8 @@ function livePreviewDecorations(state) {
                     to: line.from + c.header.markerEnd })
   }
   for (const w of wikilinkRanges(state)) reserved.push({ from: w.from, to: w.to })
+  const images = markdownImages(state)
+  for (const i of images) reserved.push({ from: i.from, to: i.to })
   const isReserved = (from, to) => reserved.some(r => from < r.to && to > r.from)
   const taskLineNumbers = new Set(tasks.map(t => t.line))
   syntaxTree(state).iterate({
@@ -590,6 +722,29 @@ function livePreviewDecorations(state) {
     hidden.push({ from: link.from, to: link.to,
                   deco: Decoration.replace({
                     widget: new WikilinkWidget(link.target, link.display) }) })
+  }
+
+  // Embeds. An `![[…]]` whose target is an image or an attachment is replaced;
+  // a markdown target is left as source, because rendering a note inside a note
+  // is E2T1c and a half-rendered transclusion is worse than a visible `![[…]]`.
+  for (const embed of embeds) {
+    if (revealed.has(doc.lineAt(embed.from).number)) continue
+    const target = splitWikilink(
+      doc.sliceString(embed.from + 3, embed.to - 2)).target
+    if (!target) continue
+    const kind = embedKind(target)
+    if (kind === "transclusion") continue
+    hidden.push({ from: embed.from, to: embed.to,
+                  deco: Decoration.replace({
+                    widget: kind === "image" ? new EmbedImageWidget(target)
+                                             : new EmbedChipWidget(target) }) })
+  }
+  for (const image of images) {
+    if (revealed.has(doc.lineAt(image.from).number)) continue
+    if (!image.target) continue
+    hidden.push({ from: image.from, to: image.to,
+                  deco: Decoration.replace({
+                    widget: new EmbedImageWidget(image.target) }) })
   }
 
   // Callouts: a tinted panel per line, plus the header's notation replaced by
@@ -933,6 +1088,29 @@ window.loreEditor = {
                 .map(n => n.innerText.trim())
   },
   calloutLineCount() { return document.querySelectorAll(".cm-lore-callout").length },
+  embedImageSources() {
+    return Array.from(document.querySelectorAll(".cm-lore-embed-image"))
+                .map(n => n.getAttribute("src"))
+  },
+  embedImageTargets() {
+    return Array.from(document.querySelectorAll(".cm-lore-embed-image"))
+                .map(n => n.dataset.target)
+  },
+  /// Whether each image actually DECODED. `naturalWidth` is 0 for an image
+  /// that failed to load, which is the only way to tell a served asset from a
+  /// broken one — an `<img>` with a bad src still exists in the DOM.
+  embedImageWidths() {
+    return Array.from(document.querySelectorAll(".cm-lore-embed-image"))
+                .map(n => n.naturalWidth)
+  },
+  embedMissingTargets() {
+    return Array.from(document.querySelectorAll(".cm-lore-embed-missing"))
+                .map(n => n.dataset.target)
+  },
+  embedChipTargets() {
+    return Array.from(document.querySelectorAll(".cm-lore-embed-chip"))
+                .map(n => n.dataset.target)
+  },
   tagNames() {
     return Array.from(document.querySelectorAll(".cm-lore-tag"))
                 .map(n => n.dataset.tag)
