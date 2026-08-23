@@ -2,7 +2,7 @@ import { EditorState, RangeSetBuilder, StateField, StateEffect } from "@codemirr
 import { EditorView, Decoration, WidgetType, keymap, drawSelection,
          rectangularSelection } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
-import { markdown } from "@codemirror/lang-markdown"
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown"
 import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language"
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel } from "@codemirror/search"
 import { tags as t } from "@lezer/highlight"
@@ -509,6 +509,67 @@ function calloutBlocks(state) {
   return blocks
 }
 
+// ------------------------------------------------------------ footnotes
+//
+// `[^1]` and, at line start, `[^1]:`. Not CommonMark, so the tree does not have
+// them — the same reason wikilinks and callouts are scanned by hand.
+//
+// Found by the E4T2 parity shots: the native editor draws a reference as a
+// small superscript and CM6 was showing `^1`, because `LinkMark` hid the
+// brackets and left the caret and the label sitting in the prose.
+
+/// A superscript reference, standing in for `[^label]`.
+class FootnoteRefWidget extends WidgetType {
+  constructor(label) { super(); this.label = label }
+  eq(other) { return other.label === this.label }
+  toDOM() {
+    const sup = document.createElement("sup")
+    sup.className = "cm-lore-footnote-ref"
+    sup.textContent = this.label
+    return sup
+  }
+  ignoreEvent() { return true }
+}
+
+/// The label of a definition, standing in for `[^label]:`.
+class FootnoteDefWidget extends WidgetType {
+  constructor(label) { super(); this.label = label }
+  eq(other) { return other.label === this.label }
+  toDOM() {
+    const span = document.createElement("span")
+    span.className = "cm-lore-footnote-def"
+    span.textContent = this.label + "."
+    return span
+  }
+  ignoreEvent() { return true }
+}
+
+/// Every `[^label]` outside code, and whether it is a definition.
+///
+/// A definition is checked by POSITION: `[^1]:` at line start is a definition
+/// and the same characters mid-line are a reference. One scan decides both,
+/// rather than two scans racing — the same shape as
+/// `MarkdownExtensions.scanFootnotes`.
+function footnoteRanges(state) {
+  const text = state.doc.toString()
+  const code = codeRanges(state)
+  const found = []
+  const pattern = /\[\^([^\]\s]+)\](:?)/g
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const from = match.index
+    const to = from + match[0].length
+    if (code.some(r => from < r.to && to > r.from)) continue
+    const atLineStart = from === 0 || text[from - 1] === "\n"
+    const isDefinition = match[2] === ":" && atLineStart
+    // A mid-line `[^1]:` is a reference followed by a colon, so the colon is
+    // not part of the span.
+    const end = match[2] === ":" && !isDefinition ? to - 1 : to
+    found.push({ from, to: end, label: match[1], isDefinition })
+  }
+  return found
+}
+
 // ----------------------------------------------------------------- math
 //
 // E2T6. `$inline$` and `$$block$$`, rendered by KaTeX.
@@ -838,7 +899,7 @@ class TransclusionWidget extends WidgetType {
       state: EditorState.create({
         doc: this.entry.text,
         extensions: [
-          markdown(), syntaxHighlighting(highlight),
+          markdown({ base: markdownLanguage }), syntaxHighlighting(highlight),
           nestedLivePreview, tablePlugin, EditorView.lineWrapping,
           EditorView.editable.of(false),
           settingsField, transclusionField, katexField,
@@ -905,6 +966,11 @@ function livePreviewDecorations(state, options = {}) {
 
   const hidden = []
   const lineClasses = []
+  // Marks are collected separately from replacements: they may overlap a
+  // replacement legally (a pill spans the backticks that are hidden inside it),
+  // so they must not go through the overlap guard that protects replacements
+  // from each other.
+  const marks = []
 
   // RESERVED RANGES — the ranges this file replaces with a widget of its own.
   //
@@ -935,6 +1001,8 @@ function livePreviewDecorations(state, options = {}) {
   for (const i of images) reserved.push({ from: i.from, to: i.to })
   const maths = mathRanges(state)
   for (const m of maths) reserved.push({ from: m.from, to: m.to })
+  const footnotes = footnoteRanges(state)
+  for (const f of footnotes) reserved.push({ from: f.from, to: f.to })
   const isReserved = (from, to) => reserved.some(r => from < r.to && to > r.from)
   const taskLineNumbers = new Set(tasks.map(t => t.line))
   syntaxTree(state).iterate({
@@ -945,6 +1013,24 @@ function livePreviewDecorations(state, options = {}) {
           hidden.push({ from: node.from, to: node.to,
                         deco: Decoration.replace({ widget: new RuleWidget() }) })
         }
+        return
+      }
+      // The inline-code pill. A MARK, not a replace: the text stays real and
+      // the backticks inside it are hidden separately, so the pill sits exactly
+      // where the code is. M9.9 drew this natively and CM6 had only the
+      // monospace face — a regression against the Lore that ships.
+      if (node.name === "InlineCode") {
+        marks.push({ from: node.from, to: node.to,
+                     deco: Decoration.mark({ class: "cm-lore-inline-code" }) })
+        return
+      }
+      // Heading rhythm. M9.4 measured this natively — space before a heading
+      // scales with its size, space after is smaller — and CM6 had none, so
+      // headings sat as tight as body text.
+      const heading = /^ATXHeading([1-6])$/.exec(node.name)
+      if (heading) {
+        lineClasses.push({ from: doc.lineAt(node.from).from,
+                           cls: "cm-lore-h" + heading[1] })
         return
       }
       if (node.name === "FencedCode" || node.name === "CodeBlock") {
@@ -1009,6 +1095,15 @@ function livePreviewDecorations(state, options = {}) {
     hidden.push({ from: link.from, to: link.to,
                   deco: Decoration.replace({
                     widget: new WikilinkWidget(link.target, link.display) }) })
+  }
+
+  // Footnotes.
+  for (const note of footnotes) {
+    if (revealed.has(doc.lineAt(note.from).number)) continue
+    hidden.push({ from: note.from, to: note.to,
+                  deco: Decoration.replace({
+                    widget: note.isDefinition ? new FootnoteDefWidget(note.label)
+                                              : new FootnoteRefWidget(note.label) }) })
   }
 
   // Maths. An expression KaTeX refuses is left as source and merely tinted —
@@ -1133,6 +1228,7 @@ function livePreviewDecorations(state, options = {}) {
   for (const l of lineClasses) {
     hidden.push({ from: l.from, to: l.from, line: l.cls })
   }
+  for (const m of marks) hidden.push({ from: m.from, to: m.to, mark: m.deco })
   hidden.sort((a, b) => a.from - b.from || a.to - b.to)
   let lastTo = -1
   for (const h of hidden) {
@@ -1140,6 +1236,10 @@ function livePreviewDecorations(state, options = {}) {
     // is legal markdown and would otherwise take the editor down.
     if (h.line) {
       builder.add(h.from, h.from, Decoration.line({ class: h.line }))
+      continue
+    }
+    if (h.mark) {
+      builder.add(h.from, h.to, h.mark)
       continue
     }
     if (h.from < lastTo) continue
@@ -1324,7 +1424,19 @@ window.loreEditor = {
         search(), highlightSelectionMatches(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         settingsField, transclusionField,
-        markdown(), syntaxHighlighting(highlight),
+        // GFM, not bare CommonMark.
+        //
+        // `markdown()` defaults to CommonMark, which has NO strikethrough node
+        // — so `StrikethroughMark` sat in MARKER_NODES matching nothing, and
+        // `~~struck~~` rendered with its tildes on screen and no line through
+        // it. The native editor strikes it, so this was a regression against
+        // the Lore that ships, found by the E4T2 parity shots.
+        //
+        // GFM also brings tables, task markers and autolinks. The tables and
+        // tasks here are hand-rolled and scan lines independently, and neither
+        // of their node types is hidden as a marker, so the new nodes are
+        // inert rather than conflicting.
+        markdown({ base: markdownLanguage }), syntaxHighlighting(highlight),
         livePreview, tablePlugin, EditorView.lineWrapping,
         // CM6 turns the browser's own spellchecking OFF by default. On macOS
         // that also means NSSpellChecker never inspects the text, so a

@@ -151,6 +151,36 @@
     max-width: 100%; height: auto; border-radius: 4px;
     display: inline-block; vertical-align: top;
   }
+  /* E4T2. Four gaps the parity shots found against the Lore that ships. */
+
+  /* The inline-code pill M9.9 draws natively. */
+  .cm-lore-inline-code {
+    background: var(--surface-elevated);
+    border-radius: 4px; padding: 1px 4px;
+  }
+
+  /* Heading rhythm, from M9.4's measured ratios: space BEFORE a heading scales
+     with its size, space after is roughly a third of that. The first line of a
+     document gets no space above it — a margin there just pushes the note down
+     from the top of the pane. */
+  .cm-lore-h1 { margin: 32px 0 12px; }
+  .cm-lore-h2 { margin: 28px 0 10px; }
+  .cm-lore-h3 { margin: 24px 0 9px; }
+  .cm-lore-h4 { margin: 20px 0 8px; }
+  .cm-lore-h5 { margin: 18px 0 7px; }
+  .cm-lore-h6 { margin: 16px 0 6px; }
+  .cm-content > .cm-line:first-child { margin-top: 0; }
+
+  /* A footnote reference is a small superscript; a definition's label opens its
+     line. Both dimmed, as notation rather than prose. */
+  .cm-lore-footnote-ref {
+    color: var(--accent-primary); font-size: 0.75em; vertical-align: super;
+  }
+  .cm-lore-footnote-def {
+    color: color-mix(in srgb, var(--fg) 55%, transparent);
+    margin-right: 4px;
+  }
+
   /* E2T6. Maths. KaTeX brings its own typography; these rules only place it.
 
      An expression KaTeX cannot parse is left as plain source and NOT given a
