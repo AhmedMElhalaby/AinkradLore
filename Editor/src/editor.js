@@ -2,6 +2,7 @@ import { EditorState, RangeSetBuilder, StateField, StateEffect } from "@codemirr
 import { EditorView, Decoration, WidgetType, keymap, drawSelection,
          rectangularSelection } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
+import { Prec } from "@codemirror/state"
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown"
 import { syntaxHighlighting, HighlightStyle, syntaxTree } from "@codemirror/language"
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel } from "@codemirror/search"
@@ -1410,6 +1411,154 @@ function buildDecorations(state) {
 const tablePlugin = EditorView.decorations.compute(["doc", "selection"],
                                                    state => buildDecorations(state))
 
+// -------------------------------------------------------- completion
+//
+// The `[[` and `#` popup, rendered IN THE PAGE.
+//
+// The design doc recommended a native popup, reusing `LinkCompletionPanel`.
+// Overridden with the owner's word, for two reasons that are properties of the
+// arrangement rather than preferences:
+//
+//  1. A native panel has to be anchored in SCREEN coordinates reported from
+//     this page, per keystroke. Any lag and the popup points at where the caret
+//     used to be — and there is no way to make that lag zero across a process
+//     boundary.
+//  2. Arrow keys, Return and Escape belong to whoever has focus, and that is
+//     the web view. Routing them out to Swift and back means every one of them
+//     is a round trip, and a dropped one leaves the reader typing into a list
+//     that is not listening.
+//
+// Rendered here, both problems are absent by construction: CodeMirror already
+// knows where the caret is and already owns the keys.
+//
+// What did NOT move to JavaScript is the part that matters: Swift decides what
+// is being completed, which rows to offer and what each row inserts. This side
+// draws a list and reports which row was chosen.
+
+/// `{ from, to, items, index }`, or null when nothing is being completed.
+let completion = null
+let completionDOM = null
+
+function completionVisible() { return !!completion && completion.items.length > 0 }
+
+/// Ask Swift what the caret is completing. Debounced to a microtask so a burst
+/// of transactions (a keystroke is often several) asks once.
+let completionAsked = false
+function askForCompletions(view) {
+  if (completionAsked) return
+  completionAsked = true
+  Promise.resolve().then(() => {
+    completionAsked = false
+    if (!view.state.selection.main.empty) { hideCompletions(); return }
+    window.webkit?.messageHandlers?.lore?.postMessage(
+      { kind: "completion", caret: view.state.selection.main.head })
+  })
+}
+
+function hideCompletions() {
+  completion = null
+  if (completionDOM) { completionDOM.remove(); completionDOM = null }
+}
+
+/// Draw (or redraw) the list under the caret.
+function renderCompletions(view) {
+  if (!completionVisible()) { hideCompletions(); return }
+  if (!completionDOM) {
+    completionDOM = document.createElement("div")
+    completionDOM.className = "cm-lore-completion"
+    view.dom.appendChild(completionDOM)
+  }
+  completionDOM.replaceChildren()
+  completion.items.forEach((item, i) => {
+    const row = document.createElement("div")
+    row.className = "cm-lore-completion-row" + (i === completion.index ? " is-selected" : "")
+    const label = document.createElement("span")
+    label.className = "cm-lore-completion-label"
+    label.textContent = item.label
+    row.appendChild(label)
+    if (item.detail) {
+      const detail = document.createElement("span")
+      detail.className = "cm-lore-completion-detail"
+      detail.textContent = item.detail
+      row.appendChild(detail)
+    }
+    // `mousedown`, not `click`: a click moves the caret first, which changes
+    // the query and destroys the list mid-gesture.
+    row.addEventListener("mousedown", event => {
+      event.preventDefault()
+      event.stopPropagation()
+      completion.index = i
+      acceptCompletion(view)
+    })
+    completionDOM.appendChild(row)
+  })
+
+  // Anchored to the START of the replaced range, which is where the reader is
+  // looking — not to the caret, which drifts right as they type.
+  const coords = view.coordsAtPos(Math.min(completion.from, view.state.doc.length))
+  const editor = view.dom.getBoundingClientRect()
+  if (!coords) { hideCompletions(); return }
+  completionDOM.style.left = Math.round(coords.left - editor.left) + "px"
+  completionDOM.style.top = Math.round(coords.bottom - editor.top + 4) + "px"
+  // Keep it on screen: flip above the line when there is no room below.
+  const box = completionDOM.getBoundingClientRect()
+  if (coords.bottom + box.height > editor.bottom) {
+    completionDOM.style.top =
+      Math.round(coords.top - editor.top - box.height - 4) + "px"
+  }
+}
+
+function moveCompletion(view, delta) {
+  if (!completionVisible()) return false
+  const count = completion.items.length
+  completion.index = (completion.index + delta + count) % count
+  renderCompletions(view)
+  return true
+}
+
+function acceptCompletion(view) {
+  if (!completionVisible()) return false
+  const item = completion.items[completion.index]
+  const { from, to } = completion
+  if (item.create) {
+    // The note is made in SWIFT first: a refused create must leave the document
+    // untouched rather than write a link to a note that was never made. Swift
+    // calls `applyCompletion` back if and only if it succeeded.
+    window.webkit?.messageHandlers?.lore?.postMessage(
+      { kind: "completionCreate", name: item.create,
+        from, to, insert: item.insert })
+    hideCompletions()
+    return true
+  }
+  applyCompletionRange(view, from, to, item.insert)
+  hideCompletions()
+  return true
+}
+
+function applyCompletionRange(view, from, to, insert) {
+  const end = Math.min(to, view.state.doc.length)
+  view.dispatch({
+    changes: { from, to: end, insert },
+    selection: { anchor: from + insert.length },
+  })
+}
+
+/// The keys the list owns while it is open, and nobody else's.
+///
+/// `Prec.highest` so these beat the default keymap — otherwise Return inserts a
+/// newline and the list is left open under a caret that has moved.
+const completionKeymap = Prec.highest(keymap.of([
+  { key: "ArrowDown", run: view => moveCompletion(view, 1) },
+  { key: "ArrowUp", run: view => moveCompletion(view, -1) },
+  { key: "Enter", run: view => acceptCompletion(view) },
+  { key: "Tab", run: view => acceptCompletion(view) },
+  { key: "Escape", run: () => {
+      if (!completionVisible()) return false
+      hideCompletions()
+      return true
+    } },
+]))
+
 let view = null
 
 // Is a change arriving FROM Swift right now?
@@ -1457,7 +1606,13 @@ window.loreEditor = {
         EditorView.contentAttributes.of({ spellcheck: "true",
                                           autocorrect: "on",
                                           autocapitalize: "off" }),
-        katexField,
+        katexField, completionKeymap,
+        // Ask Swift what the caret is completing, whenever it could have
+        // changed. Swift answers with rows or with nothing.
+        EditorView.updateListener.of(u => {
+          if (applyingFromSwift) return
+          if (u.docChanged || u.selectionSet) askForCompletions(u.view)
+        }),
         // Load KaTeX the first time a document that could contain maths is
         // seen. The gate is `includes("$")` rather than a real scan: the scan
         // walks the whole document, and this runs on every update.
@@ -1515,6 +1670,47 @@ window.loreEditor = {
       applyingFromSwift = false
     }
     return true
+  },
+
+  /// Swift's answer to a `completion` request: `{from, to, items}` or null.
+  showCompletions(payload) {
+    if (!view) return false
+    if (!payload || !payload.items || !payload.items.length) {
+      hideCompletions()
+      return false
+    }
+    completion = { from: payload.from, to: payload.to, items: payload.items, index: 0 }
+    renderCompletions(view)
+    return true
+  },
+  /// Swift's answer to `completionCreate`, once the note exists.
+  applyCompletion(from, to, insert) {
+    if (!view) return false
+    applyCompletionRange(view, from, to, insert)
+    return true
+  },
+
+  /// Test hooks.
+  completionLabels() {
+    return Array.from(document.querySelectorAll(".cm-lore-completion-label"))
+                .map(n => n.textContent)
+  },
+  completionSelectedIndex() {
+    const rows = Array.from(document.querySelectorAll(".cm-lore-completion-row"))
+    return rows.findIndex(r => r.classList.contains("is-selected"))
+  },
+  completionIsOpen() { return completionVisible() },
+  /// Drive the list by the keys a reader would use, through CodeMirror's own
+  /// keymap rather than by calling the commands directly — which is what
+  /// asserts that `Prec.highest` actually beat the default keymap.
+  completionKey(key) {
+    const handlers = {
+      ArrowDown: v => moveCompletion(v, 1),
+      ArrowUp: v => moveCompletion(v, -1),
+      Enter: v => acceptCompletion(v),
+      Escape: () => { if (!completionVisible()) return false; hideCompletions(); return true },
+    }
+    return handlers[key] ? !!handlers[key](view) : false
   },
 
   lines() { return view.state.doc.lines },

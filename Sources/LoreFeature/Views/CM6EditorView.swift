@@ -49,10 +49,24 @@ struct CM6EditorView: NSViewRepresentable {
     /// also the reason the page can never name a path of its own — see
     /// `CM6AssetSchemeHandler`.
     var resolveEmbedTarget: (@MainActor (String) -> URL?)?
+    /// `[[` completion. The same closures the native editor is given: the vault
+    /// knowledge stays in the shell, and this surface only draws the list.
+    var completions: (@MainActor (String) -> [IndexRow])?
+    var headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
+    var tagCompletions: (@MainActor (String) -> [String])?
+    var createLinkedNote: (@MainActor (String) -> Bool)?
+    var linkTarget: (@MainActor (IndexRow) -> String)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onOpenLink: onOpenLink,
-                    onOpenLinkBeside: onOpenLinkBeside, onTagClick: onTagClick)
+        let coordinator = Coordinator(text: $text, onOpenLink: onOpenLink,
+                                      onOpenLinkBeside: onOpenLinkBeside,
+                                      onTagClick: onTagClick)
+        coordinator.completions = completions
+        coordinator.headingCompletions = headingCompletions
+        coordinator.tagCompletions = tagCompletions
+        coordinator.createLinkedNote = createLinkedNote
+        coordinator.linkTarget = linkTarget
+        return coordinator
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -181,6 +195,42 @@ struct CM6EditorView: NSViewRepresentable {
         /// asset handler, from the same place and for the same reason.
         var resolveEmbedTarget: (@MainActor (String) -> URL?)?
 
+        var completions: (@MainActor (String) -> [IndexRow])?
+        var headingCompletions: (@MainActor (String, String) -> HeadingCompletions?)?
+        var tagCompletions: (@MainActor (String) -> [String])?
+        var createLinkedNote: (@MainActor (String) -> Bool)?
+        var linkTarget: (@MainActor (IndexRow) -> String)?
+
+        /// Answer the page's question "what is the caret completing?".
+        ///
+        /// Every decision here is `CM6Completion`'s, which is in turn the native
+        /// editor's — see that file. This method only supplies the closures and
+        /// hands the answer across.
+        private func provideCompletions(caret: Int) {
+            let text = text.wrappedValue
+            let query = CM6Completion.query(
+                text: CM6LineEndings.toLF(text), utf16Caret: caret,
+                documents: { self.completions?($0) ?? [] },
+                headings: { self.headingCompletions?($0, $1) },
+                tags: { self.tagCompletions?($0) ?? [] },
+                linkTarget: { self.linkTarget?($0)
+                    ?? LinkCompletionContext.insertableTarget(for: $0) },
+                canCreate: createLinkedNote != nil)
+            evaluate("window.loreEditor.showCompletions(\(CM6Completion.json(query)))")
+        }
+
+        /// A "create this note" row was accepted.
+        ///
+        /// The note is made FIRST and the text inserted only if that succeeded,
+        /// so a refused create leaves the document untouched rather than writing
+        /// a link to a note that was never made. Same order as the native
+        /// `accept(_:)`.
+        private func createAndComplete(name: String, from: Int, to: Int, insert: String) {
+            guard createLinkedNote?(name) == true else { return }
+            evaluate("window.loreEditor.applyCompletion(\(from), \(to), "
+                     + Self.jsString(insert) + ")")
+        }
+
         /// Answer the page's request for a transcluded note.
         ///
         /// The slicing is `TransclusionResolver`'s, not this file's. That type
@@ -304,6 +354,15 @@ struct CM6EditorView: NSViewRepresentable {
             case "openTag":
                 guard let tag = body["tag"] as? String, !tag.isEmpty else { return }
                 onTagClick?(tag)
+            case "completion":
+                guard let caret = body["caret"] as? Int else { return }
+                provideCompletions(caret: caret)
+            case "completionCreate":
+                guard let name = body["name"] as? String,
+                      let from = body["from"] as? Int,
+                      let to = body["to"] as? Int,
+                      let insert = body["insert"] as? String else { return }
+                createAndComplete(name: name, from: from, to: to, insert: insert)
             case "transclude":
                 guard let target = body["target"] as? String, !target.isEmpty else { return }
                 provideTransclusion(of: target)

@@ -122,11 +122,23 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     ///
     /// The flag exists because the two editors have different SHAPES of defect,
     /// not different amounts. The native one cannot put a caret inside a
-    /// rendered table; CodeMirror can, and normalises the line endings of a
-    /// mixed-ending file on the way through (see `CM6LineEndings`). Being able
-    /// to fall back per reader, rather than per release, is what makes it
-    /// reasonable to ship the second one at all.
-    public var usesCM6: Bool = false
+    /// rendered table; CodeMirror can. Being able to fall back per reader,
+    /// rather than per release, is what makes it reasonable to ship the second
+    /// one at all.
+    ///
+    /// **Defaults ON since M10 E4T3**, with the owner's word and after the
+    /// E4T2 parity checklist — a document holding every construct Lore renders,
+    /// shot in both surfaces, which found four regressions against the shipping
+    /// editor and had them fixed before this moved.
+    ///
+    /// A file with mixed line endings is NOT affected: it opens in the native
+    /// editor regardless, because CodeMirror cannot round-trip one and rewriting
+    /// the reader's bytes is not on offer. See
+    /// `MarkdownDocumentEditor.chooseSurface(for:)`.
+    ///
+    /// Still native-only, and the reason this remains labelled experimental:
+    /// hover previews. Link completion works (in-page).
+    public var usesCM6: Bool = true
 
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
     /// line-height 1.5, paragraph spacing 12, measure 760). That is not
@@ -142,7 +154,7 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     public init(density: Density, measure: Measure, zoomStep: Int,
                 focusMode: Bool = false, typewriterMode: Bool = false,
                 renderTagsAsChips: Bool = true,
-                usesCM6: Bool = false) {
+                usesCM6: Bool = true) {
         self.density = density
         self.measure = measure
         self.zoomStep = Self.clampZoom(zoomStep)
@@ -183,7 +195,11 @@ public struct EditorSettings: Equatable, Sendable, Codable {
         typewriterMode = try container.decodeIfPresent(Bool.self, forKey: .typewriterMode) ?? false
         renderTagsAsChips = try container.decodeIfPresent(Bool.self, forKey: .renderTagsAsChips)
             ?? true
-        usesCM6 = try container.decodeIfPresent(Bool.self, forKey: .usesCM6) ?? false
+        // An ABSENT key means on, matching the property default. Settings
+        // stored before E4T3 have no `usesCM6` at all, and reading those as
+        // `false` would leave every existing reader — the only readers there
+        // are — on the old surface while a fresh install got the new one.
+        usesCM6 = try container.decodeIfPresent(Bool.self, forKey: .usesCM6) ?? true
     }
 
     /// Font FAMILY is deliberately not modelled here.

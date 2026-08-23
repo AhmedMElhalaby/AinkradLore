@@ -4,13 +4,33 @@ import XCTest
 /// E4T1: the flag that lets both surfaces exist.
 final class CM6FlagTests: XCTestCase {
 
-    /// OFF by default. The CodeMirror surface has no link completion, no hover
-    /// preview and no Cmd-click yet (that is E2), so defaulting it on would
-    /// take working features away from the reader.
-    func test_theFlagDefaultsOff() {
-        XCTAssertFalse(EditorSettings.default.usesCM6)
-        XCTAssertFalse(EditorSettings(density: .standard, measure: .standard,
-                                      zoomStep: 0).usesCM6)
+    /// ON by default since E4T3, with the owner's word and after the E4T2
+    /// parity checklist.
+    ///
+    /// It was off for E4T1 and E4T2 because the CodeMirror surface had no link
+    /// completion, no Cmd-click and no maths, so defaulting it on would have
+    /// taken working features away from the reader. E2 built those; E4T2 then
+    /// shot a document holding every construct Lore renders in both surfaces
+    /// and found four regressions against the shipping editor, which were fixed
+    /// before this default moved.
+    ///
+    /// Hover previews are still native-only, which is why the setting stays
+    /// labelled experimental.
+    func test_theFlagDefaultsOn() {
+        XCTAssertTrue(EditorSettings.default.usesCM6)
+        // And through the memberwise init, not only `.default` — the two have
+        // drifted apart before.
+        XCTAssertTrue(EditorSettings(density: .standard, measure: .standard,
+                                     zoomStep: 0).usesCM6)
+    }
+
+    /// Turning it off has to keep working, or the flag is not a flag.
+    func test_itCanStillBeTurnedOff() throws {
+        var settings = EditorSettings.default
+        settings.usesCM6 = false
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(EditorSettings.self, from: data)
+        XCTAssertFalse(decoded.usesCM6, "an explicit false must survive a round trip")
     }
 
     /// It survives a round trip, and — the part that matters — it survives
@@ -32,7 +52,7 @@ final class CM6FlagTests: XCTestCase {
         let old = #"{"density":"compact","measure":"wide","zoomStep":2}"#
         let decoded = try JSONDecoder().decode(EditorSettings.self,
                                                from: Data(old.utf8))
-        XCTAssertFalse(decoded.usesCM6, "an absent key means off")
+        XCTAssertTrue(decoded.usesCM6, "an absent key means ON since E4T3 — settings stored before it have no such key, and reading them as off would leave every existing reader on the old surface")
         XCTAssertEqual(decoded.density, .compact, "and must not reset what WAS set")
         XCTAssertEqual(decoded.measure, .wide)
         XCTAssertEqual(decoded.zoomStep, 2)

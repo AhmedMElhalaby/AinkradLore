@@ -199,7 +199,12 @@ private struct MarkdownDocumentEditor: View {
                               onOpenLinkBeside: ctx.openLinkBeside,
                               onTagClick: ctx.onTagClick,
                               allowsTaskToggle: !ctx.isReadOnly,
-                              resolveEmbedTarget: ctx.resolveEmbedTarget)
+                              resolveEmbedTarget: ctx.resolveEmbedTarget,
+                              completions: ctx.completions,
+                              headingCompletions: ctx.headingCompletions,
+                              tagCompletions: ctx.tagCompletions,
+                              createLinkedNote: ctx.createLinkedNote,
+                              linkTarget: ctx.linkTarget)
                     .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
             } else {
             // Only markdown gets the link affordances: wikilinks are markdown

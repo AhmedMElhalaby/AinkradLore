@@ -151,6 +151,37 @@
     max-width: 100%; height: auto; border-radius: 4px;
     display: inline-block; vertical-align: top;
   }
+  /* The `[[` and `#` completion list. Positioned by the editor against the
+     caret, so it needs no screen coordinates and cannot point at where the
+     caret used to be. */
+  .cm-lore-completion {
+    position: absolute; z-index: 20;
+    min-width: 220px; max-width: 420px; max-height: 260px; overflow-y: auto;
+    background: var(--surface-elevated);
+    border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+    border-radius: 6px; padding: 4px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    font-size: 0.95em;
+    /* Explicit, not inherited: the list hangs off `.cm-editor`, and the text
+       face is set on `.cm-content` — so without this it fell back to the
+       browser's default serif, which the first snapshot showed. */
+    font-family: var(--font-text);
+  }
+  .cm-lore-completion-row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 4px 8px; border-radius: 4px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .cm-lore-completion-row.is-selected {
+    background: color-mix(in srgb, var(--accent-primary) 30%, transparent);
+  }
+  .cm-lore-completion-label { color: var(--fg); overflow: hidden;
+                              text-overflow: ellipsis; }
+  .cm-lore-completion-detail {
+    color: color-mix(in srgb, var(--fg) 45%, transparent);
+    font-size: 0.85em; margin-left: auto;
+  }
+
   /* E4T2. Four gaps the parity shots found against the Lore that ships. */
 
   /* The inline-code pill M9.9 draws natively. */
