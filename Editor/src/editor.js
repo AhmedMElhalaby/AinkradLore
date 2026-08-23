@@ -1857,6 +1857,63 @@ window.loreEditor = {
     return handlers[key] ? !!handlers[key](view) : false
   },
 
+  /// Round-trip every line through the geometry: for each line start, the
+  /// coordinates CodeMirror DRAWS it at, mapped back to a position.
+  ///
+  /// Returns the line numbers where the two disagree. Non-empty means a click
+  /// lands on a different line than the one under the pointer — which is what
+  /// `margin` on a `.cm-line` caused: CodeMirror's height oracle does not
+  /// account for margins, and adjacent margins collapse, so the error
+  /// accumulates down the document.
+  geometryMismatchedLines() {
+    const bad = []
+    const box = pos => {
+      const c = view.coordsAtPos(pos)
+      return c ? Math.round(c.top) + ":" + Math.round(c.bottom) : null
+    }
+    for (let n = 1; n <= view.state.doc.lines; n++) {
+      const line = view.state.doc.line(n)
+      const coords = view.coordsAtPos(line.from)
+      if (!coords) continue
+      // The vertical MIDDLE of the drawn line, a little inside its left edge —
+      // where a click on that line would actually land.
+      const back = view.posAtCoords({ x: coords.left + 2,
+                                      y: (coords.top + coords.bottom) / 2 })
+      if (back === null) continue
+      const landed = view.state.doc.lineAt(back).number
+      if (landed === n) continue
+      // A block widget REPLACES several lines with one element — a table, a
+      // multi-line maths block, a transclusion. The interior lines have no
+      // drawn position of their own, so mapping one of them to the widget's
+      // first line is correct, not a mis-aimed click. They are told apart by
+      // being drawn in the SAME box: a genuine geometry error moves the click
+      // to a line drawn somewhere else.
+      if (box(line.from) !== null && box(line.from) === box(view.state.doc.line(landed).from)) {
+        continue
+      }
+      bad.push(n)
+    }
+    return bad
+  },
+  /// A real selection, so the drawn selection layer exists to be measured.
+  selectRangeForTesting(from, to) {
+    if (!view) return false
+    view.focus()
+    view.dispatch({ selection: { anchor: from, head: Math.min(to, view.state.doc.length) } })
+    return true
+  },
+  /// The computed colour of the caret CodeMirror draws, and of the background
+  /// behind it — so "the caret is invisible" is a measurement, not an opinion.
+  caretAndBackgroundColours() {
+    const cursor = document.querySelector(".cm-cursor")
+    const content = document.querySelector(".cm-content")
+    if (!cursor || !content) return null
+    return JSON.stringify({
+      caret: getComputedStyle(cursor).borderLeftColor,
+      background: getComputedStyle(document.body).backgroundColor,
+    })
+  },
+
   lines() { return view.state.doc.lines },
 
   /// `EditorSettings.renderTagsAsChips`. Redraws, because a setting that

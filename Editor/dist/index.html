@@ -16,6 +16,34 @@
                font-size: var(--body-size); }
   .cm-editor.cm-focused { outline: none; }
 
+  /* THE CARET, and the selection.
+     `drawSelection()` replaces the browser's caret with one CodeMirror draws
+     itself, taking its colour from CodeMirror's BASE theme — and the base theme
+     is the light one, which draws `border-left: 1.2px solid black`. A black
+     caret on this background is an invisible caret, which is exactly how it was
+     reported. Every colour added to this file was one of ours; the ones
+     CodeMirror draws were never given any. */
+  /* `!important`, deliberately, and measured rather than assumed.
+     CodeMirror's own rule is `&light .cm-cursor { border-left-color: black }`,
+     which compiles to a two-class descendant selector and outranks anything
+     written as `.cm-cursor` here — the first attempt at this styled the caret
+     and measured it still `rgb(0, 0, 0)` against a `rgb(22, 22, 28)` page.
+     Overriding a vendored library's hard-coded colour is what `!important` is
+     for, and there is no cleaner hook: CodeMirror picks black or `#ddd` from a
+     light/dark flag, while `--fg` is the HOST's actual foreground and is right
+     in both. */
+  .cm-cursor, .cm-dropCursor,
+  .cm-editor .cm-cursor, .cm-editor.cm-focused .cm-cursor {
+    border-left-color: var(--fg) !important;
+    border-left-width: 2px !important;
+  }
+  .cm-selectionBackground,
+  .cm-editor .cm-selectionBackground,
+  .cm-editor.cm-focused .cm-selectionBackground,
+  ::selection {
+    background: color-mix(in srgb, var(--accent-primary) 38%, transparent) !important;
+  }
+
   /* THE FONT FAMILY GOES ON `.cm-content`, NOT `.cm-editor`.
      CodeMirror's own base theme sets `font-family: monospace` on `.cm-content`,
      which is more specific than a rule on the editor wrapper — so setting the
@@ -58,8 +86,13 @@
                                               transparent);
                         border-radius: 4px; padding: 1px 4px; }
 
+  /* Padding on a wrapper would be cleaner, but an `hr` IS the element the
+     widget returns, so its own box carries the spacing. Margin on a block
+     widget is measured no better than margin on a line — `padding` with a
+     transparent border keeps the rule one pixel and the box predictable. */
   .cm-lore-rule { border: none; border-top: 1px solid
-                  color-mix(in srgb, var(--fg) 45%, transparent); margin: 12px 0; }
+                  color-mix(in srgb, var(--fg) 45%, transparent);
+                  margin: 0; padding: 12px 0 0; }
   .cm-lore-bullet { color: color-mix(in srgb, var(--fg) 55%, transparent);
                     margin-right: 6px; }
 
@@ -212,13 +245,19 @@
      with its size, space after is roughly a third of that. The first line of a
      document gets no space above it — a margin there just pushes the note down
      from the top of the pane. */
-  .cm-lore-h1 { margin: 32px 0 12px; }
-  .cm-lore-h2 { margin: 28px 0 10px; }
-  .cm-lore-h3 { margin: 24px 0 9px; }
-  .cm-lore-h4 { margin: 20px 0 8px; }
-  .cm-lore-h5 { margin: 18px 0 7px; }
-  .cm-lore-h6 { margin: 16px 0 6px; }
-  .cm-content > .cm-line:first-child { margin-top: 0; }
+  /* PADDING, never margin.
+     These are `.cm-line` elements, and CodeMirror measures line heights to map
+     a click to a position. Its height oracle does not account for margins, and
+     adjacent margins COLLAPSE — so the drawn position and the computed one
+     diverge, cumulatively, further down the document. The symptom is selecting
+     one line and getting another, which is what these caused. */
+  .cm-lore-h1 { padding: 32px 0 12px; }
+  .cm-lore-h2 { padding: 28px 0 10px; }
+  .cm-lore-h3 { padding: 24px 0 9px; }
+  .cm-lore-h4 { padding: 20px 0 9px; }
+  .cm-lore-h5 { padding: 18px 0 7px; }
+  .cm-lore-h6 { padding: 16px 0 6px; }
+  .cm-content > .cm-line:first-child { padding-top: 0; }
 
   /* A footnote reference is a small superscript; a definition's label opens its
      line. Both dimmed, as notation rather than prose. */
@@ -237,7 +276,7 @@
      and its line decoration crashed the range builder. Unparseable maths reads
      as source, which is `MarkdownMath`'s rule for the same case. */
   .cm-lore-math { display: inline-block; vertical-align: baseline; }
-  .cm-lore-math-block { display: block; margin: 8px 0; text-align: center; }
+  .cm-lore-math-block { display: block; padding: 8px 0; text-align: center; }
   /* KaTeX's error rendering is a red copy of the source. It must never appear:
      an unparseable expression is skipped and left as plain source instead. This
      rule exists so that if one ever does slip through it is obvious in a
@@ -250,7 +289,7 @@
   .cm-lore-transclusion {
     border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
     border-left: 3px solid color-mix(in srgb, var(--accent-primary) 55%, transparent);
-    border-radius: 4px; margin: 6px 0; padding: 6px 10px;
+    border-radius: 4px; padding: 6px 10px;
     background: color-mix(in srgb, var(--fg) 3%, transparent);
   }
   .cm-lore-transclusion-title {
@@ -288,7 +327,7 @@
     text-decoration: underline;
   }
 
-  .cm-lore-table { border-collapse: collapse; margin: 8px 0; }
+  .cm-lore-table { border-collapse: collapse; margin: 0; }
   .cm-lore-table th, .cm-lore-table td {
     border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
     padding: 6px 12px; text-align: left;
