@@ -163,4 +163,49 @@ final class CM6LivePreviewTests: XCTestCase {
         XCTAssertTrue(shown.contains("~~struck~~"), "left as typed, not dropped")
         XCTAssertTrue(shown.contains("[link](x)"))
     }
+    /// A `---` must not cost three lines of height for a one-pixel rule.
+    ///
+    /// Measured, ordinary line 23px:
+    ///
+    ///     inline widget ....  70px for the rule's own line, 116px between the
+    ///                         paragraphs either side
+    ///     block widget .....   25px, and 70px between the paragraphs
+    ///
+    /// The `hr` is a block element and was being laid out INSIDE a line box
+    /// that still reserved its own full line height around it. `block: true`
+    /// makes the rule replace the line instead of sitting in it.
+    ///
+    /// The remaining 70px is not slack: it is two real blank lines (23 each,
+    /// which Obsidian also renders) plus the 25px rule. Asserted as a ceiling
+    /// rather than an exact value, so a font-size change does not fail it.
+    @MainActor
+    func test_aThematicBreakCostsOneLineNotThree() throws {
+        try boot("Paragraph before.\n\n---\n\nParagraph after.\n\n")
+        let measured = try js("""
+        (() => {
+          const hr = document.querySelector('.cm-lore-rule');
+          const all = Array.from(document.querySelectorAll('.cm-content > *'));
+          const before = all.find(l => l.innerText && l.innerText.startsWith('Paragraph before'));
+          const after = all.find(l => l.innerText && l.innerText.startsWith('Paragraph after'));
+          if (!hr || !before || !after) return -1;
+          const b = before.getBoundingClientRect(), a = after.getBoundingClientRect();
+          return Math.round(a.top - (b.top + b.height));
+        })()
+        """) as? Int ?? -1
+        XCTAssertGreaterThan(measured, 0, "the rule must render at all")
+        let lineHeight = try js("""
+        (() => {
+          const all = Array.from(document.querySelectorAll('.cm-content > .cm-line'));
+          return Math.round(all[0].getBoundingClientRect().height);
+        })()
+        """) as? Int ?? -1
+        XCTAssertGreaterThan(lineHeight, 0)
+        // Two blank lines plus the rule. Four line heights is the ceiling; the
+        // inline version was five.
+        XCTAssertLessThan(measured, lineHeight * 4,
+                          "a one-pixel rule is costing \(measured)px against a "
+                          + "\(lineHeight)px line")
+    }
+
+
 }

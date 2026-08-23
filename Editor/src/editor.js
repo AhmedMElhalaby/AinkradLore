@@ -1010,8 +1010,20 @@ function livePreviewDecorations(state, options = {}) {
       const line = doc.lineAt(node.from).number
       if (node.name === "HorizontalRule") {
         if (!revealed.has(line)) {
+          // `block: true`, so the rule REPLACES the line rather than sitting
+          // inside its text box.
+          //
+          // Measured before and after, ordinary line 23px:
+          //     inline widget ....  70px for the rule's line
+          //     block widget .....  25px
+          // Three times a text line, for a 1px rule — the `hr` is a block
+          // element and was being laid out inside a line box that still
+          // reserved its own full line height around it. The gap between the
+          // paragraphs either side was 116px against 23px for a plain
+          // paragraph break.
           hidden.push({ from: node.from, to: node.to,
-                        deco: Decoration.replace({ widget: new RuleWidget() }) })
+                        deco: Decoration.replace({ widget: new RuleWidget(),
+                                                   block: true }) })
         }
         return
       }
