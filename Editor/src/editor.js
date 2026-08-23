@@ -1411,6 +1411,95 @@ function buildDecorations(state) {
 const tablePlugin = EditorView.decorations.compute(["doc", "selection"],
                                                    state => buildDecorations(state))
 
+// ------------------------------------------------------ hover preview
+//
+// A pointer RESTING over a link means "show me what is in there". Rendered in
+// the page, for the same two reasons the completion list is: a popover that
+// follows the pointer cannot afford a round trip for its position, and it must
+// dismiss on the pointer leaving — which is a DOM event, here.
+//
+// The rules are the native editor's (`MarkdownEditorHover`), including the one
+// that makes it feel considered rather than twitchy: 450ms of STILLNESS, not of
+// presence. Movement within a single link restarts the wait, so crossing a link
+// on the way somewhere else shows nothing — otherwise a document full of links
+// becomes a flicker.
+
+const HOVER_DELAY_MS = 450
+
+let hoverTarget = null
+let hoverTimer = null
+let hoverElement = null
+let previewDOM = null
+
+function hidePreview() {
+  if (previewDOM) { previewDOM.remove(); previewDOM = null }
+}
+
+function cancelHover() {
+  if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null }
+  hoverTarget = null
+  hoverElement = null
+  hidePreview()
+}
+
+/// Every pointer move inside the editor.
+function hoverMoved(event) {
+  const element = event.target?.closest?.(
+    ".cm-lore-wikilink, .cm-lore-embed-chip, .cm-lore-embed-missing")
+  if (!element) {
+    if (hoverTarget) cancelHover()
+    return
+  }
+  const target = element.dataset.target
+  if (!target) return
+  // A DIFFERENT link: drop whatever was showing before waiting again.
+  if (target !== hoverTarget) hidePreview()
+  hoverTarget = target
+  hoverElement = element
+  // Movement restarts the wait even within the same link — the delay measures
+  // stillness, not presence. That is the whole difference between a considered
+  // preview and a twitchy one.
+  if (hoverTimer) clearTimeout(hoverTimer)
+  hoverTimer = setTimeout(() => {
+    hoverTimer = null
+    window.webkit?.messageHandlers?.lore?.postMessage(
+      { kind: "preview", target })
+  }, HOVER_DELAY_MS)
+}
+
+/// Draw the popover under the hovered link.
+function renderPreview(view, title, excerpt) {
+  if (!hoverElement || !hoverElement.isConnected) return
+  hidePreview()
+  previewDOM = document.createElement("div")
+  previewDOM.className = "cm-lore-preview"
+  previewDOM.dataset.target = hoverTarget || ""
+  const heading = document.createElement("div")
+  heading.className = "cm-lore-preview-title"
+  heading.textContent = title
+  previewDOM.appendChild(heading)
+  if (excerpt) {
+    const body = document.createElement("div")
+    body.className = "cm-lore-preview-body"
+    body.textContent = excerpt
+    previewDOM.appendChild(body)
+  }
+  view.dom.appendChild(previewDOM)
+
+  const link = hoverElement.getBoundingClientRect()
+  const editor = view.dom.getBoundingClientRect()
+  previewDOM.style.left = Math.round(link.left - editor.left) + "px"
+  previewDOM.style.top = Math.round(link.bottom - editor.top + 6) + "px"
+  const box = previewDOM.getBoundingClientRect()
+  if (link.bottom + box.height > editor.bottom) {
+    previewDOM.style.top = Math.round(link.top - editor.top - box.height - 6) + "px"
+  }
+  if (box.right > editor.right) {
+    previewDOM.style.left =
+      Math.round(Math.max(0, editor.width - box.width - 8)) + "px"
+  }
+}
+
 // -------------------------------------------------------- completion
 //
 // The `[[` and `#` popup, rendered IN THE PAGE.
@@ -1607,9 +1696,21 @@ window.loreEditor = {
                                           autocorrect: "on",
                                           autocapitalize: "off" }),
         katexField, completionKeymap,
+        // Hover, and everything that ends a hover. `mouseleave` on the editor
+        // itself rather than on each link: the widgets are rebuilt on every
+        // decoration pass, so per-element listeners would be attached and lost
+        // constantly.
+        EditorView.domEventHandlers({
+          mousemove: hoverMoved,
+          mouseleave: () => { cancelHover(); return false },
+          // A keystroke means the reader is writing, not reading.
+          keydown: () => { cancelHover(); return false },
+          scroll: () => { cancelHover(); return false },
+        }),
         // Ask Swift what the caret is completing, whenever it could have
         // changed. Swift answers with rows or with nothing.
         EditorView.updateListener.of(u => {
+          if (u.docChanged) cancelHover()
           if (applyingFromSwift) return
           if (u.docChanged || u.selectionSet) askForCompletions(u.view)
         }),
@@ -1669,6 +1770,49 @@ window.loreEditor = {
     } finally {
       applyingFromSwift = false
     }
+    return true
+  },
+
+  /// Swift's answer to a `preview` request.
+  ///
+  /// Ignored when the pointer has moved on — the read happens off the main
+  /// actor and can land after the reader has left the link, and presenting then
+  /// would show a preview for a link nobody is pointing at. The native path
+  /// guards the same case for the same reason.
+  showPreview(target, title, excerpt) {
+    if (!view) return false
+    if (target !== hoverTarget) return false
+    renderPreview(view, title, excerpt)
+    return true
+  },
+  previewTitle() {
+    const node = document.querySelector(".cm-lore-preview-title")
+    return node ? node.textContent : null
+  },
+  previewBody() {
+    const node = document.querySelector(".cm-lore-preview-body")
+    return node ? node.textContent : null
+  },
+  previewIsOpen() { return !!document.querySelector(".cm-lore-preview") },
+  /// Test hooks: the pointer, without a pointer. `hoverAt` names a link by its
+  /// index among the rendered links, and `hoverAway` is the pointer leaving.
+  hoverAt(index) {
+    const links = document.querySelectorAll(
+      ".cm-lore-wikilink, .cm-lore-embed-chip, .cm-lore-embed-missing")
+    const element = links[index || 0]
+    if (!element) return false
+    hoverMoved({ target: element })
+    return true
+  },
+  hoverAway() { cancelHover(); return true },
+  hoverPendingTarget() { return hoverTarget },
+  /// Fire the pending stillness timer now, rather than waiting 450ms in a test.
+  flushHover() {
+    if (!hoverTimer) return false
+    clearTimeout(hoverTimer)
+    hoverTimer = null
+    window.webkit?.messageHandlers?.lore?.postMessage(
+      { kind: "preview", target: hoverTarget })
     return true
   },
 

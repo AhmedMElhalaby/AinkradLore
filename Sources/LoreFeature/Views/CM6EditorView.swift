@@ -219,6 +219,35 @@ struct CM6EditorView: NSViewRepresentable {
             evaluate("window.loreEditor.showCompletions(\(CM6Completion.json(query)))")
         }
 
+        /// Answer the page's `preview` request for a link's contents.
+        ///
+        /// The file read happens OFF the main actor: it is small, but it is disk
+        /// I/O on a path triggered by pointer movement, and this codebase's
+        /// standing rule is that the main actor does not wait on the filesystem.
+        /// The same rule, and the same excerpt function, as
+        /// `MarkdownEditorHover.presentPreview`.
+        ///
+        /// Staleness is the page's decision, not this one's: `showPreview`
+        /// ignores an answer whose target is no longer under the pointer, which
+        /// is where that fact actually lives.
+        private func presentPreview(of target: String) {
+            let name = LinkCompletionContext.documentName(of: target)
+            guard let url = resolveEmbedTarget?(name) else { return }
+            let title = url.deletingPathExtension().lastPathComponent
+            Task { [weak self] in
+                let excerpt = await Task.detached(priority: .userInitiated) {
+                    guard let contents = try? String(contentsOf: url, encoding: .utf8)
+                    else { return String?.none }
+                    return LinkPreview.excerpt(from: contents)
+                }.value
+                guard let self, let excerpt else { return }
+                self.evaluate("window.loreEditor.showPreview("
+                              + Self.jsString(target) + ", "
+                              + Self.jsString(title) + ", "
+                              + Self.jsString(excerpt) + ")")
+            }
+        }
+
         /// A "create this note" row was accepted.
         ///
         /// The note is made FIRST and the text inserted only if that succeeded,
@@ -363,6 +392,9 @@ struct CM6EditorView: NSViewRepresentable {
                       let to = body["to"] as? Int,
                       let insert = body["insert"] as? String else { return }
                 createAndComplete(name: name, from: from, to: to, insert: insert)
+            case "preview":
+                guard let target = body["target"] as? String, !target.isEmpty else { return }
+                presentPreview(of: target)
             case "transclude":
                 guard let target = body["target"] as? String, !target.isEmpty else { return }
                 provideTransclusion(of: target)

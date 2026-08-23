@@ -117,11 +117,11 @@ struct LoreSettingsView: View {
                            help: "Renders with CodeMirror instead of the native "
                                + "editor. Tables can be edited in place, "
                                + "embedded notes and images render inline, and "
-                               + "maths is typeset. Link completion and hover "
-                               + "previews are not wired up yet. A file with "
-                               + "mixed line endings opens in the native editor "
-                               + "instead, so its bytes are preserved. Reopen "
-                               + "the note after changing this.") {
+                               + "maths is typeset, and link completion and "
+                               + "hover previews work. A file with mixed line "
+                               + "endings opens in the native editor instead, so "
+                               + "its bytes are preserved. Reopen the note after "
+                               + "changing this.") {
                 AinkradToggle(isOn: Binding(
                     get: { store.editorSettings.usesCM6 },
                     set: { on in

@@ -24,6 +24,39 @@ final class CM6SurfacePoolTests: XCTestCase {
         return CM6EditorSurfacePool.shared
     }
 
+    /// Wait until the machine's WebContent process set stops changing, then
+    /// return it.
+    ///
+    /// The measurement below attributes processes by pid DIFF against a
+    /// snapshot, so anything that appears AFTER the snapshot is counted as this
+    /// test's — including a process another test's web view was still starting
+    /// when the snapshot was taken. Three more web-view suites were added to
+    /// this target during M10 E2–E4, and the test began failing in the full run
+    /// with two processes and 92 MB while passing in isolation at one and
+    /// 40.7 MB. The pool was not at fault; the measurement was.
+    ///
+    /// Waiting for stillness rather than sleeping a fixed time: the neighbours'
+    /// teardown is not on a schedule this test knows.
+    @MainActor
+    private func settledProcesses(timeout: TimeInterval = 8) -> [Int32: Double] {
+        var previous = Self.webContentProcesses()
+        var stableSince = Date()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+            let current = Self.webContentProcesses()
+            if Set(current.keys) == Set(previous.keys) {
+                // Half a second of an unchanged pid set is enough: a starting
+                // process registers well inside that.
+                if Date().timeIntervalSince(stableSince) > 0.5 { return current }
+            } else {
+                stableSince = Date()
+            }
+            previous = current
+        }
+        return previous
+    }
+
     /// Every WebContent process, by pid and resident MB.
     ///
     /// Attributed by pid DIFF, not by parent: WebKit does not launch content
@@ -76,7 +109,7 @@ final class CM6SurfacePoolTests: XCTestCase {
     /// And the process count follows, which is the claim that matters.
     @MainActor
     func test_openingTenNotesDoesNotGrowTheProcessCount() throws {
-        let before = Self.webContentProcesses()
+        let before = settledProcesses()
         let pool = freshPool()
         let index = try XCTUnwrap(CM6EditorView.Coordinator.bundledIndexURL)
 

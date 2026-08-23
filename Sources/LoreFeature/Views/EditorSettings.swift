@@ -136,8 +136,9 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// the reader's bytes is not on offer. See
     /// `MarkdownDocumentEditor.chooseSurface(for:)`.
     ///
-    /// Still native-only, and the reason this remains labelled experimental:
-    /// hover previews. Link completion works (in-page).
+    /// Kept labelled experimental because it is new, not because a listed
+    /// feature is missing: link completion and hover previews are wired, and
+    /// the E4T2 parity checklist is what says nothing else is.
     public var usesCM6: Bool = true
 
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
