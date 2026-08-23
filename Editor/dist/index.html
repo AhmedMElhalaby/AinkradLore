@@ -54,8 +54,20 @@
   /* Measure and inset come from EditorSettings, like the native renderer's —
      the same numbers, so switching surfaces does not reflow the reader's
      document. */
-  .cm-content { font-family: var(--font-text); line-height: var(--line-height);
-                padding: var(--content-inset); max-width: var(--measure); }
+  /* The inset and the measure, with `!important` for the same measured reason
+     the caret needed it: CodeMirror's base theme sets `padding: 4px 0` on
+     `.cm-content` and won — the computed padding-left was 0px, not 28px, so
+     every line sat flush against the left edge of the pane.
+     `font-family` on the same selector DID win, which is why this went
+     unnoticed: one property of the rule applied and another did not.
+     Left-aligned and capped at the measure, matching
+     `MarkdownEditorLayout.containerWidth` — the native editor deliberately
+     stopped centring this column. */
+  .cm-content { font-family: var(--font-text); line-height: var(--line-height); }
+  .cm-editor .cm-content {
+    padding: var(--content-inset) !important;
+    max-width: var(--measure);
+  }
   .cm-line { padding: 0; }
 
   /* M9 measured these against Obsidian; they are carried over rather than

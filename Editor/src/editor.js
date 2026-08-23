@@ -1342,14 +1342,21 @@ class TableWidget extends WidgetType {
         renderInline(cell, td)
         td.contentEditable = "true"
         td.dataset.r = String(r); td.dataset.c = String(c)
+        // The cell's source text, so `updateDOM` can tell which cells actually
+        // changed and leave the rest — and the caret — alone.
+        td.dataset.raw = cell
         // `input` rather than `beforeinput`: the cell's text is read AFTER
         // the browser has applied the edit, so `textContent` is what the user
         // now sees. Reading it before would write the previous value.
         td.addEventListener("input", () => {
-          const range = this.cellRanges[r] && this.cellRanges[r][c]
+          // Re-derived, never the ranges captured at build time: those are
+          // stale after the first keystroke, so the second character would be
+          // written over the wrong span.
+          const range = tableCellRangeAt(view, view.posAtDOM(table), r, c)
           if (!range) return
-          view.dispatch({ changes: { from: range.from, to: range.to,
-                                     insert: " " + td.textContent.trim() + " " } })
+          const text = " " + td.textContent.trim() + " "
+          td.dataset.raw = text
+          view.dispatch({ changes: { from: range.from, to: range.to, insert: text } })
         })
         tr.appendChild(td)
       })
@@ -1357,7 +1364,61 @@ class TableWidget extends WidgetType {
     })
     return table
   }
+
+  /// Update the EXISTING table in place rather than letting CodeMirror replace
+  /// it.
+  ///
+  /// This is what makes typing in a cell work at all. Without it the dispatch
+  /// from the first keystroke changed the document, `eq` reported the rows
+  /// different, CodeMirror destroyed the widget and built a new one — and the
+  /// contentEditable cell holding the caret was thrown away with it. The
+  /// symptom was exactly one character accepted and the caret jumping below the
+  /// table.
+  ///
+  /// The cell being typed in is deliberately NOT rewritten: its DOM already
+  /// shows what the reader typed, and replacing its children would destroy the
+  /// caret a second time.
+  updateDOM(dom, view) {
+    const rows = dom.querySelectorAll("tr")
+    // A different SHAPE is a different table — let CodeMirror rebuild it.
+    if (rows.length !== this.rows.length) return false
+    const active = document.activeElement
+    for (let r = 0; r < this.rows.length; r++) {
+      const cells = rows[r].children
+      if (cells.length !== this.rows[r].length) return false
+      for (let c = 0; c < this.rows[r].length; c++) {
+        const cell = cells[c]
+        const want = this.rows[r][c]
+        if (cell === active) { cell.dataset.raw = want; continue }
+        if (cell.dataset.raw === want) continue
+        cell.dataset.raw = want
+        cell.replaceChildren()
+        renderInline(want, cell)
+      }
+    }
+    return true
+  }
+
   ignoreEvent() { return true }
+}
+
+/// A cell's range in the CURRENT document, re-derived from the table's live
+/// position.
+///
+/// The ranges captured when a widget is built are stale the moment anything
+/// before the table changes — including the previous keystroke in the same
+/// cell. `posAtDOM` gives the replaced range's current start, and the rows are
+/// re-read from there, so every keystroke computes against the document as it
+/// is now.
+///
+/// The delimiter line is skipped when the widget's rows are built, so row 0 is
+/// the header and row r > 0 is r + 1 lines below it.
+function tableCellRangeAt(view, tableStart, r, c) {
+  const doc = view.state.doc
+  const first = doc.lineAt(tableStart).number
+  const lineNumber = first + (r === 0 ? 0 : r + 1)
+  if (lineNumber < 1 || lineNumber > doc.lines) return null
+  return parsePipeRow(doc.line(lineNumber)).ranges[c] || null
 }
 
 function parsePipeRow(line) {
