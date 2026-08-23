@@ -107,14 +107,21 @@ struct LoreSettingsView: View {
                     }))
             }
 
+            // The help text is the only place a reader learns what this trades
+            // away, so it is kept honest as the surface gains ground. It said
+            // Cmd-click was unwired after E2T1b wired it, and that mixed line
+            // endings would be normalised after E3 stopped normalising them —
+            // both wrong in the direction that makes the feature sound worse,
+            // which is still wrong.
             AinkradFormRow(title: "Experimental CodeMirror editor",
                            help: "Renders with CodeMirror instead of the native "
-                               + "editor. Tables and embeds can be edited in "
-                               + "place. Link completion, hover previews and "
-                               + "Cmd-click are not wired up yet, and a file "
-                               + "with mixed line endings will have them "
-                               + "normalised. Reopen the note after changing "
-                               + "this.") {
+                               + "editor. Tables can be edited in place, "
+                               + "embedded notes and images render inline, and "
+                               + "maths is typeset. Link completion and hover "
+                               + "previews are not wired up yet. A file with "
+                               + "mixed line endings opens in the native editor "
+                               + "instead, so its bytes are preserved. Reopen "
+                               + "the note after changing this.") {
                 AinkradToggle(isOn: Binding(
                     get: { store.editorSettings.usesCM6 },
                     set: { on in
