@@ -146,7 +146,10 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// nostalgia: `MarkdownThemeTests` asserts the scale relationships those
     /// numbers produce, so anything else would make the existing suite pass
     /// against a document nobody has ever seen.
-    public static let `default` = EditorSettings(density: .standard, measure: .standard,
+    /// `measure: .full` since the owner asked for the full width directly. One
+    /// source of truth: the decoder falls back to `EditorSettings.default
+    /// .measure`, so settings written before the key existed follow this too.
+    public static let `default` = EditorSettings(density: .standard, measure: .full,
                                                  zoomStep: 0)
 
     /// Both writing modes default OFF. They are strong opinions about how a

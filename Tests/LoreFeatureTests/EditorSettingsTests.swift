@@ -24,7 +24,15 @@ final class EditorSettingsTests: XCTestCase {
         XCTAssertEqual(theme.paragraphSpacing, 12)
         XCTAssertEqual(theme.listIndentStep, 22)
         XCTAssertEqual(theme.contentInset, 28)
-        XCTAssertEqual(theme.maxMeasure, 760)
+        // The MEASURE is the one number that deliberately no longer matches the
+        // pre-settings theme: the owner asked for the full width. 760 is still
+        // pinned below, against the `.standard` measure that produces it, so
+        // this suite keeps describing a document that exists.
+        XCTAssertNil(theme.maxMeasure, "the default is full width")
+        XCTAssertEqual(MarkdownTheme(
+            tokens: tokens,
+            settings: EditorSettings(density: .standard, measure: .standard,
+                                     zoomStep: 0)).maxMeasure, 760)
     }
 
     /// The heading ramp at default settings.
@@ -99,9 +107,15 @@ final class EditorSettingsTests: XCTestCase {
     /// and kept a 760pt column would be reading a ~35-character measure, which
     /// is worse than either setting on its own.
     func test_measureScalesWithZoom() {
-        let theme = MarkdownTheme(tokens: tokens,
-                                  settings: EditorSettings.default.zoomed(by: 5))
+        // Against `.standard` explicitly, not the default: the default is now
+        // full width, which has no number to scale. Using the default here made
+        // this test about the default rather than about zoom.
+        let settings = EditorSettings(density: .standard, measure: .standard, zoomStep: 0)
+        let theme = MarkdownTheme(tokens: tokens, settings: settings.zoomed(by: 5))
         XCTAssertEqual(try XCTUnwrap(theme.maxMeasure), 760 * 1.5, accuracy: 0.001)
+        // And full width stays full width however far it is zoomed.
+        XCTAssertNil(MarkdownTheme(tokens: tokens,
+                                   settings: EditorSettings.default.zoomed(by: 5)).maxMeasure)
     }
 
     /// Zoom is bounded, asymmetrically: zooming out hits illegibility fast,

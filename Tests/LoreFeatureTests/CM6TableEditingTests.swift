@@ -173,20 +173,59 @@ final class CM6TableEditingTests: XCTestCase {
         XCTAssertGreaterThan(lineLeft, 8, "the first line is flush against the pane edge")
     }
 
-    /// Left-aligned and capped at the measure, matching
-    /// `MarkdownEditorLayout.containerWidth` — the native editor deliberately
-    /// stopped centring this column, so CM6 must not centre it either.
+    /// Centred, with equal padding on both sides.
+    ///
+    /// This assertion is the REVERSE of the one it replaces, which pinned
+    /// `margin-left: 0px` on the grounds that the native editor deliberately
+    /// stopped centring a capped column. The owner then asked for the opposite —
+    /// "make it full width, centered, padding from both sides the same" — which
+    /// is their call to make about their own editor. Recorded rather than
+    /// quietly swapped, because a test whose expectation flips deserves to say
+    /// why.
+    ///
+    /// With the measure defaulting to full width, centring changes nothing; it
+    /// is what keeps a Narrow, Standard or Wide column balanced in the pane
+    /// rather than jammed left.
     @MainActor
-    func test_theColumnIsCappedAtTheMeasureAndLeftAligned() throws {
-        try boot("Some prose.\n")
-        let maxWidth = try js("""
-        getComputedStyle(document.querySelector('.cm-content')).maxWidth
-        """) as? String ?? ""
-        XCTAssertNotEqual(maxWidth, "none", "the measure must cap the column")
-        let marginLeft = try js("""
-        getComputedStyle(document.querySelector('.cm-content')).marginLeft
-        """) as? String ?? ""
-        XCTAssertEqual(marginLeft, "0px", "a centred column is not what the native editor does")
+    func test_theColumnIsCentredWithEqualPaddingOnBothSides() throws {
+        try boot("Some prose that is long enough to show where the column sits.\n")
+        let geometry = try XCTUnwrap(try js("""
+        (() => {
+          const content = document.querySelector('.cm-content');
+          const style = getComputedStyle(content);
+          const editor = document.querySelector('.cm-editor').getBoundingClientRect();
+          const box = content.getBoundingClientRect();
+          return JSON.stringify({
+            marginInline: style.marginLeft + '|' + style.marginRight,
+            padLeft: Math.round(parseFloat(style.paddingLeft)),
+            padRight: Math.round(parseFloat(style.paddingRight)),
+            gapLeft: Math.round(box.left - editor.left),
+            gapRight: Math.round(editor.right - box.right)
+          });
+        })()
+        """) as? String)
+        let values = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(geometry.utf8)) as? [String: Any])
+        let padLeft = try XCTUnwrap(values["padLeft"] as? Int)
+        let padRight = try XCTUnwrap(values["padRight"] as? Int)
+        let gapLeft = try XCTUnwrap(values["gapLeft"] as? Int)
+        let gapRight = try XCTUnwrap(values["gapRight"] as? Int)
+        XCTAssertEqual(padLeft, padRight, "the inset must match on both sides")
+        XCTAssertGreaterThan(padLeft, 8, "there must be an inset at all")
+        // Equal outside gaps are what "centred" means in the pane. One pixel of
+        // slack for a fractional layout.
+        XCTAssertLessThanOrEqual(abs(gapLeft - gapRight), 1,
+                                 "the column is not centred: \(geometry)")
+        print("COLUMN \(geometry)")
+    }
+
+    /// And the measure defaults to filling the width, which is what the owner
+    /// asked for. `EditorSettings.default` is the single source: the decoder
+    /// falls back to it, so settings written before the key existed follow.
+    func test_theMeasureDefaultsToFullWidth() {
+        XCTAssertEqual(EditorSettings.default.measure, .full)
+        XCTAssertNil(EditorSettings.default.maxMeasure,
+                     "full width means no cap at all")
     }
 
     // MARK: - plumbing

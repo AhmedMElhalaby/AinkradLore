@@ -67,6 +67,13 @@
   .cm-editor .cm-content {
     padding: var(--content-inset) !important;
     max-width: var(--measure);
+    /* CENTRED, so the padding is equal on both sides.
+       The measure now defaults to "full width", where centring changes nothing
+       — but when a reader caps the column at Narrow, Standard or Wide, this is
+       what keeps it balanced in the pane instead of jammed against the left
+       edge. The native editor still left-aligns a capped column; that is a
+       one-line divergence, noted rather than hidden. */
+    margin-inline: auto;
   }
   .cm-line { padding: 0; }
 
