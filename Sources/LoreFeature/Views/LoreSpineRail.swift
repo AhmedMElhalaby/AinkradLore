@@ -3,6 +3,22 @@ import AinkradAppKit
 
 /// The document's headings, as texture rather than as UI.
 ///
+/// ## NOT CURRENTLY DRAWN
+///
+/// The owner asked for it removed: "we have these dashes at the edge of the
+/// panel, remove them". At rest the rail is one 2pt tick per heading at 0.28
+/// opacity, and it was read as stray marks against the panel edge rather than
+/// as a sense of the document's shape — which is a fair reading of a mark whose
+/// whole design is to be almost invisible.
+///
+/// The type, its tests and this reasoning are kept rather than deleted, because
+/// the question it answers is real and it may want a different answer. One line
+/// in `DocumentPane` restores it:
+///
+///     .overlay(alignment: .topLeading) { spineRail }
+///
+/// ⌘⇧O is unaffected and remains the way to move between headings.
+///
 /// ## Why this replaces the outline panel
 ///
 /// The outline lived in a 280pt slideover, capped at 160pt tall, behind a
