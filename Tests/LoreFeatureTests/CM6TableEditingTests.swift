@@ -29,7 +29,16 @@ final class CM6TableEditingTests: XCTestCase {
                               backing: .buffered, defer: false)
         window.contentView = webView
         windows.append(window)
-        window.makeKeyAndOrderFront(nil)
+        // NOT ordered on screen.
+        //
+        // This called `makeKeyAndOrderFront` to try to make `drawSelection()`
+        // draw a caret that could be measured. It never worked — a web view in
+        // this process does not become first responder however the window is
+        // configured — and it put three 900x1432 windows over the owner's screen
+        // for the length of every run, with no close button, because this style
+        // mask has no `.closable`. Every other test in this target hosts its
+        // view in a window it never orders front, which is why none of them has
+        // ever done this.
         let index = try XCTUnwrap(CM6EditorView.Coordinator.bundledIndexURL)
         webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
         try waitFor("boot") {

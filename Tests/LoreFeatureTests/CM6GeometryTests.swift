@@ -70,12 +70,16 @@ final class CM6GeometryTests: XCTestCase {
                               backing: .buffered, defer: false)
         window.contentView = webView
         windows.append(window)
-        // KEY, not merely on screen. `drawSelection()` draws the caret only for
-        // a focused view, and a window that is never made key never gives the
-        // web view first responder — so the caret element never exists and the
-        // colour cannot be measured at all.
-        window.makeKeyAndOrderFront(nil)
-        webView.window?.makeFirstResponder(webView)
+        // NOT ordered on screen.
+        //
+        // This called `makeKeyAndOrderFront` to try to make `drawSelection()`
+        // draw a caret that could be measured. It never worked — a web view in
+        // this process does not become first responder however the window is
+        // configured — and it put three 900x1432 windows over the owner's screen
+        // for the length of every run, with no close button, because this style
+        // mask has no `.closable`. Every other test in this target hosts its
+        // view in a window it never orders front, which is why none of them has
+        // ever done this.
         let index = try XCTUnwrap(CM6EditorView.Coordinator.bundledIndexURL)
         webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
         try waitFor("boot") {
@@ -225,6 +229,67 @@ final class CM6GeometryTests: XCTestCase {
             }
         }
         return false
+    }
+
+    /// No test in this target may put a window on the screen.
+    ///
+    /// This is a lint over the test sources, which is unusual enough to justify:
+    /// the failure it prevents did not break a test, it took over the OWNER'S
+    /// MACHINE. Two files here called `makeKeyAndOrderFront`, so every run threw
+    /// three 900x1432 windows over whatever was in front — with no close button,
+    /// because the style mask carries no `.closable` — for the length of a
+    /// twelve-minute suite. The report was "you did open these and it covers the
+    /// screen and can't close it".
+    ///
+    /// Every other test in this target hosts its view in a window it never
+    /// orders front, and `makeFirstResponder` is enough for the focus those
+    /// tests need. A web view in this process does not become first responder
+    /// however the window is configured, so ordering one front buys nothing
+    /// either.
+    func test_noTestOrdersAWindowOntoTheScreen() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let files = try FileManager.default
+            .contentsOfDirectory(at: testsDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 20, "the test sources were not found")
+        var offenders: [String] = []
+        for file in files {
+            guard let source = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            for (index, line) in source.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated() {
+                // Comments AND string literals are stripped before matching.
+                //
+                // This rule names the calls it forbids — in its own comment and
+                // in its own string literals — so its first two versions
+                // reported themselves, once for the bare name and once for the
+                // call form. Keeping only the text outside quotes is what makes
+                // a rule about code a rule about code.
+                let code = Self.executableText(of: String(line))
+                guard Self.forbiddenCalls.contains(where: code.contains) else { continue }
+                offenders.append("\(file.lastPathComponent):\(index + 1)")
+            }
+        }
+        XCTAssertEqual(offenders, [],
+                       "these put a window on the owner's screen during a test run")
+    }
+
+    /// The calls that put a window on the screen.
+    private static let forbiddenCalls = [".makeKeyAndOrderFront(",
+                                         ".orderFrontRegardless("]
+
+    /// A line with its comment and its string literals removed.
+    ///
+    /// Crude on purpose: it does not need to be a Swift lexer, only to stop a
+    /// rule from matching the text of the rule. Segments between double quotes
+    /// are inside a literal and are dropped.
+    private static func executableText(of line: String) -> String {
+        let beforeComment = line.split(separator: "/").first.map(String.init) ?? ""
+        return beforeComment
+            .split(separator: "\"", omittingEmptySubsequences: false)
+            .enumerated()
+            .filter { $0.offset % 2 == 0 }
+            .map { String($0.element) }
+            .joined()
     }
 
     // MARK: - plumbing
