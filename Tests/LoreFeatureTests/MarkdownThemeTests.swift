@@ -186,7 +186,13 @@ extension MarkdownThemeTests {
     /// way `MarkdownEditor` sets it, rather than deriving a symmetric margin
     /// from the view's bounds.
     func test_backgroundGeometryTracksTheTextColumnWhenLeftAligned() throws {
-        let theme = MarkdownTheme(tokens: TestTokens.make())
+        // An explicitly CAPPED measure: the default is `.full` since the owner
+        // asked for the full width, and this test is about a column that has a
+        // cap to track. With the default it unwrapped nil and proved nothing.
+        let theme = MarkdownTheme(tokens: TestTokens.make(),
+                                  settings: EditorSettings(density: .standard,
+                                                           measure: .standard,
+                                                           zoomStep: 0))
         let measure = try XCTUnwrap(theme.maxMeasure)
         let width: CGFloat = 2000
         let tv = LinkTextView(frame: NSRect(x: 0, y: 0, width: width, height: 400))

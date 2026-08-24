@@ -9,6 +9,18 @@ final class EditorLayoutTests: XCTestCase {
             forViewWidth: width, theme: MarkdownTheme(tokens: TestTokens.make()))
     }
 
+    /// A theme whose measure actually CAPS.
+    ///
+    /// The default measure is `.full` since the owner asked for the full width,
+    /// so `MarkdownTheme(tokens:)` no longer has a cap at all — and the tests
+    /// below are about the capping mechanism, not about the default. Using the
+    /// default made them silently test nothing.
+    private func cappedTheme() -> MarkdownTheme {
+        MarkdownTheme(tokens: TestTokens.make(),
+                      settings: EditorSettings(density: .standard, measure: .standard,
+                                               zoomStep: 0))
+    }
+
     /// A wide pane must NOT push the column into the middle of the window.
     /// The centering rule — `(viewWidth - maxMeasure) / 2` — is the whole
     /// cause of the large empty gap before the text.
@@ -20,9 +32,13 @@ final class EditorLayoutTests: XCTestCase {
     /// The measure cap still applies — the column is left-aligned, not
     /// unbounded, so long lines stay readable.
     func test_theMeasureCapStillApplies() {
-        let theme = MarkdownTheme(tokens: TestTokens.make())
-        let maxMeasure = try? XCTUnwrap(theme.maxMeasure)
-        XCTAssertNotNil(maxMeasure)
+        XCTAssertNotNil(cappedTheme().maxMeasure,
+                        "a capped measure must still produce a cap")
+        // And the DEFAULT is deliberately uncapped now — recorded here so the
+        // change is visible where the cap is asserted, not only where it was
+        // made.
+        XCTAssertNil(MarkdownTheme(tokens: TestTokens.make()).maxMeasure,
+                     "the default measure is full width")
     }
 
     /// A pane narrower than twice the inset must still leave a POSITIVE
@@ -41,18 +57,29 @@ final class EditorLayoutTests: XCTestCase {
 
     // MARK: - containerWidth
 
-    private func width(forViewWidth viewWidth: CGFloat) -> CGFloat {
+    private func width(forViewWidth viewWidth: CGFloat,
+                       theme: MarkdownTheme? = nil) -> CGFloat {
         MarkdownEditorLayout.containerWidth(
-            forViewWidth: viewWidth, theme: MarkdownTheme(tokens: TestTokens.make()))
+            forViewWidth: viewWidth,
+            theme: theme ?? MarkdownTheme(tokens: TestTokens.make()))
     }
 
     /// A wide pane still caps the container at the theme's measure — the
     /// fix for the clipping bug must not reopen the "lines run edge to edge"
     /// complaint Task 5 exists to close.
     func test_aWidePaneCapsTheContainerAtTheMeasure() throws {
-        let theme = MarkdownTheme(tokens: TestTokens.make())
+        let theme = cappedTheme()
         let measure = try XCTUnwrap(theme.maxMeasure)
-        XCTAssertEqual(width(forViewWidth: 2000), measure, accuracy: 0.5)
+        XCTAssertEqual(width(forViewWidth: 2000, theme: theme), measure, accuracy: 0.5)
+    }
+
+    /// And with the default measure — full width — a wide pane fills it, minus
+    /// both insets. This is the behaviour the owner asked for, asserted where
+    /// the container width is decided.
+    func test_aWidePaneWithNoCapFillsTheAvailableWidth() {
+        let theme = MarkdownTheme(tokens: TestTokens.make())
+        XCTAssertEqual(width(forViewWidth: 2000, theme: theme),
+                       2000 - theme.contentInset * 2, accuracy: 0.5)
     }
 
     /// A pane narrower than the measure must fit ENTIRELY inside the visible

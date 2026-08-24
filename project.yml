@@ -81,7 +81,14 @@ targets:
   LorePlugin:
     type: bundle
     platform: macOS
-    sources: [Sources/LorePlugin]
+    sources:
+      - path: Sources/LorePlugin
+      # The CM6 bundle, copied into the plugin's Resources. `Editor/dist` only
+      # — `src/` and `node_modules/` are build inputs and have no business
+      # shipping. See `make editor`.
+      - path: Editor/dist
+        buildPhase: resources
+        name: Editor
     postBuildScripts:
       # Generate AinkradAPIVersion from the SDK this build linked,
       # rather than trusting the hand-typed Info.plist value.
@@ -118,6 +125,13 @@ targets:
       - path: Tests/LoreFeatureTests
       - path: Tests/Fixtures
         buildPhase: resources
+      # The editor bundle, so `Bundle(for:).url(forResource:)` resolves in the
+      # TEST bundle too. Without it the document-contract tests would have to
+      # reach for a repo path, and would then be testing a file the plugin does
+      # not actually ship.
+      - path: Editor/dist
+        buildPhase: resources
+        name: EditorResources
     dependencies:
       - target: LoreFeature
       - package: GRDB

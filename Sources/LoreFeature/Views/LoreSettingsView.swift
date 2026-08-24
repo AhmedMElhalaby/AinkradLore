@@ -107,6 +107,30 @@ struct LoreSettingsView: View {
                     }))
             }
 
+            // The help text is the only place a reader learns what this trades
+            // away, so it is kept honest as the surface gains ground. It said
+            // Cmd-click was unwired after E2T1b wired it, and that mixed line
+            // endings would be normalised after E3 stopped normalising them —
+            // both wrong in the direction that makes the feature sound worse,
+            // which is still wrong.
+            AinkradFormRow(title: "Experimental CodeMirror editor",
+                           help: "Renders with CodeMirror instead of the native "
+                               + "editor. Tables can be edited in place, "
+                               + "embedded notes and images render inline, and "
+                               + "maths is typeset, and link completion and "
+                               + "hover previews work. A file with mixed line "
+                               + "endings opens in the native editor instead, so "
+                               + "its bytes are preserved. Reopen the note after "
+                               + "changing this.") {
+                AinkradToggle(isOn: Binding(
+                    get: { store.editorSettings.usesCM6 },
+                    set: { on in
+                        var next = store.editorSettings
+                        next.usesCM6 = on
+                        store.setEditorSettings(next)
+                    }))
+            }
+
             // The editor's OWN settings — not inherited from the host theme.
             // The host owns hue; how large the text is and how wide the column
             // runs are properties of the document and the person reading it.

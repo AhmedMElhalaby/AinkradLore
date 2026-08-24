@@ -113,12 +113,43 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// because some people want the `#` typographically quiet in long prose.
     public var renderTagsAsChips: Bool = true
 
+    /// Render with CodeMirror instead of the native `NSTextView`.
+    ///
+    /// OFF by default, and it stays off until the parity checklist in the M10
+    /// plan is signed off. Both surfaces read and write the same document
+    /// string, so switching is reversible and costs nothing but a reload of the
+    /// pane.
+    ///
+    /// The flag exists because the two editors have different SHAPES of defect,
+    /// not different amounts. The native one cannot put a caret inside a
+    /// rendered table; CodeMirror can. Being able to fall back per reader,
+    /// rather than per release, is what makes it reasonable to ship the second
+    /// one at all.
+    ///
+    /// **Defaults ON since M10 E4T3**, with the owner's word and after the
+    /// E4T2 parity checklist — a document holding every construct Lore renders,
+    /// shot in both surfaces, which found four regressions against the shipping
+    /// editor and had them fixed before this moved.
+    ///
+    /// A file with mixed line endings is NOT affected: it opens in the native
+    /// editor regardless, because CodeMirror cannot round-trip one and rewriting
+    /// the reader's bytes is not on offer. See
+    /// `MarkdownDocumentEditor.chooseSurface(for:)`.
+    ///
+    /// Kept labelled experimental because it is new, not because a listed
+    /// feature is missing: link completion and hover previews are wired, and
+    /// the E4T2 parity checklist is what says nothing else is.
+    public var usesCM6: Bool = true
+
     /// Defaults reproduce the pre-settings numbers EXACTLY (body 15,
     /// line-height 1.5, paragraph spacing 12, measure 760). That is not
     /// nostalgia: `MarkdownThemeTests` asserts the scale relationships those
     /// numbers produce, so anything else would make the existing suite pass
     /// against a document nobody has ever seen.
-    public static let `default` = EditorSettings(density: .standard, measure: .standard,
+    /// `measure: .full` since the owner asked for the full width directly. One
+    /// source of truth: the decoder falls back to `EditorSettings.default
+    /// .measure`, so settings written before the key existed follow this too.
+    public static let `default` = EditorSettings(density: .standard, measure: .full,
                                                  zoomStep: 0)
 
     /// Both writing modes default OFF. They are strong opinions about how a
@@ -126,13 +157,15 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// first time it is opened reads as broken rather than as focused.
     public init(density: Density, measure: Measure, zoomStep: Int,
                 focusMode: Bool = false, typewriterMode: Bool = false,
-                renderTagsAsChips: Bool = true) {
+                renderTagsAsChips: Bool = true,
+                usesCM6: Bool = true) {
         self.density = density
         self.measure = measure
         self.zoomStep = Self.clampZoom(zoomStep)
         self.focusMode = focusMode
         self.typewriterMode = typewriterMode
         self.renderTagsAsChips = renderTagsAsChips
+        self.usesCM6 = usesCM6
     }
 
     /// Custom `Decodable` rather than the synthesised one: `EditorSettings` is
@@ -150,6 +183,7 @@ public struct EditorSettings: Equatable, Sendable, Codable {
     /// all-or-nothing failure.
     private enum CodingKeys: String, CodingKey {
         case density, measure, zoomStep, focusMode, typewriterMode, renderTagsAsChips
+        case usesCM6
     }
 
     public init(from decoder: Decoder) throws {
@@ -165,6 +199,11 @@ public struct EditorSettings: Equatable, Sendable, Codable {
         typewriterMode = try container.decodeIfPresent(Bool.self, forKey: .typewriterMode) ?? false
         renderTagsAsChips = try container.decodeIfPresent(Bool.self, forKey: .renderTagsAsChips)
             ?? true
+        // An ABSENT key means on, matching the property default. Settings
+        // stored before E4T3 have no `usesCM6` at all, and reading those as
+        // `false` would leave every existing reader — the only readers there
+        // are — on the old surface while a fresh install got the new one.
+        usesCM6 = try container.decodeIfPresent(Bool.self, forKey: .usesCM6) ?? true
     }
 
     /// Font FAMILY is deliberately not modelled here.
@@ -203,14 +242,14 @@ public struct EditorSettings: Equatable, Sendable, Codable {
         EditorSettings(density: density, measure: measure,
                        zoomStep: Self.clampZoom(zoomStep + step),
                        focusMode: focusMode, typewriterMode: typewriterMode,
-                       renderTagsAsChips: renderTagsAsChips)
+                       renderTagsAsChips: renderTagsAsChips, usesCM6: usesCM6)
     }
 
     /// Zoom reset to the density's own size (⌘0).
     public func zoomReset() -> EditorSettings {
         EditorSettings(density: density, measure: measure, zoomStep: 0,
                        focusMode: focusMode, typewriterMode: typewriterMode,
-                       renderTagsAsChips: renderTagsAsChips)
+                       renderTagsAsChips: renderTagsAsChips, usesCM6: usesCM6)
     }
 }
 

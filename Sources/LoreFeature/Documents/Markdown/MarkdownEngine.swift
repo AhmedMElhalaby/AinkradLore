@@ -132,6 +132,12 @@ private struct MarkdownDocumentEditor: View {
     /// see `MarkdownEngine.outline`'s doc comment for why that is what
     /// `outline` offsets already are.
     @State private var scrollTarget: Int?
+    /// Whether THIS document may use the CodeMirror surface.
+    ///
+    /// Decided once, when the note opens, and never re-read — see
+    /// `chooseSurface()`. A `nil` means "not decided yet", which only happens
+    /// before `onAppear`.
+    @State private var mayUseCM6: Bool?
     /// The editor's own context-menu wiring — see `MarkdownEditorMenu.swift`.
     /// Kept current by `onSelectionChange`, not by the click itself; see that
     /// file's doc comment for why.
@@ -179,6 +185,28 @@ private struct MarkdownDocumentEditor: View {
                     }
                 }
 
+            // E4T1: the CodeMirror surface, behind `EditorSettings.usesCM6`
+            // and OFF by default. Both surfaces bind the SAME `body_`, so the
+            // document is unaffected by which one is showing and switching is
+            // reversible. Opening a link and Cmd-clicking it now reach the same
+            // closures the native editor is given (E2T1b); completion, hover
+            // preview and tags are still native-only, which is what keeps this
+            // defaulting off rather than the flag being cosmetic.
+            if ctx.editorSettings.usesCM6, mayUseCM6 == true {
+                CM6EditorView(text: $body_, tokens: ctx.theme.tokens,
+                              settings: ctx.editorSettings,
+                              onOpenLink: ctx.openLink,
+                              onOpenLinkBeside: ctx.openLinkBeside,
+                              onTagClick: ctx.onTagClick,
+                              allowsTaskToggle: !ctx.isReadOnly,
+                              resolveEmbedTarget: ctx.resolveEmbedTarget,
+                              completions: ctx.completions,
+                              headingCompletions: ctx.headingCompletions,
+                              tagCompletions: ctx.tagCompletions,
+                              createLinkedNote: ctx.createLinkedNote,
+                              linkTarget: ctx.linkTarget)
+                    .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
+            } else {
             // Only markdown gets the link affordances: wikilinks are markdown
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
@@ -219,10 +247,12 @@ private struct MarkdownDocumentEditor: View {
                 .ainkradContextMenu(EditorMenuItems.build(selection: menuSelection,
                                                           suggestions: menuSuggestions,
                                                           actions: menuActions))
+            }
         }
         .background(ctx.theme.tokens.background)
         .onAppear {
             title = engine.note.title; body_ = engine.note.body
+            chooseSurface(for: engine.note.body)
             lastCommittedTitle = engine.note.title
             titleAtFocusStart = engine.note.title
             ctx.registerScrollHandler { offset in scrollTarget = offset }
@@ -250,6 +280,40 @@ private struct MarkdownDocumentEditor: View {
     /// On `.partial`, the file WAS renamed — the field is deliberately NOT
     /// reverted, only the message is shown, or the field would disagree with
     /// the rename that already happened.
+    /// Pick the editor surface for this document, once.
+    ///
+    /// ## Why a file with mixed line endings goes to the native editor
+    ///
+    /// CodeMirror stores lines with ONE separator, so a document whose endings
+    /// disagree cannot round-trip through it: there is nowhere to record which
+    /// line had which, and `CM6LineEndings` can only restore the dominant one.
+    /// That is a real change to the user's bytes, made before they have typed
+    /// anything.
+    ///
+    /// The native surface has no such limit — the text storage IS the document,
+    /// character for character — so such a note simply opens there. It keeps
+    /// every byte, and it costs the reader only the affordances CM6 adds, on a
+    /// file that is almost always mixed by accident in the first place.
+    ///
+    /// Rejected alternatives, both worse: normalising silently (the one thing
+    /// this editor may never do), and refusing to open the note at all.
+    ///
+    /// ## Why it is decided ONCE
+    ///
+    /// Not re-evaluated as the text changes. Pasting a single CRLF line into an
+    /// LF note would otherwise make the document mixed and swap the editor out
+    /// from under the caret mid-sentence — losing the selection, the undo stack
+    /// and the scroll position, for a reason no reader could possibly infer.
+    /// The choice is made from the bytes as they arrived and then left alone.
+    private func chooseSurface(for body: String) {
+        guard mayUseCM6 == nil else { return }
+        mayUseCM6 = CM6LineEndings.isConsistent(body)
+        if mayUseCM6 == false {
+            NSLog("Lore: mixed line endings; opening in the native editor to "
+                  + "preserve them exactly")
+        }
+    }
+
     private func commitTitle() {
         switch ctx.commitTitle(title) {
         case .success:
