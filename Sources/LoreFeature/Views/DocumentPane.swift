@@ -396,25 +396,14 @@ struct DocumentPane: View {
                 // tears the editor down and builds a fresh one, which re-runs
                 // `.onAppear` against the reloaded engine.
                 .id("\(session.id)-\(session.reloadGeneration)")
-                // Drawn in the margin the editor's own measure already leaves
-                // empty, so it costs the text column nothing — see
-                // `LoreSpineRail`. An overlay rather than an HStack sibling for
-                // the same reason: a rail that took layout width would narrow
-                // the measure every time a document happened to have headings.
-                .overlay(alignment: .topLeading) { spineRail }
-    }
-
-    /// The heading rail. A separate property, not inline in `body`: the editor
-    /// expression it decorates is already large enough that adding this made
-    /// the type-checker give up on the whole chain.
-    @ViewBuilder private var spineRail: some View {
-        LoreSpineRail(outline: outline,
-                      documentLength: documentLength,
-                      caretOffset: caretOffset,
-                      theme: theme,
-                      onSelect: { offset in scrollHandler?(offset) })
-            .padding(.leading, AinkradSpacing.xs)
-            .padding(.vertical, AinkradSpacing.md)
+                // The heading rail is NOT drawn — see `LoreSpineRail`, which
+                // still holds the reasoning and the one line that restores it.
+                // The owner read the ticks as marks at the edge of the panel
+                // rather than as texture, and asked for them gone.
+                //
+                // `outline`, `documentLength` and `caretOffset` are kept: the
+                // outline is published upward for the ⌘⇧O jump palette, which is
+                // untouched and remains the way to move between headings.
     }
 
     /// Which banners are currently up, as a value `.animation(_:value:)` can
