@@ -33,8 +33,39 @@ public final class ImportCoordinator: Identifiable {
     public private(set) var state: ImportEntryState = .choosingSource
     private let vaultRoot: URL
 
-    public init(vaultRoot: URL) {
+    /// Files a notification when the import reaches a terminal state.
+    ///
+    /// An import is the archetypal look-away operation — pick a vault of
+    /// several thousand notes and go do something else — so its outcome is
+    /// exactly what the feed is for. Optional so every existing construction
+    /// site and test is unaffected.
+    var reporter: LoreSignalReporter?
+
+    public init(vaultRoot: URL, reporter: LoreSignalReporter? = nil) {
         self.vaultRoot = vaultRoot
+        self.reporter = reporter
+    }
+
+    /// Sets `state` and files the matching notification.
+    ///
+    /// Funnelled through one place because the reporting rule is "on reaching a
+    /// terminal state", and six scattered assignments would have been six
+    /// chances to forget one — the failure mode being a notification that
+    /// silently never fires for one path.
+    private func transition(to next: ImportEntryState) {
+        state = next
+        switch next {
+        case .finished(let report):
+            reporter?.importFinished(imported: report.imported.count,
+                                     skipped: report.skipped.count,
+                                     failed: report.failed.count)
+        case .failed(let reason):
+            reporter?.importFailed(reason: reason)
+        case .needsAutomation(let detail):
+            reporter?.importNeedsAutomation(detail: detail)
+        case .choosingSource, .scanning, .previewing:
+            break
+        }
     }
 
     /// Asks for an Obsidian vault and scans it.
@@ -82,16 +113,16 @@ public final class ImportCoordinator: Identifiable {
     public func scan(_ source: some ImportSource, sourceRoot: URL?) async {
         if let sourceRoot, let reason = Self.nestingRefusal(source: sourceRoot,
                                                             target: vaultRoot) {
-            state = .failed(reason)
+            transition(to: .failed(reason))
             return
         }
         state = .scanning
         do {
             let items = try await source.scan()
             guard !items.isEmpty else {
-                state = .failed(sourceRoot == nil
+                transition(to: .failed(sourceRoot == nil
                     ? "There were no notes to import."
-                    : "There was nothing to import in that folder.")
+                    : "There was nothing to import in that folder."))
                 return
             }
             // The reader runs HERE, once, against the live vault — not at
@@ -108,12 +139,12 @@ public final class ImportCoordinator: Identifiable {
             // a switch that has nothing to do with their problem.
             if case .permissionDenied(let detail) = error,
                type(of: source).identifier == AppleNotesScriptSource.identifier {
-                state = .needsAutomation(detail)
+                transition(to: .needsAutomation(detail))
             } else {
-                state = .failed(Self.describe(error))
+                transition(to: .failed(Self.describe(error)))
             }
         } catch {
-            state = .failed(error.localizedDescription)
+            transition(to: .failed(error.localizedDescription))
         }
     }
 
@@ -122,7 +153,7 @@ public final class ImportCoordinator: Identifiable {
     /// promise in the least visible way possible: the preview would be a
     /// description of a different run.
     public func apply(_ plan: ImportPlan) async {
-        state = .finished(await ImportApplier(vaultRoot: vaultRoot).apply(plan))
+        transition(to: .finished(await ImportApplier(vaultRoot: vaultRoot).apply(plan)))
     }
 
     public func reset() { state = .choosingSource }
