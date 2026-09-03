@@ -119,6 +119,11 @@ public final class LoreStore {
     /// and Swift has no cross-file `private`.
     var openMTimes: [String: Date] = [:]
 
+    /// Files Lore's notifications. Optional because a generation-9 host is the
+    /// only thing that supplies one, and because every test constructing a
+    /// store must not have to care about notifications.
+    var reporter: LoreSignalReporter?
+
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
         self.coordinator = VaultIndexCoordinator(indexPath: indexPath)

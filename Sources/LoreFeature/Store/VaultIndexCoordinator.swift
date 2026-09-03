@@ -286,6 +286,10 @@ public final class VaultIndexCoordinator {
         case .failed(let reason):
             lastRebuildError = reason
             refreshed = nil
+            // The sidebar shows `lastRebuildError` while Lore is open; the feed
+            // keeps it afterwards, which is when the user notices search is
+            // returning stale results and has no idea why.
+            onRescanFailure?(reason)
         }
         // KNOWN, UNFIXED RACE (recorded, not fixed — rated theoretical/low):
         // `directories` above is a snapshot of disk taken when THIS task's
@@ -320,6 +324,10 @@ public final class VaultIndexCoordinator {
     /// What one background rescan produced — the refreshed vault, or why it
     /// could not be read. A two-case result rather than an optional, so the
     /// failure carries its reason instead of being erased to "nothing".
+    /// Called when a background rescan fails. Set by `LoreStore` so the
+    /// coordinator does not have to know what a notification is.
+    var onRescanFailure: ((String) -> Void)?
+
     private enum RebuildOutcome: Sendable {
         case done(rows: [IndexRow], directories: [String])
         case failed(String)
