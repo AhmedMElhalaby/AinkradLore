@@ -89,6 +89,27 @@ public struct IndexRow: Equatable, Sendable {
     }
 }
 
+/// A document's cheap identity for the unchanged-vault fast path: mtime plus
+/// size, nothing parsed.
+///
+/// `updatedEpoch` is `timeIntervalSince1970`, a raw `Double` — DELIBERATELY
+/// NOT a `Date`. `documents.updated` is stored as that same raw double (see
+/// `Self.write`), and reconstructing a `Date` from it on the read side
+/// (`Date(timeIntervalSince1970:)`) is a LOSSY round-trip: `Date` compares by
+/// `timeIntervalSinceReferenceDate`, which shifts the value by 978307200
+/// seconds and back through IEEE-754 — not guaranteed to return the same
+/// bits. Two fingerprints that print identically then compared unequal,
+/// silently disabling the fast path on every launch. Comparing the stored
+/// double directly, unconverted, is exact.
+public struct DocumentFingerprint: Equatable, Sendable {
+    public let updatedEpoch: Double
+    public let byteSize: Int
+    public init(updatedEpoch: Double, byteSize: Int) {
+        self.updatedEpoch = updatedEpoch
+        self.byteSize = byteSize
+    }
+}
+
 /// `@unchecked Sendable`: the only stored property is a GRDB `DatabaseQueue`,
 /// which serializes every access internally and is safe to use from any thread.
 /// This is what lets `LoreStore` run a whole-vault rebuild off the main actor.
@@ -397,6 +418,28 @@ public final class LoreIndex: @unchecked Sendable {
     public func all() throws -> [IndexRow] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM documents ORDER BY updated DESC").map(Self.row)
+        }
+    }
+
+    /// `(canonical path) -> (updatedEpoch, byteSize)` for every indexed
+    /// document. Deliberately NOT `all()`: this reads two columns, not the
+    /// full row set with tags/aliases/properties, because it runs on every
+    /// activate and is only ever compared, never displayed. `updated` is read
+    /// straight out as the raw double `Self.write` stored — NOT reconstructed
+    /// into a `Date` — see `DocumentFingerprint.updatedEpoch`'s doc comment
+    /// for why that round-trip is lossy and would silently disable the fast
+    /// path.
+    public func fingerprints() throws -> [String: DocumentFingerprint] {
+        try dbQueue.read { db in
+            var out: [String: DocumentFingerprint] = [:]
+            let rows = try Row.fetchAll(db, sql: "SELECT path, updated, byte_size FROM documents")
+            for row in rows {
+                let path: String = row["path"]
+                out[path] = DocumentFingerprint(
+                    updatedEpoch: row["updated"],
+                    byteSize: row["byte_size"] ?? 0)
+            }
+            return out
         }
     }
 

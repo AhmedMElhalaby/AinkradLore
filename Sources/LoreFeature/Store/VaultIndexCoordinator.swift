@@ -114,6 +114,12 @@ public final class VaultIndexCoordinator {
     /// A vault change arrived while a rescan was running — run once more after.
     private var rebuildRequestedAgain = false
 
+    /// Test seam only: incremented once per full rescan actually performed
+    /// (i.e. every time the unchanged-vault fast path did NOT fire). No
+    /// production reader — it exists because there was no other clean way to
+    /// assert "a rebuild was skipped" without asserting on timing.
+    var rebuildsPerformedForTesting = 0
+
     /// Open editors' subscriptions to "a file changed on disk", keyed by the
     /// token `registerExternalChangeHandler` handed back — see that method.
     /// This is the SAME sink `LoreStore`/`EditorContext` route the watcher's
@@ -219,6 +225,10 @@ public final class VaultIndexCoordinator {
         suppressWatcherUntil = Date().addingTimeInterval(interval)
     }
 
+    /// Test seam only: the underlying index, for tests that need to read
+    /// `fingerprints()` directly rather than through the coordinator.
+    var indexForTesting: LoreIndex? { index }
+
     /// Test seam: wait until no background rescan is in flight.
     ///
     /// `activate` kicks one off, and `async` tests suspend often enough for its
@@ -254,6 +264,29 @@ public final class VaultIndexCoordinator {
         }
         guard let root = vaultRoot, let index else { return }
         lastRebuildError = nil
+        // Cheap pass first: if the vault is identical to what is indexed, the
+        // whole scan below is wasted work. Measured on a 1547-note vault: the
+        // full rescan burns 50-105% CPU for 45-60s, on EVERY launch, and on a
+        // relaunch with no edits every byte of it is thrown away.
+        //
+        // Any difference at all -- added, removed, or modified -- falls through
+        // to the unchanged full rebuild. That is deliberate: a changed title or
+        // alias can change how links in OTHER notes resolve, so partial
+        // re-indexing is not safe without re-resolving the graph.
+        //
+        // `directoryPaths` is compared too, not just file fingerprints: an
+        // EMPTY directory created or removed touches no file's mtime/size, so
+        // file fingerprints alone would call that vault "unchanged" and skip
+        // the rescan that `directoryPaths` needs to notice it. Captured here,
+        // on the main actor, before the detached task below runs.
+        let currentDirectories = Set(directoryPaths)
+        if let indexed = try? index.fingerprints() {
+            let (onDisk, onDiskDirectories) = await Task.detached(priority: .utility) {
+                (Self.scanFingerprints(at: root), Set(Self.scanDirectories(under: root)))
+            }.value
+            if onDisk == indexed && onDiskDirectories == currentDirectories { return }
+        }
+        rebuildsPerformedForTesting += 1
         // Walk, read and parse every note off the main actor, then apply the
         // whole result in one transaction. `LoreIndex` is Sendable (it holds
         // only a GRDB `DatabaseQueue`, which serializes its own access).
@@ -340,16 +373,16 @@ public final class VaultIndexCoordinator {
     /// `attachment`, empty plaintext, the filename (with extension) as title.
     /// Empty plaintext is the point — an attachment row must never match a
     /// full-text search for content nobody parsed.
-    nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
-        // CANONICAL ON WRITE, part 1: the enumerator builds every URL it yields
-        // by appending to the URL it was given, so canonicalizing the root ONCE
-        // here makes every `IndexEntry.url` below canonical — without a
-        // `realpath(3)` per file. `activate` already stores a canonical
-        // `vaultRoot`, so in production this is a no-op; it is here because
-        // `scanVault` is also called directly (tests, `rebuild()`) and the
-        // invariant must not depend on which door the caller came through.
-        let root = Self.canonical(root)
-        var entries: [IndexEntry] = []
+    /// The ONE walk of "what counts as a document under `root`", shared by
+    /// `scanVault` and `scanFingerprints`. Both need the exact same answer —
+    /// a copy that drifts is exactly how the fast path fires when it should
+    /// not (see `scanFingerprints`'s doc comment) — so this is the single
+    /// place the skip rules live: dot-prefixed path components below the
+    /// root, directories that are not packages, `.skipsPackageDescendants`.
+    /// Callers get back canonical URLs only; every per-file cost (loading,
+    /// parsing, `attributesOfItem`) is theirs to pay or skip.
+    nonisolated private static func walkDocumentFiles(at root: URL) -> [URL] {
+        var urls: [URL] = []
         // Only components BELOW the root are ours to judge. Testing the
         // absolute path would make a vault under any dot-prefixed ancestor —
         // `~/.local/share/notes`, a `.worktrees/` checkout, a sandbox
@@ -377,9 +410,24 @@ public final class VaultIndexCoordinator {
             // (no engine claims a package as its own file type), or it
             // (and everything a user would recognize as "the document")
             // disappears from the vault entirely.
-            let values = try? url.resourceValues(
-                forKeys: [.isDirectoryKey, .isPackageKey, .contentModificationDateKey])
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
             if values?.isDirectory == true && values?.isPackage != true { continue }
+            urls.append(url)
+        }
+        return urls
+    }
+
+    nonisolated static func scanVault(at root: URL) -> [IndexEntry] {
+        // CANONICAL ON WRITE, part 1: the enumerator builds every URL it yields
+        // by appending to the URL it was given, so canonicalizing the root ONCE
+        // here makes every `IndexEntry.url` below canonical — without a
+        // `realpath(3)` per file. `activate` already stores a canonical
+        // `vaultRoot`, so in production this is a no-op; it is here because
+        // `scanVault` is also called directly (tests, `rebuild()`) and the
+        // invariant must not depend on which door the caller came through.
+        let root = Self.canonical(root)
+        var entries: [IndexEntry] = []
+        for url in Self.walkDocumentFiles(at: root) {
             // File mtime is DELIBERATELY authoritative for `updated`, and
             // supersedes markdown's frontmatter `updated:` value, which the
             // pre-M0 scan used. Two reasons: it is uniform across document
@@ -387,6 +435,7 @@ public final class VaultIndexCoordinator {
             // frontmatter field is day-granularity, so a whole day's notes
             // tie and `ORDER BY updated DESC` sorts them arbitrarily. This
             // changes sidebar ordering for vaults where the two disagree.
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             let updated = values?.contentModificationDate ?? Date()
 
             // Resolution is total (`EngineRegistry.engine(for:)` never returns
@@ -448,6 +497,25 @@ public final class VaultIndexCoordinator {
                        isEditable: entry.isEditable, byteSize: entry.byteSize,
                        isTruncated: entry.isTruncated)
         }
+    }
+
+    /// The same walk `scanVault` does (via `walkDocumentFiles`, so the skip
+    /// rules cannot drift between the two), reduced to `(canonical path) ->
+    /// (mtime, size)`. No `load`, no `indexPayload` — that is the entire
+    /// point: this is the cheap half, run to decide whether the expensive
+    /// half (`scanVault`) is needed at all.
+    nonisolated static func scanFingerprints(at root: URL) -> [String: DocumentFingerprint] {
+        let root = Self.canonical(root)
+        var out: [String: DocumentFingerprint] = [:]
+        for url in Self.walkDocumentFiles(at: root) {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            let updated = values?.contentModificationDate ?? Date()
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let byteSize = (attributes?[.size] as? Int) ?? 0
+            out[url.path] = DocumentFingerprint(
+                updatedEpoch: updated.timeIntervalSince1970, byteSize: byteSize)
+        }
+        return out
     }
 
     /// Upper bound on the indexed text of a single document.
