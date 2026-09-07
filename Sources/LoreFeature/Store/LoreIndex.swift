@@ -462,29 +462,47 @@ public final class LoreIndex: @unchecked Sendable {
     /// change since we last indexed?" across PROCESS BOUNDARIES. The in-memory
     /// `VaultIndexCoordinator.directoryPaths` starts empty in every new process,
     /// so comparing against it made the fast path unfireable at launch — the
-    /// exact case it exists for. `nil` means "never recorded" (a fresh
-    /// database, or one created before this table existed), which callers
-    /// must treat as a mismatch, not as "matches the empty set".
+    /// exact case it exists for. `nil` means "never recorded" — a fresh
+    /// database, one created before this table existed, OR a row this
+    /// process cannot decode — which callers must treat as a mismatch, not
+    /// as "matches the empty set".
+    ///
+    /// JSON-encoded, NOT comma-joined like `tags`/`aliases`. Comma-joining is
+    /// lossy for directory PATHS specifically: unlike tags, folder names
+    /// routinely contain literal commas (e.g. a session folder named
+    /// `2026-07-18 sweep — closed #245, shipped #285`), and a comma-joined
+    /// round-trip silently splits one such directory into two entries. That
+    /// made the stored set permanently unable to equal the scanned set, so
+    /// the fast path was permanently dead for any vault with a comma in a
+    /// folder name — a real, shipped bug (see the incident this fixes). Do
+    /// not "simplify" this back to comma-joining.
+    ///
+    /// A row this process cannot JSON-decode (e.g. one written by the earlier
+    /// comma-joined format) is treated as "never recorded" rather than thrown:
+    /// one full rebuild self-heals it into the new format.
     public func indexedDirectories() throws -> Set<String>? {
         try dbQueue.read { db in
             guard let raw = try String.fetchOne(
                 db, sql: "SELECT directories FROM vault_directories WHERE id = 0"
             ) else { return nil }
-            guard !raw.isEmpty else { return Set<String>() }
-            return Set(raw.split(separator: ",").map(String.init))
+            guard let data = raw.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String].self, from: data)
+            else { return nil }
+            return Set(decoded)
         }
     }
 
     /// Persists `directories` as the set to compare against on the next
-    /// process's first rebuild. Encoded comma-joined, matching how this file
-    /// already encodes list-ish columns (`tags`, `aliases`) rather than
-    /// inventing a new convention.
+    /// process's first rebuild. See `indexedDirectories()`'s doc comment for
+    /// why this is JSON, not comma-joined.
     public func setIndexedDirectories(_ directories: Set<String>) throws {
+        let encoded = try JSONEncoder().encode(Array(directories))
+        let json = String(decoding: encoded, as: UTF8.self)
         try dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO vault_directories(id, directories) VALUES(0, ?)
                 ON CONFLICT(id) DO UPDATE SET directories = excluded.directories;
-            """, arguments: [directories.sorted().joined(separator: ",")])
+            """, arguments: [json])
         }
     }
 

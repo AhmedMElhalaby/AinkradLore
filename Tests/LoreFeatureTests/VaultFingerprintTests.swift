@@ -196,4 +196,48 @@ struct VaultFingerprintTests {
         #expect(!freshStore.coordinator.directoryPaths.isEmpty,
                "the fast-path hit must still publish the persisted directory set into memory")
     }
+
+    /// A directory whose NAME CONTAINS A COMMA must survive the round-trip.
+    /// Comma-joining silently split such a path into two entries, so the stored
+    /// set could never equal the scanned set and the fast path was permanently
+    /// dead for any vault with a comma in a folder name — which is not exotic.
+    @Test func aDirectoryNameContainingACommaRoundTrips() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lore-fp-\(UUID())", isDirectory: true)
+            .appendingPathComponent("vault", isDirectory: true)
+        let commaDir = root.appendingPathComponent(
+            "Sessions/2026-07-18 sweep — closed #245, shipped #285", isDirectory: true)
+        try FileManager.default.createDirectory(at: commaDir, withIntermediateDirectories: true)
+
+        let index = try LoreIndex(path: root.deletingLastPathComponent()
+            .appendingPathComponent(".index-\(UUID()).sqlite"))
+        let scanned = Set(VaultIndexCoordinator.scanDirectories(under: root))
+        try index.setIndexedDirectories(scanned)
+
+        let roundTripped = try #require(try index.indexedDirectories())
+        #expect(roundTripped == scanned)
+        #expect(roundTripped.count == scanned.count)
+        #expect(roundTripped.contains { $0.contains("closed #245, shipped #285") })
+    }
+
+    /// The fast-path behavioural case for the same bug: an unchanged vault
+    /// containing a comma-in-name directory must still skip the rebuild, not
+    /// just round-trip in isolation.
+    @Test func anUnchangedVaultWithACommaInADirectoryNameStillSkipsTheRebuild() async throws {
+        let (root, store) = try await makeVault()
+        store.coordinator.suppressWatcher(for: 60)
+        try write(root, "a.md", "---\nid: a\ntitle: A\n---\nhello")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(
+                "Sessions/2026-07-18 sweep — closed #245, shipped #285", isDirectory: true),
+            withIntermediateDirectories: true)
+        try store.rebuild()
+        let before = store.coordinator.rebuildsPerformedForTesting
+
+        store.rebuildInBackground()
+        await store.settleForTesting()
+
+        #expect(store.coordinator.rebuildsPerformedForTesting == before,
+               "an unchanged vault with a comma in a directory name triggered a full rescan")
+    }
 }
