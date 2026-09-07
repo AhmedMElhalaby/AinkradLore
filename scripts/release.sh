@@ -103,7 +103,7 @@ echo "Released $VERSION (sha256 $SHA)"
 # invisible in the app for three days because the catalog still served v0.6.0.
 # Updating the catalog is part of releasing, not a chore to remember afterwards.
 SOURCE_REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-CATALOG_REPO="AhmedMElhalaby/AinkradCatalog"
+CATALOG_REPO="AinkradHQ/AinkradCatalog"
 CATALOG_DIR="$(mktemp -d)"
 trap 'rm -rf "$CATALOG_DIR"' EXIT
 

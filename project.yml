@@ -13,7 +13,7 @@ settings:
     EAGER_LINKING: NO
 packages:
   AinkradAppKit:
-    url: https://github.com/AhmedMElhalaby/AinkradAppKit
+    url: https://github.com/AinkradHQ/AinkradAppKit
     # MUST equal the revision the HOST is pinned to, not merely a revision that
     # stamps the same AinkradAPIVersion. The generation check compares integers,
     # so a plugin built against a different revision of generation 8 passes
