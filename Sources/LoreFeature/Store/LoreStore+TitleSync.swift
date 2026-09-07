@@ -265,8 +265,12 @@ extension LoreStore {
         guard newText != text else { return }
 
         coordinator.suppressWatcher(for: VaultIndexCoordinator.selfWriteSuppressionWindow)
-        guard (try? newText.write(to: destination, atomically: true, encoding: .utf8)) != nil
-        else { return }
+        do {
+            try newText.write(to: destination, atomically: true, encoding: .utf8)
+        } catch {
+            Log.store.error("Failed to write synced title to \(destination.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
 
         // The file is truth, the index is derived: reindex this one file
         // rather than trusting the watcher (suppressed above) or waiting for
