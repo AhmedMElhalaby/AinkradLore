@@ -80,12 +80,21 @@ public final class MarkdownEngine: DocumentEngine {
         let model = MarkdownDocumentModel(body: note.body)
         return IndexPayload(title: note.title,
                             plaintext: note.body,
-                            tags: note.tags,
+                            // Frontmatter tags AND inline `#tags`, deduplicated.
+                            // A note tagged both ways must count once, or
+                            // `LoreStore.tagCounts` double-counts it in the
+                            // sidebar chip row.
+                            tags: Array(Set(note.tags + model.inlineTags)).sorted(),
                             properties: note.extra,
                             outline: model.outline,
                             links: model.links,
                             aliases: note.aliases,
+                            blocks: model.blockAnchors,
                             id: note.id)
+    }
+
+    public func replaceContents(with other: MarkdownEngine) {
+        note = other.note
     }
 
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
@@ -101,34 +110,226 @@ private struct MarkdownDocumentEditor: View {
     let ctx: EditorContext
     @State private var title: String = ""
     @State private var body_: String = ""
+    /// The title as of the last COMMIT (blur/Enter), never per keystroke —
+    /// what a refused rename reverts `title` back to. Kept separate from
+    /// `engine.note.title` because that field is mutated live, on every
+    /// keystroke, below.
+    @State private var lastCommittedTitle: String = ""
+    /// The text as of the moment the title field last GAINED focus — see
+    /// `onChange(of: titleFocused)`'s doc comment.
+    @State private var titleAtFocusStart: String = ""
+    @State private var titleRefusal: String?
+    /// The alert's own title — distinct from "Couldn't rename" for
+    /// `.partial`, where the rename actually SUCCEEDED and only something
+    /// afterward (persisting the title, an unrewritable link) did not; that
+    /// case previously reused "Couldn't rename" verbatim, which is simply
+    /// false when the file has, in fact, been renamed (whole-branch review,
+    /// fix round 2, Minor D).
+    @State private var titleAlertTitle: String = "Couldn't rename"
+    @FocusState private var titleFocused: Bool
     /// Set by `ctx.registerScrollHandler`'s callback, which `OutlineSection`
     /// invokes through the closure the shell captured. Body-relative UTF-16 —
     /// see `MarkdownEngine.outline`'s doc comment for why that is what
     /// `outline` offsets already are.
     @State private var scrollTarget: Int?
+    /// Whether THIS document may use the CodeMirror surface.
+    ///
+    /// Decided once, when the note opens, and never re-read — see
+    /// `chooseSurface()`. A `nil` means "not decided yet", which only happens
+    /// before `onAppear`.
+    @State private var mayUseCM6: Bool?
+    /// The editor's own context-menu wiring — see `MarkdownEditorMenu.swift`.
+    /// Kept current by `onSelectionChange`, not by the click itself; see that
+    /// file's doc comment for why.
+    @State private var menuSelection = NSRange(location: 0, length: 0)
+    @State private var menuSuggestions: [String] = []
+    @State private var menuActions = EditorMenuActions.noop
+    /// Off the caret-move hot path — see `MenuSuggestionDebouncer`'s doc
+    /// comment. `@State`, not a plain `let`: this struct is reconstructed on
+    /// every render, and only `@State` storage survives that across renders,
+    /// the same reason `scrollTarget` above is `@State` and not a local var.
+    @State private var menuSuggestionDebouncer = MenuSuggestionDebouncer()
 
     var body: some View {
         VStack(spacing: 0) {
             AinkradTextField(text: $title, placeholder: "Title")
                 .padding(AinkradSpacing.md)
+                .focused($titleFocused)
+                // Live text and the in-memory model track every keystroke —
+                // unchanged from before — so the editor's content (and its
+                // debounced autosave of BODY/tag changes) keeps working
+                // exactly as it did. What is NEW is that the FILE rename is
+                // gated on commit, below: renaming the file on every
+                // keystroke would thrash the filesystem and rewrite inbound
+                // links dozens of times for one typed word.
                 .onChange(of: title) { engine.note.title = title; ctx.onChange() }
+                // `onSubmit` (Enter/Return) and losing focus (Tab away, click
+                // elsewhere) are the two "commit" gestures the owner asked
+                // for. Both funnel into the same commit function so there is
+                // exactly one rename per commit, never two.
+                .onSubmit { if title != titleAtFocusStart { commitTitle() } }
+                .onChange(of: titleFocused) { _, isFocused in
+                    // Record the text as it stood the moment editing STARTED,
+                    // so blur can tell "the user actually typed something"
+                    // apart from "the user merely clicked in and back out".
+                    // Without this, `commitTitle()` fired unconditionally on
+                    // every blur, and for a note whose title and filename
+                    // already diverge (the owner's explicitly-uncovered
+                    // case), that alone renamed the file and mass-rewrote
+                    // every inbound link with no edit and no confirmation —
+                    // whole-branch review, Critical 1.
+                    if isFocused {
+                        titleAtFocusStart = title
+                    } else if title != titleAtFocusStart {
+                        commitTitle()
+                    }
+                }
 
+            // E4T1: the CodeMirror surface, behind `EditorSettings.usesCM6`
+            // and OFF by default. Both surfaces bind the SAME `body_`, so the
+            // document is unaffected by which one is showing and switching is
+            // reversible. Opening a link and Cmd-clicking it now reach the same
+            // closures the native editor is given (E2T1b); completion, hover
+            // preview and tags are still native-only, which is what keeps this
+            // defaulting off rather than the flag being cosmetic.
+            if ctx.editorSettings.usesCM6, mayUseCM6 == true {
+                CM6EditorView(text: $body_, tokens: ctx.theme.tokens,
+                              settings: ctx.editorSettings,
+                              onOpenLink: ctx.openLink,
+                              onOpenLinkBeside: ctx.openLinkBeside,
+                              onTagClick: ctx.onTagClick,
+                              allowsTaskToggle: !ctx.isReadOnly,
+                              resolveEmbedTarget: ctx.resolveEmbedTarget,
+                              completions: ctx.completions,
+                              headingCompletions: ctx.headingCompletions,
+                              tagCompletions: ctx.tagCompletions,
+                              createLinkedNote: ctx.createLinkedNote,
+                              linkTarget: ctx.linkTarget)
+                    .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
+            } else {
             // Only markdown gets the link affordances: wikilinks are markdown
             // syntax, and offering completion inside a plain-text file would
             // insert brackets that mean nothing there.
             MarkdownEditor(text: $body_, tokens: ctx.theme.tokens,
-                           completions: ctx.completions, onOpenLink: ctx.openLink,
+                           settings: ctx.editorSettings,
+                           headingCompletions: ctx.headingCompletions,
+                           createLinkedNote: ctx.createLinkedNote,
+                           completions: ctx.completions, tagCompletions: ctx.tagCompletions,
+                           onOpenLink: ctx.openLink,
+                           onOpenLinkBeside: ctx.openLinkBeside,
+                           onTagClick: ctx.onTagClick,
+                           resolveEmbedTarget: ctx.resolveEmbedTarget,
+                           registerExternalChangeHandler: ctx.registerExternalChangeHandler,
+                           unregisterExternalChangeHandler: ctx.unregisterExternalChangeHandler,
                            linkTarget: ctx.linkTarget, scrollTarget: $scrollTarget,
                            // Task checkboxes are markdown, and only a session
                            // that can actually be written may offer to flip
                            // one — see `EditorContext.isReadOnly`.
-                           allowsTaskToggle: !ctx.isReadOnly)
+                           allowsTaskToggle: !ctx.isReadOnly,
+                           writePastedImage: ctx.writePastedImage,
+                           writeDroppedFile: ctx.writeDroppedFile,
+                           onSelectionChange: { text, selection, tag in
+                               // Cheap — a struct copy, no XPC — so this part
+                               // stays synchronous with the caret.
+                               menuSelection = selection
+                               // The spine rail's active-heading tracking rides
+                               // this same callback rather than adding a second
+                               // observer of the caret.
+                               ctx.reportCaretOffset(selection.location)
+                               // The XPC-backed part is debounced: see
+                               // `MenuSuggestionDebouncer`'s doc comment.
+                               menuSuggestionDebouncer.schedule(
+                                   text: text, offset: selection.location, tag: tag
+                               ) { menuSuggestions = $0 }
+                           },
+                           registerMenuActions: { menuActions = $0 })
                 .onChange(of: body_) { engine.note.body = body_; ctx.onChange() }
+                .ainkradContextMenu(EditorMenuItems.build(selection: menuSelection,
+                                                          suggestions: menuSuggestions,
+                                                          actions: menuActions))
+            }
         }
         .background(ctx.theme.tokens.background)
         .onAppear {
             title = engine.note.title; body_ = engine.note.body
+            chooseSurface(for: engine.note.body)
+            lastCommittedTitle = engine.note.title
+            titleAtFocusStart = engine.note.title
             ctx.registerScrollHandler { offset in scrollTarget = offset }
+        }
+        .alert(titleAlertTitle,
+               isPresented: Binding(get: { titleRefusal != nil },
+                                    set: { if !$0 { titleRefusal = nil } })) {
+            Button("OK") { titleRefusal = nil }
+        } message: {
+            Text(titleRefusal ?? "")
+        }
+    }
+
+    /// The one place a title-field edit turns into a file rename. Called only
+    /// when the commit gesture (`onSubmit`, focus loss) fires AND the text
+    /// actually changed since focus was gained — see `titleAtFocusStart`.
+    ///
+    /// On `.refused` (illegal title, or a collision), the field — and
+    /// `engine.note.title`, which the per-keystroke `onChange` above already
+    /// pushed the illegal text into — are both reverted to
+    /// `lastCommittedTitle`, so the title field never shows text the file on
+    /// disk does not have. The owner's ruling: refused, not sanitized, and
+    /// reverted to the last VALID value.
+    ///
+    /// On `.partial`, the file WAS renamed — the field is deliberately NOT
+    /// reverted, only the message is shown, or the field would disagree with
+    /// the rename that already happened.
+    /// Pick the editor surface for this document, once.
+    ///
+    /// ## Why a file with mixed line endings goes to the native editor
+    ///
+    /// CodeMirror stores lines with ONE separator, so a document whose endings
+    /// disagree cannot round-trip through it: there is nowhere to record which
+    /// line had which, and `CM6LineEndings` can only restore the dominant one.
+    /// That is a real change to the user's bytes, made before they have typed
+    /// anything.
+    ///
+    /// The native surface has no such limit — the text storage IS the document,
+    /// character for character — so such a note simply opens there. It keeps
+    /// every byte, and it costs the reader only the affordances CM6 adds, on a
+    /// file that is almost always mixed by accident in the first place.
+    ///
+    /// Rejected alternatives, both worse: normalising silently (the one thing
+    /// this editor may never do), and refusing to open the note at all.
+    ///
+    /// ## Why it is decided ONCE
+    ///
+    /// Not re-evaluated as the text changes. Pasting a single CRLF line into an
+    /// LF note would otherwise make the document mixed and swap the editor out
+    /// from under the caret mid-sentence — losing the selection, the undo stack
+    /// and the scroll position, for a reason no reader could possibly infer.
+    /// The choice is made from the bytes as they arrived and then left alone.
+    private func chooseSurface(for body: String) {
+        guard mayUseCM6 == nil else { return }
+        mayUseCM6 = CM6LineEndings.isConsistent(body)
+        if mayUseCM6 == false {
+            NSLog("Lore: mixed line endings; opening in the native editor to "
+                  + "preserve them exactly")
+        }
+    }
+
+    private func commitTitle() {
+        switch ctx.commitTitle(title) {
+        case .success:
+            lastCommittedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            titleAtFocusStart = title
+        case .refused(let reason):
+            titleAlertTitle = "Couldn't rename"
+            titleRefusal = reason
+            title = lastCommittedTitle
+            engine.note.title = lastCommittedTitle
+            titleAtFocusStart = lastCommittedTitle
+        case .partial(let reason):
+            titleAlertTitle = "Renamed, with a problem"
+            titleRefusal = reason
+            lastCommittedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            titleAtFocusStart = title
         }
     }
 }

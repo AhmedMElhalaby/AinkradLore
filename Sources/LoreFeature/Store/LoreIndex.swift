@@ -46,10 +46,20 @@ public struct IndexEntry: Sendable {
     public let payload: IndexPayload
     public let updated: Date
     public let resolvedLinks: [ResolvedLink]
+    public let isEditable: Bool
+    public let byteSize: Int
+    /// True when `payload.plaintext` was cut short by
+    /// `VaultIndexCoordinator.capped` (or an engine's own equivalent cap).
+    /// Without it a partially-indexed document is indistinguishable from one
+    /// indexed whole — see `LoreIndex.schemaVersion`'s `7:` note.
+    public let isTruncated: Bool
     public init(url: URL, type: String, payload: IndexPayload, updated: Date,
-                resolvedLinks: [ResolvedLink] = []) {
+                resolvedLinks: [ResolvedLink] = [],
+                isEditable: Bool = true, byteSize: Int = 0, isTruncated: Bool = false) {
         self.url = url; self.type = type; self.payload = payload; self.updated = updated
         self.resolvedLinks = resolvedLinks
+        self.isEditable = isEditable; self.byteSize = byteSize
+        self.isTruncated = isTruncated
     }
 }
 
@@ -62,13 +72,52 @@ public struct IndexRow: Equatable, Sendable {
     public let updated: Date
     public let type: String
     public let properties: [FrontmatterPair]
+    public let isEditable: Bool
+    public let byteSize: Int
+    public let isTruncated: Bool
+
+    // Explicit init (rather than the implicit memberwise one) so existing
+    // fixtures across the test suite that predate `isEditable`/`byteSize`/
+    // `isTruncated` keep compiling — defaults match `IndexEntry`'s.
+    public init(path: URL, id: String, title: String, tags: [String], aliases: [String],
+                updated: Date, type: String, properties: [FrontmatterPair],
+                isEditable: Bool = true, byteSize: Int = 0, isTruncated: Bool = false) {
+        self.path = path; self.id = id; self.title = title; self.tags = tags
+        self.aliases = aliases; self.updated = updated; self.type = type
+        self.properties = properties
+        self.isEditable = isEditable; self.byteSize = byteSize; self.isTruncated = isTruncated
+    }
+}
+
+/// A document's cheap identity for the unchanged-vault fast path: mtime plus
+/// size, nothing parsed.
+///
+/// `updatedEpoch` is `timeIntervalSince1970`, a raw `Double` — DELIBERATELY
+/// NOT a `Date`. `documents.updated` is stored as that same raw double (see
+/// `Self.write`), and reconstructing a `Date` from it on the read side
+/// (`Date(timeIntervalSince1970:)`) is a LOSSY round-trip: `Date` compares by
+/// `timeIntervalSinceReferenceDate`, which shifts the value by 978307200
+/// seconds and back through IEEE-754 — not guaranteed to return the same
+/// bits. Two fingerprints that print identically then compared unequal,
+/// silently disabling the fast path on every launch. Comparing the stored
+/// double directly, unconverted, is exact.
+public struct DocumentFingerprint: Equatable, Sendable {
+    public let updatedEpoch: Double
+    public let byteSize: Int
+    public init(updatedEpoch: Double, byteSize: Int) {
+        self.updatedEpoch = updatedEpoch
+        self.byteSize = byteSize
+    }
 }
 
 /// `@unchecked Sendable`: the only stored property is a GRDB `DatabaseQueue`,
 /// which serializes every access internally and is safe to use from any thread.
 /// This is what lets `LoreStore` run a whole-vault rebuild off the main actor.
 public final class LoreIndex: @unchecked Sendable {
-    private let dbQueue: DatabaseQueue
+    /// Internal, not private: the search reads live in `LoreIndex+Search.swift`
+    /// and Swift's `private` is file-scoped. Still closed outside the module,
+    /// and `LoreIndex` remains the only type that touches it.
+    let dbQueue: DatabaseQueue
 
     /// Bump whenever the schema changes. On mismatch the file is deleted and
     /// rebuilt from disk — safe precisely because the index is derived state,
@@ -91,7 +140,15 @@ public final class LoreIndex: @unchecked Sendable {
     /// version-5 index therefore holds an M1 link graph while the code answers
     /// M2a, and `LinkRewriter` reads that index when renaming. Discard and
     /// rebuild — the mechanism this constant exists for.
-    static let schemaVersion: Int32 = 6
+    ///
+    /// 7: M3 added `documents.is_editable` and `documents.byte_size`. A v6
+    /// index has neither, and every row in it predates the read-only engines —
+    /// so its `type` column holds `unclaimed` for files that are now `pdf`,
+    /// `richtext` or `attachment`. Discard and rebuild.
+    /// 8: M6 added `blocks`, storing `^block-id` anchors so `[[Note#^id]]`
+    /// can resolve. A v7 index has no such rows for any note. Discard and
+    /// rebuild — the mechanism this constant exists for.
+    static let schemaVersion: Int32 = 8
 
     public init(path: URL) throws {
         // Probe the existing file's version in its own scope and CLOSE it
@@ -125,7 +182,11 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS documents(
                     path TEXT PRIMARY KEY, id TEXT, title TEXT, tags TEXT,
-                    aliases TEXT, updated DOUBLE, plaintext TEXT, type TEXT, properties TEXT);
+                    aliases TEXT, updated DOUBLE, plaintext TEXT, type TEXT,
+                    properties TEXT,
+                    is_editable INTEGER NOT NULL DEFAULT 1,
+                    byte_size INTEGER NOT NULL DEFAULT 0,
+                    is_truncated INTEGER NOT NULL DEFAULT 0);
             """)
             // Standalone FTS5 index keyed by the same rowid as `documents` (NOT
             // external-content: external-content tables corrupt on the manual
@@ -147,6 +208,28 @@ public final class LoreIndex: @unchecked Sendable {
             """)
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS links_by_source ON links(source_path);
+            """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS blocks(
+                    source_path TEXT NOT NULL,
+                    block_id    TEXT NOT NULL,
+                    offset      INTEGER NOT NULL);
+            """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS blocks_by_id ON blocks(source_path, block_id);
+            """)
+            // Single-row table: the directory set as of the last completed
+            // rebuild. `CREATE TABLE IF NOT EXISTS`, and NOT tied to
+            // `schemaVersion` — an existing database simply lacks the row,
+            // which `indexedDirectories()` reads back as `nil` ("never
+            // recorded"), forces exactly one full rebuild, and gets
+            // populated by it. No migration, no forced reindex for existing
+            // users. See `indexedDirectories()`'s doc comment for why this
+            // must be persisted at all rather than read from `directoryPaths`.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS vault_directories(
+                    id INTEGER PRIMARY KEY CHECK (id = 0),
+                    directories TEXT NOT NULL);
             """)
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
@@ -259,19 +342,23 @@ public final class LoreIndex: @unchecked Sendable {
         // rather than removing the enforcement.
         let path = canonical(entry.url)
         try db.execute(sql: """
-            INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            INSERT INTO documents(path,id,title,tags,aliases,updated,plaintext,type,properties,
+                                   is_editable,byte_size,is_truncated)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(path) DO UPDATE SET
                 id=excluded.id, title=excluded.title, tags=excluded.tags,
                 aliases=excluded.aliases,
                 updated=excluded.updated, plaintext=excluded.plaintext,
-                type=excluded.type, properties=excluded.properties;
+                type=excluded.type, properties=excluded.properties,
+                is_editable=excluded.is_editable, byte_size=excluded.byte_size,
+                is_truncated=excluded.is_truncated;
         """, arguments: [path, entry.payload.id ?? path, entry.payload.title,
                          entry.payload.tags.joined(separator: ","),
                          entry.payload.aliases.joined(separator: ","),
                          entry.updated.timeIntervalSince1970,
                          entry.payload.plaintext, entry.type,
-                         encode(entry.payload.properties)])
+                         encode(entry.payload.properties),
+                         entry.isEditable, entry.byteSize, entry.isTruncated])
         let rowid = try Int64.fetchOne(db, sql: "SELECT rowid FROM documents WHERE path=?",
                                        arguments: [path])
         try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
@@ -286,6 +373,14 @@ public final class LoreIndex: @unchecked Sendable {
             """, arguments: [path, link.rawTarget,
                              link.targetPath.map(canonical), link.isEmbed ? 1 : 0,
                              link.syntax.rawValue])
+        }
+        try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?",
+                       arguments: [path])
+        for anchor in entry.payload.blocks {
+            try db.execute(sql: """
+                INSERT INTO blocks(source_path, block_id, offset)
+                VALUES(?,?,?);
+            """, arguments: [path, anchor.id, anchor.offset])
         }
     }
 
@@ -314,6 +409,7 @@ public final class LoreIndex: @unchecked Sendable {
                 try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
                 try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
                 try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
+                try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?", arguments: [path])
             }
         }
     }
@@ -326,6 +422,7 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: "DELETE FROM documents_fts WHERE rowid=?", arguments: [rowid])
             try db.execute(sql: "DELETE FROM documents WHERE path=?", arguments: [path])
             try db.execute(sql: "DELETE FROM links WHERE source_path = ?", arguments: [path])
+            try db.execute(sql: "DELETE FROM blocks WHERE source_path = ?", arguments: [path])
         }
     }
 
@@ -337,63 +434,91 @@ public final class LoreIndex: @unchecked Sendable {
         }
     }
 
-    public func search(_ query: String) throws -> [IndexRow] {
-        guard let expression = Self.ftsExpression(for: query) else { return try all() }
-        return try dbQueue.read { db in
-            try Row.fetchAll(db, sql: """
-                SELECT n.* FROM documents n
-                JOIN documents_fts f ON f.rowid = n.rowid
-                WHERE documents_fts MATCH ? ORDER BY rank;
-            """, arguments: [expression]).map(Self.row)
+    /// `(canonical path) -> (updatedEpoch, byteSize)` for every indexed
+    /// document. Deliberately NOT `all()`: this reads two columns, not the
+    /// full row set with tags/aliases/properties, because it runs on every
+    /// activate and is only ever compared, never displayed. `updated` is read
+    /// straight out as the raw double `Self.write` stored — NOT reconstructed
+    /// into a `Date` — see `DocumentFingerprint.updatedEpoch`'s doc comment
+    /// for why that round-trip is lossy and would silently disable the fast
+    /// path.
+    public func fingerprints() throws -> [String: DocumentFingerprint] {
+        try dbQueue.read { db in
+            var out: [String: DocumentFingerprint] = [:]
+            let rows = try Row.fetchAll(db, sql: "SELECT path, updated, byte_size FROM documents")
+            for row in rows {
+                let path: String = row["path"]
+                out[path] = DocumentFingerprint(
+                    updatedEpoch: row["updated"],
+                    byteSize: row["byte_size"] ?? 0)
+            }
+            return out
         }
     }
 
-    /// `search` throwing is never actionable at a call site; this is the shape
-    /// every caller already used via `try?`.
-    public func searchOrEmpty(_ query: String) -> [IndexRow] {
-        (try? search(query)) ?? []
+    /// The directory set as of the last completed rebuild.
+    ///
+    /// Persisted because the fast path must answer "did the vault's directories
+    /// change since we last indexed?" across PROCESS BOUNDARIES. The in-memory
+    /// `VaultIndexCoordinator.directoryPaths` starts empty in every new process,
+    /// so comparing against it made the fast path unfireable at launch — the
+    /// exact case it exists for. `nil` means "never recorded" — a fresh
+    /// database, one created before this table existed, OR a row this
+    /// process cannot decode — which callers must treat as a mismatch, not
+    /// as "matches the empty set".
+    ///
+    /// JSON-encoded, NOT comma-joined like `tags`/`aliases`. Comma-joining is
+    /// lossy for directory PATHS specifically: unlike tags, folder names
+    /// routinely contain literal commas (e.g. a session folder named
+    /// `2026-07-18 sweep — closed #245, shipped #285`), and a comma-joined
+    /// round-trip silently splits one such directory into two entries. That
+    /// made the stored set permanently unable to equal the scanned set, so
+    /// the fast path was permanently dead for any vault with a comma in a
+    /// folder name — a real, shipped bug (see the incident this fixes). Do
+    /// not "simplify" this back to comma-joining.
+    ///
+    /// A row this process cannot JSON-decode (e.g. one written by the earlier
+    /// comma-joined format) is treated as "never recorded" rather than thrown:
+    /// one full rebuild self-heals it into the new format.
+    public func indexedDirectories() throws -> Set<String>? {
+        try dbQueue.read { db in
+            guard let raw = try String.fetchOne(
+                db, sql: "SELECT directories FROM vault_directories WHERE id = 0"
+            ) else { return nil }
+            guard let data = raw.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String].self, from: data)
+            else { return nil }
+            return Set(decoded)
+        }
     }
 
-    /// Turns raw user input into a safe FTS5 MATCH expression, or `nil` when
-    /// there is nothing to search for.
-    ///
-    /// The binding was already a SQL *parameter*, so this was never SQL
-    /// injection — but a parameter passed to `MATCH` is still parsed by SQLite
-    /// as an **FTS5 query expression**, and the raw string was handed over
-    /// verbatim. So ordinary text broke it:
-    ///
-    /// * `size: 3` → `:` is the column filter operator → syntax error
-    /// * `he said "hi` → unbalanced quote → syntax error
-    /// * `AND`, `OR`, `NOT`, `NEAR` → bare operators → syntax error
-    /// * `C++` / `a-b` → operator characters → syntax error
-    ///
-    /// A thrown error here is worse than it sounds: every call site uses
-    /// `try?`, so a syntax error becomes an empty result set and the note
-    /// browser silently reports "no matches" for a note that exists. Typing a
-    /// colon made search look broken.
-    ///
-    /// Each whitespace-separated term is emitted as a quoted FTS5 string
-    /// literal (embedded `"` doubled, per the FTS5 grammar) with a trailing
-    /// `*` for prefix matching, joined by implicit AND. Inside a quoted
-    /// literal every character is data, so no input can be an operator.
-    static func ftsExpression(for query: String) -> String? {
-        let terms = query
-            .split(whereSeparator: { $0.isWhitespace })
-            .map { term -> String in
-                let escaped = term.replacingOccurrences(of: "\"", with: "\"\"")
-                return "\"\(escaped)\"*"
-            }
-        return terms.isEmpty ? nil : terms.joined(separator: " ")
+    /// Persists `directories` as the set to compare against on the next
+    /// process's first rebuild. See `indexedDirectories()`'s doc comment for
+    /// why this is JSON, not comma-joined.
+    public func setIndexedDirectories(_ directories: Set<String>) throws {
+        let encoded = try JSONEncoder().encode(Array(directories))
+        let json = String(decoding: encoded, as: UTF8.self)
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO vault_directories(id, directories) VALUES(0, ?)
+                ON CONFLICT(id) DO UPDATE SET directories = excluded.directories;
+            """, arguments: [json])
+        }
     }
 
-    private static func row(_ r: Row) -> IndexRow {
+    /// Internal for the same reason as `dbQueue` — the search reads map their
+    /// result rows through it.
+    static func row(_ r: Row) -> IndexRow {
         IndexRow(path: URL(fileURLWithPath: r["path"]),
                  id: r["id"], title: r["title"],
                  tags: (r["tags"] as String).split(separator: ",").map(String.init),
                  aliases: (r["aliases"] as String).split(separator: ",").map(String.init),
                  updated: Date(timeIntervalSince1970: r["updated"]),
                  type: r["type"],
-                 properties: decode(r["properties"]))
+                 properties: decode(r["properties"]),
+                 isEditable: r["is_editable"] ?? true,
+                 byteSize: r["byte_size"] ?? 0,
+                 isTruncated: r["is_truncated"] ?? false)
     }
 
     // MARK: - Links
@@ -464,6 +589,18 @@ public final class LoreIndex: @unchecked Sendable {
                              isEmbed: (r["is_embed"] as Int) == 1,
                              syntax: Self.syntax(r["syntax"]))
             }
+        }
+    }
+
+    // MARK: - Blocks
+
+    /// Where a block anchor sits, or `nil` if that document has no such
+    /// anchor. Used to resolve `[[Note#^id]]`.
+    public func blockOffset(inDocumentAt path: String, id: String) throws -> Int? {
+        try dbQueue.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT offset FROM blocks WHERE source_path = ? AND block_id = ? LIMIT 1;
+            """, arguments: [path, id])
         }
     }
 }

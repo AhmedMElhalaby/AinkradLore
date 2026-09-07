@@ -22,6 +22,11 @@ final class SidebarOperations {
     enum NameTarget: Equatable {
         case document(URL)
         case folder(URL)
+        /// A NEW folder about to be created inside the associated parent —
+        /// distinct from `.folder`, which names an EXISTING folder being
+        /// renamed, because the two need different verbs and different store
+        /// calls on confirm.
+        case newFolder(URL)
     }
 
     /// The plan a preview is showing, kept so `confirm()` applies exactly the
@@ -31,6 +36,7 @@ final class SidebarOperations {
     private enum Pending {
         case document(RenamePlan, isMove: Bool)
         case folder(FolderRenamePlan)
+        case trashFolder(FolderTrashPlan)
     }
 
     private let store: LoreStore
@@ -45,9 +51,68 @@ final class SidebarOperations {
     var report: RenameReport?
     /// A refusal or failure with no sheet of its own — most importantly a
     /// REFUSED TRASH, which used to be a silent no-op (`try? store.trash(row)`).
+    ///
+    /// FAILURES ONLY. Successes go to `notice` below: this one is rendered by
+    /// `MessageSheet`, whose heading is the literal word "Not done", so a
+    /// success routed here told the user "Not done: Created “Projects”." —
+    /// which is not merely ugly, it is the opposite of what happened. Both
+    /// `commitName`'s create and `confirm`'s folder-trash did exactly that.
     var message: String?
+    /// A transient outcome to surface as a toast rather than a modal.
+    ///
+    /// The split between this and `message` is by WEIGHT, not by success and
+    /// failure: anything the user must acknowledge and act on stays a sheet;
+    /// anything that is merely worth knowing — including a soft failure the
+    /// user cannot do anything about — is a toast that expires on its own.
+    /// A modal for "created a folder" interrupts the work it just completed.
+    var notice: Notice?
+
+    /// One transient outcome, and how loudly to say it.
+    struct Notice: Equatable {
+        enum Kind: Equatable { case success, failure }
+        let text: String
+        let kind: Kind
+    }
+
     /// The row a trash was requested for, awaiting confirmation.
     var pendingTrash: IndexRow?
+
+    /// The session whose close was REFUSED — `closeTab` returned false,
+    /// meaning it still holds unsaved work and is still open.
+    ///
+    /// Lifted here from `TabBarView`'s local `@State` so that ⌘W reaches the
+    /// same refusal question whether it was pressed on the tab strip or run as
+    /// a command. Left in the view, the command path would have had to either
+    /// duplicate the dialog or — far worse — ignore the `false` return, which
+    /// is precisely the data-loss bug that return value exists to prevent.
+    var refusedClose: DocumentSession?
+
+    /// The sentence explaining why a close was refused.
+    ///
+    /// Moved here with `refusedClose` for the same reason: one refusal, one
+    /// explanation, reachable from every path that can trigger it.
+    var refusedCloseMessage: String {
+        guard let session = refusedClose else { return "" }
+        let name = session.title.isEmpty ? session.url.lastPathComponent : session.title
+        if session.conflict {
+            return "“\(name)” changed on disk outside Lore, so its unsaved edits couldn't be "
+                 + "saved. Close anyway and those edits are lost — or cancel and resolve the "
+                 + "conflict in the document."
+        }
+        if let error = session.lastSaveError {
+            return "“\(name)” couldn't be saved: \(error.localizedDescription). "
+                 + "Close anyway and its unsaved edits are lost."
+        }
+        return "“\(name)” still has unsaved changes that couldn't be saved. "
+             + "Close anyway and they are lost."
+    }
+
+    /// Discards the refused session's unsaved work, at the user's explicit
+    /// request.
+    func confirmForcedClose() {
+        if let session = refusedClose { store.closeTab(session, force: true) }
+        refusedClose = nil
+    }
 
     init(store: LoreStore) { self.store = store }
 
@@ -63,9 +128,22 @@ final class SidebarOperations {
         nameText = folder.lastPathComponent
     }
 
-    /// Turns the typed name into a PLAN and a preview. Never writes. A refusal
-    /// (empty name, path separator, `..`, escape from the vault, destination
-    /// exists) arrives on the plan and is rendered instead of a preview.
+    /// Asks for the name of a new folder inside `parent`. Unlike rename/move,
+    /// there is nothing to preview here — creating an empty directory affects
+    /// nothing else in the vault — so confirming the name sheet performs the
+    /// create directly instead of routing through a plan/preview.
+    func beginNewFolder(in parent: URL) {
+        nameTarget = .newFolder(parent)
+        nameText = ""
+    }
+
+    /// Turns the typed name into a PLAN and a preview for the `.document` and
+    /// `.folder` (rename) targets — those two never write, a refusal (empty
+    /// name, path separator, `..`, escape from the vault, destination exists)
+    /// arriving on the plan and rendered instead of a preview. `.newFolder` is
+    /// NOT plan-and-preview: it calls `store.createFolder` directly and does
+    /// write a real directory immediately (see `beginNewFolder`'s doc comment
+    /// on why folder creation skips the plan/preview step the other two use).
     func commitName() {
         guard let target = nameTarget else { return }
         nameTarget = nil
@@ -78,8 +156,19 @@ final class SidebarOperations {
             let plan = store.plan(renameFolder: url, to: nameText)
             pending = .folder(plan)
             preview = RenamePreview(folder: plan)
+        case .newFolder(let parent):
+            do {
+                let created = try store.createFolder(named: nameText, in: parent)
+                notice = Notice(text: "Created “\(created.lastPathComponent)”.",
+                                kind: .success)
+            } catch let error as LoreError {
+                message = Self.describeCreateFolder(error)
+            } catch {
+                message = "The folder could not be created: \(error.localizedDescription)"
+            }
         }
     }
+
 
     func cancelName() { nameTarget = nil }
 
@@ -146,23 +235,6 @@ final class SidebarOperations {
         }
     }
 
-    /// `describe(_:row:)` phrases everything as a failed DELETE and needs a row
-    /// that does not exist yet, so create gets its own sentences.
-    static func describeCreate(_ error: LoreError) -> String {
-        switch error {
-        case .noVault:
-            return "No vault is open, so there is nowhere to put a new document. "
-                + "Choose a vault folder first."
-        case .outsideVault(let url):
-            return "A new document would have been written outside the vault "
-                + "(“\(url.lastPathComponent)”), so nothing was created."
-        case .trashFailed(_, let reason), .unsavedEdits(_, let reason):
-            return "The document could not be created: \(reason)"
-        case .externalChange(let url):
-            return "“\(url.lastPathComponent)” changed outside Lore, so nothing was created."
-        }
-    }
-
     // MARK: - Move
 
     /// Asks for a destination folder, then previews the move. The panel opens
@@ -186,22 +258,15 @@ final class SidebarOperations {
     /// links have no vault-relative path to be rewritten to, so every
     /// explicit-path link to it breaks and the file leaves the index.
     func move(_ row: IndexRow, toFolder folder: URL) {
-        guard let root = store.vaultRoot else {
-            message = "No vault is open."
+        // Through `SidebarDrop`, which is also what decides whether a drag
+        // HIGHLIGHTS this folder — so a target that lit up cannot then refuse
+        // the drop, which would read as the app changing its mind.
+        if let rejection = SidebarDrop.rejection(moving: row.path, into: folder,
+                                                 root: store.vaultRoot) {
+            message = SidebarDrop.describe(rejection, source: row.path, folder: folder)
             return
         }
-        let rootComponents = VaultIndexCoordinator.canonical(root).pathComponents
         let destination = VaultIndexCoordinator.canonical(folder)
-        guard Array(destination.pathComponents.prefix(rootComponents.count)) == rootComponents else {
-            message = "“\(folder.lastPathComponent)” is outside the vault. "
-                + "Lore can only move documents to folders inside it."
-            return
-        }
-        guard destination.path != VaultIndexCoordinator.canonical(row.path)
-                .deletingLastPathComponent().path else {
-            message = "“\(row.path.lastPathComponent)” is already in that folder."
-            return
-        }
         let plan = store.plan(move: row.path, toFolder: destination)
         pending = .document(plan, isMove: true)
         preview = RenamePreview(document: plan, isMove: true)
@@ -213,11 +278,46 @@ final class SidebarOperations {
     func confirm() {
         guard let pending, preview?.canConfirm == true else { return }
         switch pending {
-        case .document(let plan, _): report = store.apply(plan)
+        case .document(let plan, let isMove):
+            let result = store.apply(plan)
+            report = result
+            // Only an actual RENAME (basename change) needs the title synced
+            // — a plain move to another folder (`isMove`) keeps its name, so
+            // its title (already equal to that name) is untouched. Only on
+            // full success: a partial rename (e.g. the move itself failed,
+            // or the destination was left at the source because of a
+            // refusal) must not go patch a title onto a file that never
+            // actually got the new name.
+            if !isMove, let moved = result.movedTo, result.failed.isEmpty {
+                store.syncTitleAfterFileRename(at: moved)
+            }
         case .folder(let plan): report = store.apply(plan)
+        case .trashFolder(let plan):
+            // No `RenameReport` here — `applyTrashFolder` isn't a link
+            // rewrite, it's a move-to-Trash, so it reports through `message`
+            // exactly like single-document trash's `confirmTrash` does,
+            // rather than forcing its result through a report shape built for
+            // rewritten/skipped/unchanged files.
+            preview = nil
+            do {
+                let count = try store.applyTrashFolder(plan)
+                notice = Notice(
+                    text: "Moved “\(plan.folder.lastPathComponent)” to the Trash "
+                        + "(\(count) document\(count == 1 ? "" : "s")).",
+                    kind: .success)
+            } catch let error as LoreError {
+                message = Self.describe(error, folder: plan.folder)
+            } catch {
+                message = "The folder could not be moved to the Trash: "
+                    + error.localizedDescription
+            }
+            self.pending = nil
+            return
         }
         self.pending = nil
     }
+
+    /// The user-facing sentence for each way a folder trash can be declined.
 
     /// Dismisses the sheet in either of its states.
     func dismiss() {
@@ -233,6 +333,16 @@ final class SidebarOperations {
     /// links are deliberately NOT rewritten, so the user must know they will
     /// stop resolving.
     func requestTrash(_ row: IndexRow) { pendingTrash = row }
+
+    /// Plans a recursive folder trash and shows it through the SAME `.preview`
+    /// sheet single/folder rename uses — a destructive, recursive operation
+    /// gets the full preview treatment (document count, inbound link count),
+    /// not the one-line confirm dialog a single document gets.
+    func requestTrashFolder(_ folder: URL) {
+        let plan = store.planTrashFolder(folder)
+        pending = .trashFolder(plan)
+        preview = RenamePreview(trashFolder: plan)
+    }
 
     func trashMessage(for row: IndexRow) -> String {
         let name = row.title.isEmpty ? row.path.lastPathComponent : row.title
@@ -255,35 +365,56 @@ final class SidebarOperations {
     func confirmTrash() {
         guard let row = pendingTrash else { return }
         pendingTrash = nil
+        let name = row.path.lastPathComponent
         // One implementation, in `deleteDocument`, which the store-level test
-        // drives directly.
-        message = deleteDocument(row, in: store)
+        // drives directly. A non-nil return is a REFUSAL and keeps the modal
+        // treatment: it names something the user has to resolve before the
+        // delete can happen at all.
+        if let refusal = deleteDocument(row, in: store) {
+            message = refusal
+            return
+        }
+        // The undo hint is conditional on there actually BEING an undo:
+        // `trash` only arms `lastTrash` when macOS told it where the file
+        // went. Promising ⌘Z when nothing would happen is worse than staying
+        // quiet about it.
+        notice = Notice(
+            text: store.canUndoTrash
+                ? "Moved “\(name)” to the Trash. Press ⌘Z to undo."
+                : "Moved “\(name)” to the Trash.",
+            kind: .success)
     }
 
     func cancelTrash() { pendingTrash = nil }
 
-    /// The user-facing sentence for each way a delete can be declined. Pure, so
-    /// it is asserted directly rather than through a view.
-    static func describe(_ error: LoreError, row: IndexRow) -> String {
-        let name = row.path.lastPathComponent
-        switch error {
-        case .unsavedEdits(_, let reason):
-            // `reason` already names the unsaved edits AND the way out
-            // (reload, overwrite, or save a copy) — see `LoreStore.trash`.
-            return "“\(name)” was not deleted because \(reason)"
-        case .trashFailed(_, let reason):
-            return "“\(name)” could not be moved to the Trash: \(reason) "
-                + "Nothing was deleted — Lore never falls back to deleting it permanently."
-        case .noVault:
-            return "No vault is open, so nothing was deleted."
-        case .externalChange:
-            return "“\(name)” changed outside Lore, so nothing was deleted. "
-                + "Resolve it in the open tab, then delete it again."
-        case .outsideVault(let url):
-            // Not reachable from a delete — `outsideVault` is raised only by
-            // `create` — but the switch is exhaustive on purpose, so this says
-            // something true rather than nothing.
-            return "“\(url.lastPathComponent)” is outside the vault, so nothing was deleted."
+    /// Puts back the file the last confirmed trash removed.
+    ///
+    /// Bound to ⌘Z by `LoreRootView`. A no-op when there is nothing to undo,
+    /// so the shortcut is safe to press at any time — and deliberately silent
+    /// in that case rather than reporting "nothing to undo", which would turn
+    /// an idle keystroke into an interruption.
+    func undoLastTrash() {
+        guard let pending = store.lastTrash else { return }
+        let name = pending.name
+        do {
+            try store.undoTrash()
+            notice = Notice(text: "Restored “\(name)”.", kind: .success)
+        } catch let error as LoreError {
+            // A refused restore is a MODAL: the file is still in the Trash and
+            // the user has a decision to make about the name that now blocks
+            // it. That is not toast-weight.
+            message = Self.describeRestore(error)
+        } catch {
+            message = "“\(name)” couldn't be restored: \(error.localizedDescription)"
         }
     }
+
+    /// Whether ⌘Z currently has a delete to reverse.
+    var canUndoTrash: Bool { store.canUndoTrash }
+
+    /// The user-facing sentence for each way a delete can be declined. Pure, so
+    /// it is asserted directly rather than through a view.
+
+    /// The user-facing sentence for each way undoing a delete can fail.
+    ///
 }

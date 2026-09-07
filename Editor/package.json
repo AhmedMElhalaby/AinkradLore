@@ -1,0 +1,23 @@
+{
+  "name": "lore-cm6-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/editor.js --bundle --format=iife --outfile=dist/editor.js --minify && npm run build:katex && npm run assets",
+    "assets": "cp node_modules/katex/dist/katex.min.css dist/ && cp node_modules/katex/dist/fonts/*.woff2 dist/ && sed -i '' 's|url(fonts/|url(|g' dist/katex.min.css",
+    "build:katex": "esbuild src/katex-entry.js --bundle --format=iife --outfile=dist/katex.js --minify"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/lang-markdown": "^6.3.0",
+    "@codemirror/language": "^6.10.3",
+    "@codemirror/search": "^6.5.6",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.34.1",
+    "@lezer/highlight": "^1.2.1",
+    "katex": "^0.18.4"
+  }
+}

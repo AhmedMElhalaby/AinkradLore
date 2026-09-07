@@ -81,8 +81,14 @@ extension LoreStore {
         // Our own mutation. Without this the watcher wakes and queues a
         // whole-vault rescan on top of the targeted `removeFromIndex` below.
         coordinator.suppressWatcher(for: VaultIndexCoordinator.selfWriteSuppressionWindow)
+        // `resultingItemURL` — where macOS ACTUALLY put the file, which is not
+        // derivable from the original path (the Trash de-duplicates names by
+        // appending a timestamp). This used to be `nil`, which is the single
+        // reason undoing a delete looked like it needed a store redesign: with
+        // the destination in hand, the reversal is a `moveItem` and a re-index.
+        var restored: NSURL?
         do {
-            try FileManager.default.trashItem(at: row.path, resultingItemURL: nil)
+            try FileManager.default.trashItem(at: row.path, resultingItemURL: &restored)
         } catch {
             throw LoreError.trashFailed(row.path, error.localizedDescription)
         }
@@ -107,6 +113,79 @@ extension LoreStore {
         // delete, never after.
         try? coordinator.removeFromIndex(path)
         forgetOpenMTime(path)
+        // Armed only on the success path, and only when macOS told us where the
+        // file went. A `nil` `resultingItemURL` (documented as possible) means
+        // we cannot find the file again, so we offer no undo rather than an
+        // undo button that fails when pressed.
+        lastTrash = (restored as URL?).map {
+            TrashUndo(original: path, trashed: $0, name: row.path.lastPathComponent)
+        }
+        if let armed = lastTrash { expireUndo(armed) }
         return inbound
+    }
+
+    /// How long ⌘Z stays claimed after a delete.
+    ///
+    /// Matched to the toast that ADVERTISES the undo: the offer and the way to
+    /// take it must not outlive each other in either direction. A user who
+    /// reads "Press ⌘Z to undo", looks away, and presses ⌘Z a minute later
+    /// deserves to have it work — but the cost of leaving it armed is far
+    /// worse than that miss, because ⌘Z in a text editor means "undo my
+    /// typing". An indefinitely-armed record turns every later ⌘Z in the open
+    /// document into a file restore, which is both surprising and destructive
+    /// of the edit the user actually wanted reversed.
+    static let undoWindow: TimeInterval = 3
+
+    /// Disarms `record` once the undo window closes.
+    ///
+    /// Compares before clearing, so a SECOND delete arriving inside the first
+    /// one's window does not have its fresh record wiped by the older timer —
+    /// the comparison is the whole reason this takes the record as a
+    /// parameter rather than just nilling `lastTrash`.
+    private func expireUndo(_ record: TrashUndo) {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.undoWindow * 1_000_000_000))
+            guard let self, self.lastTrash == record else { return }
+            self.lastTrash = nil
+        }
+    }
+
+    /// Puts the last trashed file back, and re-indexes it.
+    ///
+    /// Reverses `trash(_:)`'s file move and its index removal — and NOTHING
+    /// else. In particular it does not reopen the tab `trash` closed: the tab
+    /// was closed clean (a dirty one refuses the delete outright), so nothing
+    /// is lost by leaving it shut, and silently reopening tabs is a surprise
+    /// the user did not ask for. The file is back where it was and the sidebar
+    /// shows it again, which is what "undo the delete" means.
+    ///
+    /// Inbound links need no repair: `trash` deliberately never rewrote them,
+    /// so they still name this file and simply resolve again the moment it
+    /// exists.
+    ///
+    /// Consumes the record whether or not it succeeds — a failed restore has
+    /// already told the user why, and leaving a stale record armed invites a
+    /// second press that fails the same way.
+    public func undoTrash() throws {
+        guard let undo = lastTrash else { return }
+        lastTrash = nil
+        // Refuse before moving anything: the original name may be taken again.
+        guard !FileManager.default.fileExists(atPath: undo.original.path) else {
+            throw LoreError.restoreBlocked(undo.original)
+        }
+        // Our own mutation, same as `trash` — without this the watcher wakes
+        // and queues a whole-vault rescan on top of the targeted re-index.
+        coordinator.suppressWatcher(for: VaultIndexCoordinator.selfWriteSuppressionWindow)
+        do {
+            try FileManager.default.moveItem(at: undo.trashed, to: undo.original)
+        } catch {
+            throw LoreError.restoreFailed(undo.original, error.localizedDescription)
+        }
+        // Through `EngineRegistry`, not `MarkdownEngine`: an attachment, a PDF
+        // and a rich-text file are all trashable, so the restore must index
+        // whatever the file actually is rather than assume markdown.
+        if let engine = try? EngineRegistry.load(undo.original) {
+            try? coordinator.indexDocument(engine, at: undo.original)
+        }
     }
 }

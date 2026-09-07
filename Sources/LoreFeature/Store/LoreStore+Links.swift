@@ -64,15 +64,32 @@ extension LoreStore {
     @discardableResult
     public func createAndOpenNote(forLinkTarget target: String,
                                   syntax: LinkSyntax) throws -> Note {
+        let note = try createNote(forLinkTarget: target, syntax: syntax)
+        open(url: note.path)
+        return note
+    }
+
+    /// Creates the note a link names WITHOUT opening it.
+    ///
+    /// Split from `createAndOpenNote` for the completion popup's "Create this
+    /// note" row: that fires mid-sentence, and navigating away from the
+    /// document being written to the note just referenced in it is the
+    /// opposite of what the writer asked for. Every other caller still wants
+    /// the open, so they keep it.
+    ///
+    /// One implementation of the naming rules — the alias/fragment stripping
+    /// and the folder split — so the two doors cannot disagree about what
+    /// `[[Projects/Q1|the plan]]` should create.
+    @discardableResult
+    public func createNote(forLinkTarget target: String,
+                           syntax: LinkSyntax) throws -> Note {
         let decoded = DocumentLink(rawTarget: target, syntax: syntax).resolutionTarget
         var parts = LinkCompletionContext.documentName(of: decoded)
             .split(separator: "/").map(String.init)
         guard let title = parts.popLast(), !title.isEmpty else {
             throw UncreatableLinkTarget(target: target)
         }
-        let note = try create(title: title, in: parts.joined(separator: "/"))
-        open(url: note.path)
-        return note
+        return try create(title: title, in: parts.joined(separator: "/"))
     }
 
     /// The wikilink target to write for `row`, guaranteed — where the vault

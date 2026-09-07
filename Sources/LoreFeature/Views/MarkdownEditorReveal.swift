@@ -2,39 +2,6 @@ import AppKit
 import SwiftUI
 import AinkradAppKit
 
-/// Where the text column sits inside the editor's width.
-///
-/// A value, not a view: the owner's complaint was that text "runs edge to
-/// edge", and the numbers that fix it are worth asserting directly rather than
-/// through a view host. `MarkdownEditor` had `NSSize(width: 16, height: 16)`
-/// hard-coded while `MarkdownTheme.contentInset` and `.maxMeasure` sat
-/// declared and unused.
-enum MarkdownEditorLayout {
-
-    /// The `textContainerInset` for a text view `viewWidth` points wide.
-    ///
-    /// One symmetric inset does both jobs. `widthTracksTextView` makes the
-    /// container `viewWidth - 2 * inset`, so growing the inset both narrows the
-    /// column and CENTRES it — there is no separate centring step to get wrong,
-    /// and no second coordinate source for `MarkdownBlockBackgrounds` to
-    /// disagree with.
-    ///
-    /// The theme's inset is a FLOOR, never a target: on a narrow pane the cap
-    /// is not binding and the margin must not shrink below what makes the text
-    /// comfortable.
-    static func containerInset(forViewWidth viewWidth: CGFloat,
-                               theme: MarkdownTheme) -> NSSize {
-        var horizontal = theme.contentInset
-        if let measure = theme.maxMeasure {
-            horizontal = max(horizontal, (viewWidth - measure) / 2)
-        }
-        // Clamped so a view narrower than twice the inset still leaves a
-        // positive column rather than an inverted one.
-        horizontal = min(horizontal, max(0, viewWidth / 2 - 1))
-        return NSSize(width: horizontal, height: theme.contentInset)
-    }
-}
-
 /// The selection-driven half of Live Preview.
 ///
 /// `MarkdownReveal` answers "which markers are hidden". This answers the
@@ -66,21 +33,37 @@ enum MarkdownEditorReveal {
         let spansByBlock: [[Int]]
         /// Nesting depth per span, aligned by index. See `MarkdownListDepth`.
         let depths: [Int]
+        /// The single-pair spans that cross a line — all the caret path needs
+        /// to compute reveal. See `MarkdownReveal.wideSpans`, which explains
+        /// why this is cached rather than derived per caret move.
+        let wideSpans: [Range<Int>]
 
-        static let empty = Index(blocks: [], spansByBlock: [], depths: [])
+        static let empty = Index(blocks: [], spansByBlock: [], depths: [], wideSpans: [])
     }
 
     /// Builds the index for `text` and `spans`. O(text) once, on a text change
     /// — never on a caret move.
     static func index(text: String, spans: [StyleSpan]) -> Index {
-        let blocks = MarkdownReveal.blocks(in: text)
+        index(blocks: MarkdownReveal.blocks(in: text), spans: spans,
+              wideSpans: MarkdownReveal.wideSpans(in: text, spans: spans))
+    }
+
+    /// The same, for a caller that has ALREADY segmented the text.
+    ///
+    /// The edit path recomputes the block list every keystroke to prove the
+    /// segmentation did not move (`renderStylesForEdit`, check 4); having it
+    /// then call `index(text:spans:)` would scan the document a second time for
+    /// an answer it is holding.
+    static func index(blocks: [Range<Int>], spans: [StyleSpan],
+                      wideSpans: [Range<Int>]) -> Index {
         var buckets = [[Int]](repeating: [], count: blocks.count)
         for (position, span) in spans.enumerated() {
             guard let block = blockIndex(of: span.range.lowerBound, in: blocks) else { continue }
             buckets[block].append(position)
         }
         return Index(blocks: blocks, spansByBlock: buckets,
-                     depths: MarkdownListDepth.depths(of: spans))
+                     depths: MarkdownListDepth.depths(of: spans),
+                     wideSpans: wideSpans)
     }
 
     /// The block containing `offset`, by binary search. Blocks are sorted and
@@ -97,6 +80,22 @@ enum MarkdownEditorReveal {
         // Past the last block's end — an offset at the very end of the
         // document belongs to the last block rather than to nothing.
         return blocks.isEmpty ? nil : min(max(low, 0), blocks.count - 1)
+    }
+
+    /// The indices of the blocks a source RANGE overlaps, or none for `nil`.
+    ///
+    /// Two binary searches and then a count, so a caret move locates the blocks
+    /// it affects without walking the document — the property the caret path
+    /// has always been held to. A line-scoped reveal overlaps one block almost
+    /// always, and two only where a line sits across a block boundary.
+    static func blockIndices(touching range: Range<Int>?,
+                             in blocks: [Range<Int>]) -> Set<Int> {
+        guard let range, !blocks.isEmpty,
+              let first = blockIndex(of: range.lowerBound, in: blocks),
+              let last = blockIndex(of: max(range.lowerBound, range.upperBound - 1),
+                                    in: blocks)
+        else { return [] }
+        return Set(min(first, last)...max(first, last))
     }
 
     /// The INDICES of the blocks the selection touches.
@@ -157,6 +156,21 @@ extension MarkdownEditor.Coordinator {
     /// milliseconds, is the thing being avoided there.
     func applyStyles() {
         guard let tv = textView else { return }
+        applyStylesCalls += 1
+        // The redundant-redraw guard — see `isRenderStale` in
+        // `MarkdownEditorEditPath.swift` for what it checks and why a keystroke
+        // reaches here at all.
+        //
+        // Deliberately does NOT also poll `detectExternalTransclusionChanges()`
+        // here: this runs once per keystroke (`MarkdownEditorRedrawTests`), and
+        // stat-ing every embedded target's file on every character typed is
+        // real, synchronous, main-actor filesystem work with no gate covering
+        // it (fix round 1, Important #2). Live updates from an external edit
+        // arrive instead through `handleExternalChange(to:)`, pushed with no
+        // keystroke required; the poll here would only ever be a fallback for
+        // idle time, which `makeNSView`/`onBecomeFirstResponder` already cover.
+        if !isRenderStale(for: tv) { return }
+        applyStylesRenders += 1
         if !styleCache.describes(tv.string) {
             if tv.string.utf16.count <= MarkdownStyleCache.synchronousParseCap {
                 styleCache.reparse(tv.string)
@@ -171,12 +185,17 @@ extension MarkdownEditor.Coordinator {
     }
 
     /// Applies the cached spans. No parse, ever.
-    func renderStyles() {
+    ///
+    /// `forcedFocus` overrides the live first-responder read for callers that
+    /// already KNOW the answer and cannot trust a live read at this exact
+    /// moment — see `revealForSelectionChange`'s doc comment on why
+    /// `resignFirstResponder`'s own callback is exactly such a moment. `nil`
+    /// (every other caller) reads live, as before.
+    func renderStyles(forcedFocus: Bool? = nil) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let window = styleCache.isOverViewportCap
             ? MarkdownStyleRenderer.viewportWindow(of: tv) : nil
         lastViewportWindow = window
-        let theme = MarkdownTheme(tokens: tokens)
         MarkdownStyleRenderer.apply(styleCache.spans, to: storage,
                                     tokens: tokens, theme: theme,
                                     limitedTo: window)
@@ -190,43 +209,53 @@ extension MarkdownEditor.Coordinator {
         // put an O(document) cost on every arrow key.
         revealIndex = MarkdownEditorReveal.index(text: tv.string, spans: styleCache.spans)
         revealIndexBuilds += 1
-        collapseHiddenMarkers(in: storage, window: window)
+        // Mirrors the `revealIndex` build, from the same spans in the same
+        // pass, so the caret path can answer "is the selection inside an
+        // embed?" without walking the document — see `embedIndex`.
+        rebuildEmbedIndex()
+        // Cheap: an early-exit scan that stops at the FIRST strong character,
+        // so it costs O(document) only for a document with none anywhere (rare,
+        // and no worse than the `revealIndex`/`blockBackgrounds` scans this
+        // same pass already does unconditionally). See `documentWritingDirection`'s
+        // doc comment for who reads it and why a fresh scan per render is safe.
+        documentWritingDirection = EmbedGeometry.strongWritingDirection(of: tv.string)
+            ?? .leftToRight
+        collapseHiddenMarkers(in: storage, window: window, forcedFocus: forcedFocus)
+        // AFTER marker collapsing: an embed's `![[`/`]]` markers are their
+        // OWN separate `.marker(of: .wikilink)` spans (fix round 1, see
+        // `EmbedRendering.swift`'s doc comment on the chip pill), collapsed
+        // by the same machinery as any other marker; the embed span itself
+        // covers only the target text. Running `applyEmbeds` after that
+        // collapse is what lets it repaint that target range (image or chip)
+        // without a marker-collapse pass clobbering it back afterward.
+        applyEmbeds(to: storage, window: window)
         // Code panels, quote bars and collapsed list markers are DRAWN, not
         // attributed — see
         // `MarkdownBlockBackgrounds`. Refreshed from the same spans in the
         // same pass, so the decoration can never describe older text than
         // the attributes do. Clipped to the SAME window the attributes were,
         // so a panel is never painted behind text that was left unstyled.
-        if let linkView = tv as? LinkTextView {
-            linkView.blockBackgroundPalette = MarkdownBlockBackgrounds.Palette(tokens: tokens)
-            linkView.blockBackgrounds =
-                MarkdownBlockBackgrounds.regions(for: styleCache.spans,
-                                                 length: storage.length,
-                                                 limitedTo: window,
-                                                 in: storage.string as NSString)
-        }
+        refreshBlockBackgrounds(in: storage, window: window)
         stylingNotice?.isHidden = !styleCache.isOverHardCap
         stylingNotice?.textColor = NSColor(tokens.accentSecondary)
+        // LAST, and only here: what is on screen now, and what produced it.
+        // Recorded after every early-return-free path through this method, so
+        // the guard in `applyStyles` can never be told a render happened that
+        // did not.
+        renderedSnapshot = (tv.string, tokens)
     }
 
-    /// Hides the markers of every block the selection is NOT in, and records
-    /// the reveal state that `revealForSelectionChange` compares against.
+    /// `NSTextView`'s first-responder state, read live rather than cached —
+    /// a cached copy can go stale the moment focus moves elsewhere.
     ///
-    /// The whole-document version, run only as part of a full render.
-    private func collapseHiddenMarkers(in storage: NSTextStorage, window: NSRange?) {
-        guard let tv = textView else { return }
-        let selection = tv.selectedRange()
-        revealedBlockIndices = MarkdownEditorReveal.revealedBlockIndices(
-            revealIndex.blocks, selection: selection)
-        var hidden = MarkdownReveal.hiddenMarkers(spans: styleCache.spans,
-                                                  selection: selection,
-                                                  blocks: revealIndex.blocks)
-        if let window {
-            hidden = hidden.filter {
-                $0.lowerBound < NSMaxRange(window) && $0.upperBound > window.location
-            }
-        }
-        MarkdownStyleRenderer.collapse(hidden, in: storage)
+    /// A text view with NO window (as in unit tests that build one directly,
+    /// never inserting it into a window) has no first-responder concept at
+    /// all; treated as focused rather than unfocused, since "no window" is
+    /// not the same claim as "lost focus to something else".
+    var isTextViewFocused: Bool {
+        guard let tv = textView else { return false }
+        guard let window = tv.window else { return true }
+        return window.firstResponder === tv
     }
 
     /// Called from `textViewDidChangeSelection` — i.e. on every arrow key.
@@ -249,22 +278,129 @@ extension MarkdownEditor.Coordinator {
     /// ordinary prose crosses one every few keypresses; the full path would
     /// have restyled the note each time. Block ranges depend only on the TEXT
     /// and are rebuilt only when the text is rendered.
-    func revealForSelectionChange() {
+    /// `forcedFocus`: pass the KNOWN state rather than let this read live
+    /// when the caller is invoked from inside `resignFirstResponder` — at
+    /// that point `NSWindow` has not yet reassigned `_firstResponder` away
+    /// from `tv` (it does so only after `resignFirstResponder` RETURNS), so
+    /// a live read of `window.firstResponder === tv` still answers `true`
+    /// and this whole focus-changed branch never triggers. A deferred
+    /// `DispatchQueue.main.async` read would also see the post-reassignment
+    /// value, but passing the already-known answer is simpler and doesn't
+    /// leave a frame where the markers are wrong. `nil` (the ordinary
+    /// selection-change path) reads live, as before.
+    func revealForSelectionChange(forcedFocus: Bool? = nil) {
+        // Both writing modes key off the caret, so they ride the SAME
+        // selection-change pass the reveal logic already runs rather than
+        // adding a second observer of the same event.
+        //
+        // Before the `revealIndex` guard below: that guard returns early for a
+        // document with no reveal blocks (an empty note), and focus dimming
+        // still has to clear itself there — otherwise turning the mode off in
+        // an empty document leaves nothing to un-dim it.
+        applyWritingModes()
         guard let tv = textView, let storage = tv.textStorage else { return }
         guard !revealIndex.blocks.isEmpty else { return }
+        // The block list must actually describe the text on screen.
+        //
+        // AppKit posts `textViewDidChangeSelection` BETWEEN mutating the
+        // storage and calling `textDidChange`, so this method can run with
+        // `revealIndex.blocks` still describing the PRE-edit string laid over
+        // the already-edited one. Restyling then writes a stale block's range:
+        // after deleting five characters it re-applied the paragraph's
+        // attributes five units past the paragraph's new end, over the start of
+        // the list below — which `textDidChange` never corrected, because the
+        // edit path restyles the blocks it knows changed and that was not one
+        // of them.
+        //
+        // Returning is safe and complete: the edit that moved the text is on
+        // its way to `textDidChange`, which recomputes the blocks and the
+        // reveal from scratch. This is only reachable in that window.
+        //
+        // Previously latent. Block-scoped reveal compared block INDICES, which
+        // a mid-paragraph edit usually left unchanged, so the guard below
+        // returned early and the stale ranges were never used. A line-scoped
+        // reveal moves whenever the caret moves, so it reaches the restyle.
+        // Caught by `test_aDeletionAlsoProducesIdenticalAttributes`.
+        guard styleCache.describes(tv.string) else { return }
         let selection = tv.selectedRange()
-        let now = MarkdownEditorReveal.revealedBlockIndices(revealIndex.blocks,
-                                                            selection: selection)
-        let was = revealedBlockIndices
-        guard now != was else { return }
-        revealedBlockIndices = now
+        let focused = forcedFocus ?? isTextViewFocused
+        // A focus change does not move the caret, so `now == was` below would
+        // otherwise short-circuit an unfocus away as "same selection, nothing
+        // to do" and leave the caret's block visibly revealed to a reader who
+        // is no longer editing. Route it through the full render instead,
+        // which is the only path that knows how to re-hide markers wholesale.
+        guard focused == lastRevealFocus else {
+            renderStyles(forcedFocus: focused)
+            return
+        }
+        // The CACHED wide spans, not the whole span array: this is the caret
+        // path, and scanning every span here is what made an arrow key cost a
+        // function of the document's length.
+        let now = MarkdownReveal.revealedRange(in: tv.string, selection: selection,
+                                               wideSpans: revealIndex.wideSpans,
+                                               isFocused: focused)
+        let was = revealedRange
+        guard now != was else {
+            // NOT a block flip — but an embed's reveal is a SPAN-level
+            // property, not a block-level one, so the caret can move into or
+            // out of an `![[…]]` without any block changing. Checking here,
+            // before the early return, is what makes an image embed actually
+            // reveal on caret entry instead of staying collapsed (with the
+            // caret invisibly inside it) until the next keystroke or the
+            // 150 ms debounce — fix round 2, I6. Costs a walk of `embedIndex`,
+            // which is empty for the overwhelming majority of documents and
+            // tiny for the rest, and does no styling work at all unless the
+            // answer changed.
+            if revealEmbedsForSelectionChange(in: storage) {
+                // The reservation was already restored (or withdrawn) inside
+                // that call; the DRAWN decoration is rebuilt here, because
+                // this branch returns and nothing else will do it. Clipped to
+                // the window the last full render used, like the other caret
+                // path below.
+                refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
+                tv.needsDisplay = true
+            }
+            return
+        }
+        revealedRange = now
 
-        // Exactly the blocks whose reveal state flipped: those in one range and
-        // not the other. Both are contiguous, so this is a handful of indices
-        // even when a selection is dragged across many blocks at once.
-        let changed = Set(now).symmetricDifference(Set(was))
+        // Exactly the blocks the reveal moved out of or into. Located by binary
+        // search rather than by scanning, so an arrow key costs O(log blocks)
+        // to find them and then one restyle each — the O(1)-blocks contract
+        // this path has always carried.
+        //
+        // It is a UNION rather than a symmetric difference now: with a
+        // line-scoped reveal the caret can move WITHIN one block (line 1 to
+        // line 2 of a paragraph), where the block is in both the old set and
+        // the new one and still has to be restyled, because which of its
+        // markers are hidden has changed. A symmetric difference would cancel
+        // exactly that case out and leave the previous line's syntax showing.
+        var changed = MarkdownEditorReveal.blockIndices(touching: was,
+                                                        in: revealIndex.blocks)
+        changed.formUnion(MarkdownEditorReveal.blockIndices(touching: now,
+                                                            in: revealIndex.blocks))
         for block in changed.sorted() {
-            restyleBlock(block, revealed: now.contains(block), in: storage)
+            restyleBlock(block, revealed: now, in: storage)
+        }
+        // The blocks just restyled above already re-ran `applyEmbeds`, so this
+        // only has to catch embeds in blocks that did NOT flip; it also keeps
+        // `revealedEmbedSpans` in step so the next caret move compares against
+        // the truth.
+        let embedsFlipped = revealEmbedsForSelectionChange(in: storage)
+        // ONE pass for the whole caret move, however many blocks flipped — see
+        // `restyleBlock`. Clipped to the same viewport window the last full
+        // render used, so a large document's decoration is not rebuilt
+        // wholesale on an arrow key.
+        //
+        // The `||` order matters and the operands are not interchangeable:
+        // the drain must be ATTEMPTED either way (Swift short-circuits, so it
+        // goes first), and `embedsFlipped` is still consulted because
+        // `revealEmbedsForSelectionChange` may have already drained the flag
+        // itself — in which case the reservation changed but this call reports
+        // nothing, and skipping the rebuild would leave the decoration
+        // describing the previous reveal state.
+        if prepareTransclusionsIfNeeded(in: storage) || embedsFlipped {
+            refreshBlockBackgrounds(in: storage, window: lastViewportWindow)
         }
         // The DRAWN decoration is a function of reveal state too — a list
         // marker's substitute is drawn only while the real one is collapsed —
@@ -279,7 +415,7 @@ extension MarkdownEditor.Coordinator {
     /// should return to is a function of its enclosing spans — so the block is
     /// rebuilt from the cached spans. Still no parse, and still nothing outside
     /// this block is touched.
-    private func restyleBlock(_ block: Int, revealed: Bool, in storage: NSTextStorage) {
+    func restyleBlock(_ block: Int, revealed: Range<Int>?, in storage: NSTextStorage) {
         guard block >= 0, block < revealIndex.blocks.count else { return }
         restyledBlockCount += 1
         let range = revealIndex.blocks[block]
@@ -289,105 +425,101 @@ extension MarkdownEditor.Coordinator {
                                       depths: revealIndex.depths,
                                       in: ns, to: storage,
                                       tokens: tokens,
-                                      theme: MarkdownTheme(tokens: tokens))
-        guard !revealed else { return }
+                                      theme: theme)
+        // Re-run RIGHT AFTER `restyle`, scoped to this one block, so an
+        // embed's collapse/paragraph-style/drawn-image never has a frame
+        // where it looks wrong. `restyle` above just reset this block's
+        // attributes to the plain-span defaults — including popping any
+        // collapsed embed image back to full-size, editable source text —
+        // and applying embeds here immediately restores (or, if the caret
+        // just entered the block, deliberately withholds) that decoration
+        // before this method returns. Fixed in Task 8 fix round 1, Critical
+        // 2: without this call an image embed visibly popped back to raw
+        // text and a NOW-STALE `EmbedImageRegion` kept painting at the wrong
+        // rect until the next full render. See `applyEmbeds`'s doc comment
+        // for why this costs a cache hit, not a decode, and does not reopen
+        // the O(1)-blocks caret contract.
+        // `spanIndices` is what keeps this O(spans in THIS block) rather than
+        // O(spans in the document) — fix round 2, NEW-1. It is the same
+        // bucketed list `MarkdownStyleRenderer.restyle` just consumed, so the
+        // two cannot disagree about which spans belong to this block.
+        applyEmbeds(to: storage, window: nil, restrictTo: ns,
+                    spanIndices: revealIndex.spansByBlock[block])
+        // Per MARKER rather than per block. The block is the unit that gets
+        // re-attributed; which of its markers are hidden is now a line-scoped
+        // question, so a block can be half revealed — the caret's line showing
+        // its syntax while the rest of the paragraph stays rendered. That is
+        // the whole point of the change.
         let hidden = revealIndex.spansByBlock[block].compactMap { index -> Range<Int>? in
             guard index < styleCache.spans.count,
                   case .marker = styleCache.spans[index].kind else { return nil }
-            return styleCache.spans[index].range
+            let range = styleCache.spans[index].range
+            return MarkdownReveal.isRevealed(range, in: revealed) ? nil : range
         }
-        MarkdownStyleRenderer.collapse(hidden, in: storage)
-    }
-
-    // MARK: - Container geometry
-
-    /// Re-centres the text column for a view `width` points wide.
-    ///
-    /// Called on every width change, because the inset is a function of the
-    /// width: without this the column would keep the margins it was born with
-    /// and drift off-centre as the window resizes.
-    func applyContainerInset(forWidth width: CGFloat) {
-        guard let tv = textView else { return }
-        let inset = MarkdownEditorLayout.containerInset(
-            forViewWidth: width, theme: MarkdownTheme(tokens: tokens))
-        guard tv.textContainerInset != inset else { return }
-        tv.textContainerInset = inset
-        // The drawn decoration is positioned from the container, so it has to
-        // be repainted when the container moves.
-        tv.needsDisplay = true
-    }
-
-    // MARK: - Parsing
-
-    /// Re-arms the debounce. Only its firing parses, so a burst of typing
-    /// costs one parse rather than one per character.
-    func scheduleParse() {
-        parseTimer?.invalidate()
-        let timer = Timer(timeInterval: Self.parseDebounce, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.parseNow() }
+        let blockSpans = revealIndex.spansByBlock[block].compactMap {
+            $0 < styleCache.spans.count ? styleCache.spans[$0] : nil
         }
-        parseTimer = timer
-        // `.common` so the parse still lands while the user is scrolling or
-        // holding a menu open, rather than after they stop.
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    /// Parses OFF the main actor and applies the result back on it.
-    ///
-    /// This used to be a synchronous parse on the main actor, called from a
-    /// main-run-loop timer. On a large note that is measured in whole
-    /// seconds, and a main-actor second is not lag — it is a beachball, once
-    /// per pause in typing. The parse itself is pure (`derive` touches no
-    /// AppKit and no editor state), so the only thing that must stay on the
-    /// main actor is applying the answer.
-    ///
-    /// Two guards keep a slow parse from styling the wrong characters:
-    ///
-    /// 1. `generation` — a newer parse having been started makes this one's
-    ///    result garbage, even if the text looks right.
-    /// 2. the SNAPSHOT check — the spans index `snapshot` and nothing else,
-    ///    so they are installed only if the view still holds exactly that
-    ///    string. This is the same identity rule `describes(_:)` encodes,
-    ///    applied across the hop.
-    ///
-    /// When the text HAS moved on, nothing is applied and nothing is
-    /// re-armed here: the edit that moved it went through `textDidChange`,
-    /// which armed the debounce already.
-    func parseNow() {
-        // Invalidated, not merely dropped: `applyStyles` calls this DIRECTLY on
-        // the open path, so there may be a debounce timer still armed, and a
-        // released-but-live `Timer` would fire into a parse that has already
-        // been launched.
-        parseTimer?.invalidate()
-        parseTimer = nil
-        guard let tv = textView else { return }
-        let snapshot = tv.string
-        guard styleCache.isStale || !styleCache.describes(snapshot) else { return }
-        parseGeneration += 1
-        let generation = parseGeneration
-        Task.detached(priority: .userInitiated) {
-            let derived = MarkdownStyleCache.derive(snapshot)
-            await MainActor.run { [weak self] in
-                self?.applyParsed(derived, of: snapshot, generation: generation)
-            }
+        // The same two-pass ordering as the full render — see its comment. Only
+        // when this block holds a table: a caret move into one changes every
+        // row's reserved height, but that is rare, and re-measuring on every
+        // arrow key would put an O(document) cost back on the path that exists
+        // not to have one.
+        let holdsTable = blockSpans.contains {
+            if case .table = $0.kind { return true }
+            return false
+        }
+        if let tv = textView, holdsTable {
+            let rowMarkers = MarkdownTableStyling.rowMarkerRanges(styleCache.spans)
+            MarkdownStyleRenderer.collapse(hidden.filter { !rowMarkers.contains($0) },
+                                           in: storage)
+            tableRegions = MarkdownTableStyling.prepare(styleCache.spans,
+                                                        revealed: revealed,
+                                                        maxWidth: textColumnWidth(of: tv),
+                                                        bodyFont: theme.bodyFont,
+                                                        in: storage)
+            MarkdownStyleRenderer.collapse(hidden.filter { rowMarkers.contains($0) },
+                                           in: storage)
+            refreshBlockBackgrounds(in: storage, window: nil)
+        } else if !hidden.isEmpty {
+            MarkdownStyleRenderer.collapse(hidden, in: storage)
+        }
+        // Unconditional, unlike the collapse above: a row that just became
+        // REVEALED hides nothing and still has to lose its padding, which is
+        // this same call reaching the opposite answer.
+        MarkdownMathStyling.reserveSpace(blockSpans, revealed: revealed,
+                                         font: theme.bodyFont,
+                                         in: storage)
+        // `restyle` above reset this block's paragraph styles, which pops a
+        // transcluded embed's reserved gap shut and leaves a stale region
+        // painting into a rect that no longer exists — the same failure fix
+        // round 1's Critical 2 found for an image embed.
+        //
+        // RECORDED, not done here. `renderStylesForEdit` calls this method
+        // once per changed block and then refreshes the decoration itself, so
+        // doing the (whole-document) reservation and a second whole-document
+        // background rebuild inside this method put N+1 of each on every
+        // keystroke of the fast edit path — fix round 1, Important 3. The flag
+        // is drained exactly once per pass by
+        // `prepareTransclusionsIfNeeded`, at the caller's own refresh, with
+        // the caller's own viewport window.
+        if blockSpans.contains(where: { isTransclusion($0) }) {
+            needsTransclusionPass = true
         }
     }
 
-    private func applyParsed(_ derived: MarkdownStyleCache.Derived,
-                             of snapshot: String, generation: Int) {
-        guard generation == parseGeneration,
-              let tv = textView, tv.string == snapshot else { return }
-        styleCache.adopt(derived, for: snapshot)
-        renderStyles()
+    /// Whether one span is an embed whose target renders as a transclusion.
+    ///
+    /// Narrower than "is an embed": an image or a document chip needs none of
+    /// this work, and `holdsEmbeds` matching them was what made the fast edit
+    /// path pay for documents with no transclusion in them at all.
+    func isTransclusion(_ span: StyleSpan) -> Bool {
+        guard case .embed(let target, _) = span.kind else { return false }
+        if case .transclusion = EmbedRendering.kind(for: resolveEmbedTarget(target)) {
+            return true
+        }
+        return false
     }
 
-    /// In viewport mode the styled range follows the scroll, so scrolling
-    /// has to re-render — but only when the window actually moved, since
-    /// this fires continuously during a drag.
-    func restyleForViewportIfNeeded() {
-        guard styleCache.isOverViewportCap, let tv = textView else { return }
-        let window = MarkdownStyleRenderer.viewportWindow(of: tv)
-        if let last = lastViewportWindow, NSEqualRanges(last, window) { return }
-        renderStyles()
-    }
+    // Container geometry and the off-actor parse pipeline (the debounce,
+    // `parseNow`, viewport restyling) live in `MarkdownEditorParsing.swift`.
 }

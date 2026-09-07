@@ -34,12 +34,69 @@ final class LinkTextView: NSTextView {
     /// Fires whenever focus leaves this view, including the routes that do not
     /// produce a `textDidEndEditing`.
     var onResignFirstResponder: (@MainActor () -> Void)?
+    /// Fires whenever this view GAINS focus. `textDidBeginEditing` is not a
+    /// substitute — `NSText` posts that only on the first EDIT after becoming
+    /// first responder, not on becoming it, so clicking back into the editor
+    /// without typing anything fired nothing at all until this was added.
+    var onBecomeFirstResponder: (@MainActor () -> Void)?
     /// Fires when the view's WIDTH changes, which is the only input to where
     /// the text column sits — see `MarkdownEditorLayout`. Height changes are
     /// ignored, and a height change is what most `setFrameSize` calls are: the
     /// view grows as the document does.
     var onWidthChange: (@MainActor (CGFloat) -> Void)?
     private var lastNotifiedWidth: CGFloat = -1
+    /// Receives pasted image bytes and a generated filename, and reports
+    /// whether it was handled (written as an attachment and inserted).
+    /// `false` — or no handler — falls through to AppKit's own `paste(_:)`,
+    /// same fall-through contract `onCommandClick`/`onPlainClick` use.
+    var onPasteImage: (@MainActor (Data, String) -> Bool)?
+    /// Receives the file URLs from a Finder drop and reports whether they
+    /// were handled (copied in and inserted). Same fall-through contract.
+    var onDropFileURLs: (@MainActor ([URL]) -> Bool)?
+    /// Reports the UTF-16 index under the pointer as it moves, and nil when it
+    /// leaves. Drives the link hover preview.
+    ///
+    /// Reported RAW, on every move: deciding whether the index is inside a
+    /// link, and whether the pointer has rested long enough to mean it, are
+    /// both the coordinator's job — this view knows nothing about links.
+    var onHoverIndex: (@MainActor (Int?) -> Void)?
+
+    /// The tracking area that makes `mouseMoved` fire at all.
+    ///
+    /// Rebuilt on every bounds change: a tracking area holds a fixed rect, so
+    /// a stale one after a resize covers the wrong part of a text view that
+    /// grows with its document — which is most of the time here.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        onHoverIndex?(characterIndexForInsertion(at: point))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        onHoverIndex?(nil)
+    }
+
+    /// File URLs are registered by `MarkdownEditor.makeNSView` right after
+    /// construction, not here: `NSTextView` is an Objective-C class, and
+    /// overriding its designated initializer to do this would drop the
+    /// inherited `NSTextView(frame:)` convenience initializer that
+    /// `makeNSView` actually calls. A plain (`isRichText == false`) text
+    /// view does not accept a Finder drag by default the way a rich text
+    /// view does, and the default rich-text behaviour (embedding the image
+    /// as an `NSTextAttachment`) is not what a MARKDOWN source file wants
+    /// anyway — Task 9 wants a `![[name]]` embed, not an attachment run.
 
     /// The resize hook. `updateNSView` is not one: SwiftUI does not re-run it
     /// for every frame of a live window resize, so a column centred only there
@@ -48,6 +105,19 @@ final class LinkTextView: NSTextView {
     /// Cannot recurse: the handler sets `textContainerInset`, never the frame,
     /// and any frame change that follows carries the same width — which this
     /// guard drops.
+    /// The responder-chain entry point for formatting shortcuts.
+    ///
+    /// `@objc` and tag-driven because `NSApp.sendAction(_:to:from:)` with a
+    /// nil target is the only way the shell can reach "whichever text view is
+    /// focused" without holding a reference to it — see `LoreFormatting`.
+    /// Reads the action off the sender's tag, exactly as
+    /// `performFindPanelAction(_:)` does.
+    @objc func loreApplyFormat(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let action = LoreFormatAction(rawValue: item.tag) else { return }
+        LoreFormatting.apply(action, to: self)
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         guard abs(newSize.width - lastNotifiedWidth) > 0.5 else { return }
@@ -65,27 +135,142 @@ final class LinkTextView: NSTextView {
     var blockBackgroundPalette: MarkdownBlockBackgrounds.Palette? {
         didSet { if blockBackgroundPalette != oldValue { needsDisplay = true } }
     }
+    /// The theme's prose face, which the decoration is SIZED from: a drawn
+    /// list marker, a callout's icon and title, a maths baseline. Set beside
+    /// the palette and for the same reason — the drawing happens in
+    /// `drawBackground`, which has no theme of its own, and these two are the
+    /// whole of what it needs from one.
+    ///
+    /// Redraws on change, like the palette: density and ⌘+/⌘− move the font,
+    /// and decoration that kept its old size would drift away from the text
+    /// it belongs to.
+    var blockBackgroundFont: NSFont? {
+        didSet { if blockBackgroundFont != oldValue { needsDisplay = true } }
+    }
+
+    /// Resolved image embeds to paint where their (collapsed) source text
+    /// sits — see `MarkdownEditor.Coordinator.applyEmbeds`. Drawn in
+    /// `drawBackground`, same as `blockBackgrounds`: the embed's paragraph
+    /// style already reserves the vertical room, so drawing before the text
+    /// layer is enough — the collapsed source glyphs are visually empty and
+    /// nothing else occupies that rect.
+    var embedImages: [MarkdownEditor.Coordinator.EmbedImageRegion] = [] {
+        didSet { if embedImages != oldValue { needsDisplay = true } }
+    }
 
     /// The one drawing hook. `super` first, so the view's own background is
     /// down before the block decoration goes on top of it and the text on top
     /// of that.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        guard let palette = blockBackgroundPalette else { return }
-        MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
-                                      in: self, dirtyRect: rect)
+        if let palette = blockBackgroundPalette {
+            MarkdownBlockBackgrounds.draw(blockBackgrounds, palette: palette,
+                                          font: blockBackgroundFont
+                                              ?? MarkdownStyleRenderer.fallbackFont,
+                                          in: self, dirtyRect: rect)
+        }
+        drawEmbedImages(in: rect)
+    }
+
+    /// Positions each region from its character rect at draw time, rather
+    /// than caching a rect computed earlier: scrolling and resizing move
+    /// glyph rects without changing the ranges `applyEmbeds` recorded them
+    /// for.
+    ///
+    /// `firstRect(forCharacterRange:actualRange:)`, not `layoutManager`:
+    /// `MarkdownStyleRenderer.viewportWindow` already documents why reading
+    /// `layoutManager` on a TextKit 2 view silently downgrades the whole view
+    /// to TextKit 1, and `caretRect(in:)` in `MarkdownEditor.swift` uses this
+    /// same version-agnostic API for the identical reason. It answers in
+    /// SCREEN coordinates, so the result is converted back through the
+    /// window before comparing against `dirtyRect`, which is in this view's
+    /// own coordinate space.
+    private func drawEmbedImages(in dirtyRect: NSRect) {
+        guard !embedImages.isEmpty, let window else { return }
+        for region in embedImages {
+            let screenRect = firstRect(forCharacterRange: region.range, actualRange: nil)
+            guard screenRect.width.isFinite, screenRect.height.isFinite else { continue }
+            let windowRect = window.convertFromScreen(screenRect)
+            let rect = convert(windowRect, from: nil)
+            guard rect.intersects(dirtyRect) else { continue }
+            // Positioned by `EmbedGeometry.drawRect`, NOT by `rect.minX` —
+            // for a collapsed, near-zero-width source run, TextKit places
+            // that run against the LINE'S END margin, which for an RTL
+            // paragraph is the right edge, not the left. Deriving the
+            // origin from the paragraph's own writing direction and the
+            // container's usable width instead is correct for both
+            // directions and clamps an over-wide image to never overflow
+            // either edge. `rect.minY` is still trusted — the diagnosed bug
+            // is horizontal only.
+            //
+            // `EmbedGeometry.drawRect` answers in CONTAINER-local x.
+            // `textContainerOrigin.x`, NOT `textContainerInset.width`,
+            // translates that into this view's own coordinate space — see
+            // `MarkdownBlockBackgrounds.columnX`'s doc comment: the inset
+            // only happens to agree with the container's real origin while
+            // the column is flush against the view edge, and
+            // `MarkdownEditorLayout` centres a capped-width column, so on a
+            // wide window the two part company and every embed image would
+            // detach sideways from the code panels/quote bars that already
+            // use `textContainerOrigin.x`. `lineFragmentPadding` (AppKit's
+            // own 5pt default, never zeroed here) is passed through too —
+            // fix round 1, Important 2 — because the OLD `rect.minX` code
+            // included it for free (a glyph rect already accounts for line
+            // fragment padding) and dropping it would shift every
+            // previously-working top-level LTR embed 5pt left of where it
+            // used to sit.
+            let containerWidth = textContainer?.size.width ?? bounds.width
+            let padding = textContainer?.lineFragmentPadding ?? 0
+            let local = EmbedGeometry.drawRect(containerWidth: containerWidth,
+                                               writingDirection: region.writingDirection,
+                                               indent: region.indent,
+                                               lineFragmentPadding: padding, imageSize: region.size)
+            let drawRect = NSRect(x: local.origin.x + textContainerOrigin.x, y: rect.minY,
+                                  width: region.size.width, height: region.size.height)
+            // `draw(in:)` (the single-rect convenience) does NOT respect a
+            // flipped coordinate system, and `NSTextView` IS flipped — fix
+            // round 1, Important 5. Without `respectFlipped: true` every
+            // inline embed image renders upside down. `.sourceOver` and
+            // `fraction: 1` are the same defaults `draw(in:)` uses; only the
+            // flip behaviour changes.
+            region.image.draw(in: drawRect, from: .zero, operation: .sourceOver,
+                              fraction: 1.0, respectFlipped: true, hints: nil)
+        }
     }
 
     /// Modifiers that mean the user is doing something other than "activate
     /// what is under the pointer": extending a selection, opening a context
-    /// menu, or whatever the host binds Option-click to.
+    /// menu. `.option` is deliberately NOT here — see `onEmbedClick` — an
+    /// Option-click still means "activate", just the beside-opening variant
+    /// of it, for the one affordance (a transclusion) that has one.
     private static let selectionModifiers: NSEvent.ModifierFlags =
-        [.shift, .option, .control, .command]
+        [.shift, .control, .command]
+
+    /// Receives the clicked UTF-16 offset of a click on a RENDERED
+    /// transclusion (never on its collapsed source — there is nothing to
+    /// click there) and whether ⌥ was held, and reports whether it opened
+    /// the embed's source note. Same fall-through contract as
+    /// `onCommandClick`/`onPlainClick`.
+    ///
+    /// Tried on every single click that carries no modifier but ⌥ — both a
+    /// plain click (open in place) and an ⌥-click (open beside) land here,
+    /// AFTER `onPlainClick`: a transclusion region and a checkbox/footnote/
+    /// tag span never overlap in practice, but plain-click affordances are
+    /// the more specific claim of the two and get first refusal, same
+    /// precedence `toggleTask`/`jumpFootnote`/`selectTag` already have among
+    /// themselves inside `handlePlainClick`.
+    var onEmbedClick: (@MainActor (Int, Bool) -> Bool)?
 
     override func resignFirstResponder() -> Bool {
         let resigned = super.resignFirstResponder()
         if resigned { onResignFirstResponder?() }
         return resigned
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onBecomeFirstResponder?() }
+        return became
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -96,11 +281,20 @@ final class LinkTextView: NSTextView {
             super.mouseDown(with: event)
             return
         }
-        // Single, unmodified click only. A double-click is select-the-word and
-        // a drag starts from a click too — neither should flip a checkbox.
+        // Single click, no modifier but (optionally) ⌥. A double-click is
+        // select-the-word and a drag starts from a click too — neither
+        // should flip a checkbox or open an embed.
         if event.clickCount == 1,
-           event.modifierFlags.intersection(Self.selectionModifiers).isEmpty,
-           onPlainClick?(characterIndexForInsertion(at: point)) == true { return }
+           event.modifierFlags.intersection(Self.selectionModifiers).isEmpty {
+            let index = characterIndexForInsertion(at: point)
+            let optionHeld = event.modifierFlags.contains(.option)
+            // ⌥-click skips `onPlainClick` entirely: none of the checkbox/
+            // footnote/tag affordances have a "beside" variant, and running
+            // them under ⌥ would toggle a checkbox the user meant to open
+            // something beside.
+            if !optionHeld, onPlainClick?(index) == true { return }
+            if onEmbedClick?(index, optionHeld) == true { return }
+        }
         super.mouseDown(with: event)
     }
 
@@ -135,6 +329,10 @@ final class LinkTextView: NSTextView {
         }
         super.insertText(string, replacementRange: replacementRange)
     }
+
+    // Paste and drop of images/files (`paste(_:)`, `draggingEntered`,
+    // `performDragOperation`, and the pasteboard-classification helpers they
+    // share) live in `MarkdownEditorAttachments.swift`.
 
     /// Cmd-B / Cmd-I. Handled here rather than through `toggleBoldface(_:)`
     /// because those selectors arrive only from a Font menu, which a plugin's
@@ -222,4 +420,9 @@ extension MarkdownEditor.Coordinator {
         }
         return false
     }
+
+    // `insertAttachment(fromPastedImage:name:)`, `insertAttachments
+    // (fromDroppedFiles:)` and their shared `insertAtCaret` primitive live in
+    // `MarkdownEditorAttachments.swift`, alongside the `LinkTextView` paste/
+    // drop handling that calls them.
 }

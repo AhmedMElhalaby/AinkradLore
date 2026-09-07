@@ -90,10 +90,15 @@ final class LinkCompletionTests: XCTestCase {
 
     // MARK: - Selection state
 
-    private func rows(_ n: Int) -> [IndexRow] {
+    /// The list is typed on `LinkCompletionItem` rather than `IndexRow` since
+    /// the popup gained a "Create …" row — there is no `IndexRow` for a
+    /// document that does not exist yet. These selection rules are unchanged;
+    /// only the element type is.
+    private func rows(_ n: Int) -> [LinkCompletionItem] {
         (0..<n).map { i in
-            IndexRow(path: URL(fileURLWithPath: "/v/\(i).md"), id: "\(i)", title: "T\(i)",
-                     tags: [], aliases: [], updated: Date(), type: "markdown", properties: [])
+            .document(IndexRow(path: URL(fileURLWithPath: "/v/\(i).md"), id: "\(i)",
+                               title: "T\(i)", tags: [], aliases: [], updated: Date(),
+                               type: "markdown", properties: []))
         }
     }
 
@@ -441,5 +446,35 @@ final class LinkCreateOnUnresolvedTests: XCTestCase {
             indexPath: FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(UUID()).sqlite"))
         XCTAssertThrowsError(try store.create(title: "Design"))
+    }
+
+    // MARK: - Trigger detection (`[[` vs `#`)
+
+    func test_trigger_doubleBracketIsWikilink() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "see [[Des", at: 9)?.kind, .wikilink)
+    }
+
+    func test_trigger_hashIsTag() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "about #des", at: 10)?.kind, .tag)
+    }
+
+    func test_trigger_hashQueryExcludesTheHash() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "about #des", at: 10)?.query, "des")
+    }
+
+    func test_trigger_headingHashDoesNotTrigger() {
+        // `# ` at line start is a heading, and offering tag completions there
+        // would fire on every new heading anyone types.
+        XCTAssertNil(LinkCompletionContext.trigger(in: "# ", at: 2))
+    }
+
+    func test_trigger_hashInsideWikilinkDoesNotTrigger() {
+        // `[[Note#` is a heading fragment — the wikilink trigger owns it.
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "[[Note#Head", at: 11)?.kind, .wikilink)
+    }
+
+    func test_trigger_nestedTagQueryKeepsTheSlash() {
+        XCTAssertEqual(LinkCompletionContext.trigger(in: "#project/ain", at: 12)?.query,
+                       "project/ain")
     }
 }

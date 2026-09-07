@@ -193,10 +193,9 @@ extension LoreStore {
 
         // Resolved BEFORE the move: `canonical` is `realpath(3)`, which fails
         // on a path that no longer exists. Matched by PREFIX rather than
-        // against `plan.documentMoves`, so a tab open on a file the index does
-        // not claim (an unclaimed type, a file created since the last rescan)
-        // still follows the folder instead of being left pointing into a
-        // directory that is gone.
+        // against `plan.documentMoves`, so a tab open on a file the index has
+        // not yet reached (created since the last rescan) still follows the
+        // folder instead of being left pointing into a directory that is gone.
         let prefix = plan.source.path + "/"
         var following: [(session: DocumentSession, from: URL, to: URL)] = []
         for session in tabs {
@@ -224,6 +223,22 @@ extension LoreStore {
             for entry in following {
                 entry.session.adoptRenamed(entry.to)
                 transferOpenMTime(from: entry.from, to: entry.to)
+            }
+            // `coordinator.directoryPaths` has no other IMMEDIATE path to
+            // learn this — `try? rebuild()` below will eventually re-derive
+            // it from a fresh disk walk too, but that is a synchronous,
+            // whole-vault `scanVault` (parses every document) on the main
+            // actor, done here for the LINK graph's sake, not for this. Told
+            // directly and precisely instead, the same shape
+            // `noteDirectoryCreated` uses for create: `from`/`to` are exact,
+            // known, and require no walk. Without this call the OLD name
+            // stays a ghost node and the NEW name's empty subfolders (if
+            // any existed under `plan.source`) are missing until `rebuild()`
+            // (or a later rescan) happens to catch up.
+            if let root = vaultRoot {
+                coordinator.noteDirectoryRenamed(
+                    from: Self.vaultRelativePath(plan.source, under: root),
+                    to: Self.vaultRelativePath(plan.destination, under: root))
             }
         } catch {
             failed.append((plan.source, error.localizedDescription))

@@ -1,6 +1,16 @@
 import XCTest
 @testable import LoreFeature
 
+/// The open-document model.
+///
+/// `tabs` is no longer a strip the user reads — the tab bar is gone. It is now
+/// a WARM-SESSION CACHE: documents that stay loaded behind the one on screen so
+/// that navigating away never has to flush or close them. The close semantics
+/// asserted here are unchanged and still load-bearing (⌘W and the header's
+/// close both route through `closeTab`'s refusal), which is why these tests
+/// survive the tab bar that motivated them.
+///
+/// History and eviction live in `DocumentHistoryTests`.
 @MainActor
 final class TabsTests: XCTestCase {
     private func tempDir() -> URL {
@@ -36,7 +46,13 @@ final class TabsTests: XCTestCase {
         XCTAssertEqual(s.tabs.count, 1)
     }
 
-    func test_closeTab_selectsNeighbor() throws {
+    /// Closing falls back to the MOST RECENTLY USED document.
+    ///
+    /// This was `selectsNeighbor`, which was right while `tabs` was a visible
+    /// strip: the eye expects the gap to close sideways. With the strip gone,
+    /// adjacency in a cache is meaningless and "what I was looking at before
+    /// this one" is the only answer a user can predict.
+    func test_closeTab_selectsTheMostRecentlyUsedDocument() throws {
         let root = tempDir(); let s = try makeStore(root)
         try "---\nid: a\ntitle: A\n---\nx".write(
             to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
@@ -49,13 +65,20 @@ final class TabsTests: XCTestCase {
         XCTAssertEqual(s.selectedTab?.url.lastPathComponent, "a.md")
     }
 
-    func test_openUnsupportedType_recordsErrorWithoutOpeningTab() throws {
+    /// Engine resolution is now TOTAL (Task 2): a file no specific engine
+    /// claims opens as a read-only `AttachmentEngine` tab instead of setting
+    /// `openError`. Replaces the old
+    /// `test_openUnsupportedType_recordsErrorWithoutOpeningTab`, whose
+    /// expectation is exactly the behavior this task removes.
+    func test_openUnrecognizedType_opensAReadOnlyAttachmentTab() throws {
         let root = tempDir(); let s = try makeStore(root)
         let url = root.appendingPathComponent("sheet.xlsx")
         try "binary".write(to: url, atomically: true, encoding: .utf8)
         s.open(url: url)
-        XCTAssertTrue(s.tabs.isEmpty)
-        XCTAssertEqual(s.openError?.url, url)
+        XCTAssertNil(s.openError)
+        let session = try XCTUnwrap(s.selectedTab)
+        XCTAssertTrue(session.engine is AttachmentEngine)
+        XCTAssertTrue(session.isReadOnly)
     }
 
     func test_closeTab_savesDirtySessionBeforeClosing() throws {

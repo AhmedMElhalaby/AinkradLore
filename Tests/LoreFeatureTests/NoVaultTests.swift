@@ -133,4 +133,46 @@ final class NoVaultTests: XCTestCase {
         try withVault.setVaultRootForTesting(root)
         XCTAssertEqual(LoreRootView.emptyState(for: withVault), .noDocument)
     }
+
+    // MARK: - "Indexing" is not "empty"
+
+    /// With no vault there is nothing to index, so the sidebar must NOT claim
+    /// to be indexing — `LoreRootView`'s `noVault` state owns that screen.
+    /// Without the `vaultRoot` half of the predicate, a vaultless store whose
+    /// coordinator happened to report a rescan would show a spinner forever
+    /// instead of the "Choose vault…" call to action.
+    func test_indexingStateRequiresAVault() {
+        XCTAssertFalse(NoteListView.isStillIndexing(vaultlessStore()))
+    }
+
+    /// A settled vault is not indexing — otherwise the spinner would replace
+    /// the genuine "No notes yet" empty state permanently.
+    func test_asettledVaultIsNotIndexing() async throws {
+        let root = try tempVault()
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        await store.settleForTesting()
+        XCTAssertFalse(NoteListView.isStillIndexing(store))
+    }
+
+    /// A successful rescan leaves no error behind. The counterpart — a failing
+    /// rescan reporting its reason — is what `indexError` exists for; this
+    /// asserts the success path does not falsely populate it, which is what
+    /// would make the Settings banner permanent.
+    func test_asuccessfulRebuildReportsNoIndexError() async throws {
+        let root = try tempVault()
+        try "---\nid: a\ntitle: A\n---\nx".write(
+            to: root.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        let store = LoreStore(documents: FakeDocs(),
+                              indexPath: root.appendingPathComponent(".idx.sqlite"))
+        try store.setVaultRootForTesting(root)
+        await store.settleForTesting()
+
+        store.rebuildInBackground()
+        await store.settleForTesting()
+
+        XCTAssertNil(store.indexError)
+        XCTAssertTrue(store.rows.contains { $0.path.lastPathComponent == "a.md" })
+    }
 }

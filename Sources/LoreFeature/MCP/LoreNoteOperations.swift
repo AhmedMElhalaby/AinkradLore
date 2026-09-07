@@ -341,6 +341,23 @@ struct LoreNoteOperations {
             return "Lore declined to delete \(relative(url)): \(reason)"
         case .outsideVault(let url):
             return "Lore declined to write \(relative(url)) because it is outside the vault."
+        case .invalidName(let name):
+            return "“\(name)” is not a valid folder name."
+        case .alreadyExists(let url):
+            return "\(relative(url)) already exists."
+        case .notARegularFile(let url):
+            return "\(relative(url)) is not a regular file, so it was not copied as an "
+                + "attachment."
+        // Both restore failures are raised only by `undoTrash()`, which is a UI
+        // affordance (the action on a delete's toast) with no MCP tool behind
+        // it. Spelled out rather than folded into a `default` so that adding a
+        // future error still breaks this switch, which is how every case above
+        // came to have a sentence written for it.
+        case .restoreBlocked(let url):
+            return "\(relative(url)) could not be restored because a file of that name "
+                + "exists again."
+        case .restoreFailed(let url, let reason):
+            return "\(relative(url)) could not be restored from the Trash: \(reason)"
         }
     }
 

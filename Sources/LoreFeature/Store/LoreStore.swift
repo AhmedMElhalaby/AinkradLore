@@ -5,29 +5,100 @@ import AinkradAppKit
 @MainActor
 @Observable
 public final class LoreStore {
+    // Persisted preferences are `internal(set)`, not `private(set)`: their
+    // setters live in `LoreStore+Preferences.swift` and `private(set)` is
+    // file-scoped. All are plain stored values with no `didSet` and no
+    // invariant to guard, and the setters remain their only writers.
+
     /// Relative subfolder (under the vault root) where ⌘N quick-capture writes
     /// new notes. Empty string == the vault root itself.
-    public private(set) var defaultNoteFolder: String = ""
+    public internal(set) var defaultNoteFolder: String = ""
 
     /// Sidebar layout choice: folder tree or the flat, searchable list.
     public enum SidebarMode: String, Sendable { case tree, all }
 
-    public private(set) var sidebarMode: SidebarMode = .tree
+    public internal(set) var sidebarMode: SidebarMode = .tree
     /// Folder ids (relative paths under the vault root) currently expanded in
     /// `FolderTreeView`. Persisted so returning to a vault restores the tree
     /// the user left open, rather than collapsing everything.
-    public private(set) var expandedFolders: Set<String> = []
+    public internal(set) var expandedFolders: Set<String> = []
 
     /// Whether `BacklinksPanel` is expanded or collapsed, persisted the same
     /// way as `sidebarMode`: a per-vault-host UI choice, not per-document, so
     /// one toggle sticks across every note the user opens.
-    public private(set) var backlinksPanelExpanded: Bool = true
+    public internal(set) var backlinksPanelExpanded: Bool = true
 
     /// Whether `OutlineSection` is expanded or collapsed. Same shape and same
     /// reasoning as `backlinksPanelExpanded`.
-    public private(set) var outlinePanelExpanded: Bool = true
+    public internal(set) var outlinePanelExpanded: Bool = true
 
-    private let documents: PluginDocumentStore
+    /// "Show all files" — OFF by default, so a non-document attachment (a
+    /// `.zip`, a stray binary, an OAuth credentials file) is hidden from the
+    /// sidebar browse lists (`FolderTreeView`, `NoteListView`) unless the
+    /// owner opts in. See `DocumentVisibility` for what "hidden" does and
+    /// does not mean — it is a browse-list filter only, never an indexing or
+    /// resolution decision.
+    public internal(set) var showAllFiles: Bool = false
+
+    /// Whether the sidebar is hidden. Persisted the same way as `sidebarMode`:
+    /// a per-vault-host UI choice, not per-document.
+    public internal(set) var sidebarCollapsed: Bool = false
+
+    /// Sidebar width in points, persisted like the other layout choices.
+    ///
+    /// Clamped on read as well as on write: the stored value comes from a
+    /// file a user can edit, and a 4000pt sidebar would leave no editor at all
+    /// with no way to drag it back.
+    public internal(set) var sidebarWidth: CGFloat = LoreMetrics.defaultSidebarWidth
+
+    /// Canonical path keys of pinned documents — see `LoreStore+Shortcuts`.
+    internal var pinnedPaths: Set<String> = []
+    /// One-document outline cache for `[[Doc#…]]` completion — see
+    /// `LoreStore+Headings`.
+    internal var headingCacheKey: String?
+    internal var headingCache: [String] = []
+
+    /// The reader's preferences for the writing surface — see `EditorSettings`
+    /// for why the editor owns these rather than inheriting them from the host
+    /// theme.
+    public internal(set) var editorSettings: EditorSettings = .default
+
+    /// The one file `trash(_:)` most recently moved to the Trash, and where
+    /// macOS put it — the whole of what `undoTrash()` needs to put it back.
+    ///
+    /// ONE deep, deliberately. This is the undo behind a toast that lives for
+    /// three seconds, not a general undo stack: the honest scope of "you just
+    /// did that, take it back" is the last action, and a deeper stack would
+    /// imply a history the UI does not show and cannot be trusted to still be
+    /// valid (every entry is a path on disk that anything else may have moved
+    /// in the meantime).
+    ///
+    /// Nil whenever there is nothing to undo — including after a successful
+    /// undo, so the same record can never be replayed twice.
+    /// `internal(set)`, not `private(set)`: `trash(_:)` and `undoTrash()` live
+    /// in `LoreStore+Trash.swift`, and Swift's `private(set)` is file-scoped.
+    /// Still closed to callers outside the module, which is the access this
+    /// property actually needs.
+    public internal(set) var lastTrash: TrashUndo?
+
+    /// Everything needed to reverse one `trash(_:)`.
+    public struct TrashUndo: Equatable, Sendable {
+        /// Where the file lived in the vault, CANONICAL — the same spelling
+        /// `trash` removed from the index, so the restore re-indexes under a
+        /// path that matches.
+        public let original: URL
+        /// Where macOS actually put it, from `trashItem`'s
+        /// `resultingItemURL`. Lore used to pass `nil` here and throw this
+        /// away, which is the only reason undo looked expensive.
+        public let trashed: URL
+        /// What to call the file in the toast.
+        public let name: String
+    }
+
+    /// Internal, not private: the persisted-preference setters live in
+    /// `LoreStore+Preferences.swift`, and Swift's `private` is file-scoped.
+    /// Still closed outside the module.
+    let documents: PluginDocumentStore
     /// Internal, not private, so `LoreStore+Rename.swift` can reach the index.
     /// The rename applier lives in its own file to keep this one under the
     /// 500-line ceiling.
@@ -43,13 +114,15 @@ public final class LoreStore {
     /// was just renamed: precisely the data loss `transferOpenMTime`'s own doc
     /// comment says it exists to prevent. One key function on both sides is what
     /// makes that unrepresentable.
-    private var openMTimes: [String: Date] = [:]
+    /// Internal, not private: `LoreStore+Documents.swift` — `load`, `create`,
+    /// `save` and the mtime bookkeeping around them — reads and writes it,
+    /// and Swift has no cross-file `private`.
+    var openMTimes: [String: Date] = [:]
 
-    private static let defaultFolderKey = "defaultNoteFolder"
-    private static let sidebarModeKey = "sidebarMode"
-    private static let expandedFoldersKey = "expandedFolders"
-    private static let backlinksPanelExpandedKey = "backlinksPanelExpanded"
-    private static let outlinePanelExpandedKey = "outlinePanelExpanded"
+    /// Files Lore's notifications. Optional because a generation-9 host is the
+    /// only thing that supplies one, and because every test constructing a
+    /// store must not have to care about notifications.
+    var reporter: LoreSignalReporter?
 
     public init(documents: PluginDocumentStore, indexPath: URL) {
         self.documents = documents
@@ -75,44 +148,78 @@ public final class LoreStore {
            let raw = String(data: data, encoding: .utf8) {
             outlinePanelExpanded = raw == "true"
         }
+        if let data = documents.data(forKey: Self.showAllFilesKey),
+           let raw = String(data: data, encoding: .utf8) {
+            showAllFiles = raw == "true"
+        }
+        if let data = documents.data(forKey: Self.sidebarCollapsedKey),
+           let text = String(data: data, encoding: .utf8) {
+            sidebarCollapsed = (text == "1")
+        }
+        // Decoded leniently: a settings blob written by a NEWER Lore (or a
+        // corrupt one) falls back to the defaults rather than refusing to
+        // start. Preferences are not worth failing a launch over.
+        if let data = documents.data(forKey: Self.editorSettingsKey),
+           let decoded = try? JSONDecoder().decode(EditorSettings.self, from: data) {
+            editorSettings = decoded
+        }
+        if let data = documents.data(forKey: Self.sidebarWidthKey),
+           let text = String(data: data, encoding: .utf8), let width = Double(text) {
+            // Clamped on READ too — the stored value comes from a file a user
+            // can edit, and a 4000pt sidebar leaves no editor and no grip to
+            // drag back with.
+            sidebarWidth = LoreMetrics.clampSidebarWidth(CGFloat(width))
+        }
+        loadShortcutLists()
         if let root = VaultBookmark.resolve(from: documents) {
             try? coordinator.activate(root: root)
         }
-    }
-
-    /// Persist the sidebar's folder-tree-vs-flat-list choice.
-    public func setSidebarMode(_ mode: SidebarMode) {
-        sidebarMode = mode
-        documents.setData(mode.rawValue.data(using: .utf8), forKey: Self.sidebarModeKey)
-    }
-
-    /// Persist which folders are expanded in `FolderTreeView`.
-    public func setExpandedFolders(_ folders: Set<String>) {
-        expandedFolders = folders
-        documents.setData(folders.sorted().joined(separator: "\n").data(using: .utf8),
-                          forKey: Self.expandedFoldersKey)
-    }
-
-    /// Persist the backlinks panel's collapsed/expanded state.
-    public func setBacklinksPanelExpanded(_ expanded: Bool) {
-        backlinksPanelExpanded = expanded
-        documents.setData((expanded ? "true" : "false").data(using: .utf8),
-                          forKey: Self.backlinksPanelExpandedKey)
-    }
-
-    /// Persist the outline panel's collapsed/expanded state.
-    public func setOutlinePanelExpanded(_ expanded: Bool) {
-        outlinePanelExpanded = expanded
-        documents.setData((expanded ? "true" : "false").data(using: .utf8),
-                          forKey: Self.outlinePanelExpandedKey)
     }
 
     // MARK: - Index facade
 
     public var rows: [IndexRow] { coordinator.rows }
     public var vaultRoot: URL? { coordinator.vaultRoot }
+    /// Vault-relative paths of every directory — see
+    /// `VaultIndexCoordinator.directoryPaths`'s doc comment. `FolderTreeView`
+    /// reads this (not a filesystem walk of its own) to show empty folders.
+    var directoryPaths: [String] { coordinator.directoryPaths }
     public func search(_ query: String) -> [IndexRow] { coordinator.search(query) }
+
+    /// Search results carrying the matched excerpt — see `SearchSnippet`.
+    public func searchHits(_ query: String) -> [SearchHit] { coordinator.searchHits(query) }
+    /// Whether `undoTrash()` currently has a delete to reverse.
+    public var canUndoTrash: Bool { lastTrash != nil }
+
     public func rebuild() throws { try coordinator.rebuild() }
+
+    /// See `VaultIndexCoordinator.registerExternalChangeHandler` — the
+    /// pass-through `EditorContext.registerExternalChangeHandler` reaches.
+    public func registerExternalChangeHandler(_ handler: @escaping (URL) -> Void) -> UUID {
+        coordinator.registerExternalChangeHandler(handler)
+    }
+
+    /// Pairs with `registerExternalChangeHandler` above.
+    public func unregisterExternalChangeHandler(_ token: UUID) {
+        coordinator.unregisterExternalChangeHandler(token)
+    }
+
+    /// True while a vault rescan is running — drives the sidebar's "Indexing…"
+    /// state and the Settings spinner.
+    public var isIndexing: Bool { coordinator.isRebuilding }
+
+    /// Why the last rescan failed, or nil. Used to be discarded entirely.
+    public var indexError: String? { coordinator.lastRebuildError }
+
+    /// Rescan the vault WITHOUT blocking the main actor.
+    ///
+    /// The Settings button used to call `try? rebuild()` — the synchronous
+    /// path — which walks, reads and parses every file on the main actor: a
+    /// multi-second freeze with no spinner and, thanks to the `try?`, no
+    /// report of a failure. Same background path a vault change already takes;
+    /// synchronous `rebuild()` stays for tests and callers that must observe
+    /// the result immediately.
+    public func rebuildInBackground() { coordinator.startBackgroundRebuild() }
 
     // MARK: - Links
 
@@ -137,6 +244,35 @@ public final class LoreStore {
             return String(line.trimmingCharacters(in: .whitespaces).prefix(200))
         }
         return ""
+    }
+
+    /// `url`'s path relative to `root`, as a plain STRING prefix strip —
+    /// `"Parent/Q1"` for `<root>/Parent/Q1`. Deliberately NOT
+    /// `pathComponents.dropFirst(rootDepth)`: that shape (used by
+    /// `createFolder`/`applyTrashFolder`/folder-rename `apply` in earlier
+    /// drafts of this exact computation) reads `root.standardizedFileURL
+    /// .pathComponents.count` and `url.standardizedFileURL.pathComponents`
+    /// SEPARATELY, and `standardizedFileURL` on macOS inconsistently
+    /// collapses a `/private/var/…` prefix to `/var/…` depending on the
+    /// URL's OWN depth — confirmed by direct measurement: `root` alone
+    /// standardized to 7 components (`private` dropped), the same root with
+    /// one more path component appended standardized to 9 (`private` kept).
+    /// The two counts then silently disagreed by exactly one component,
+    /// which strips one component too few or too many depending on
+    /// direction — the round-4 bug (`directoryPaths` after a real trash/
+    /// rename computed a garbage vault-"relative" path that still had the
+    /// system temp directory's own name in it, so it never matched anything
+    /// already in `directoryPaths` and the removal/rename silently no-opped).
+    /// A raw string-prefix strip on `.path` has no such inconsistency: both
+    /// `url` and `root` are expected to already be canonical (realpath'd via
+    /// `VaultIndexCoordinator.canonical`, or built by literally appending
+    /// path components to an already-canonical root, as `createFolder`'s
+    /// `destination` and `FolderTreeView.folderURL` both do) — same spelling
+    /// in, same spelling out, no re-interpretation in between.
+    static func vaultRelativePath(_ url: URL, under root: URL) -> String {
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard url.path.hasPrefix(rootPath) else { return url.lastPathComponent }
+        return String(url.path.dropFirst(rootPath.count))
     }
 
     public func unresolvedLinks(from url: URL) -> [UnresolvedLink] {
@@ -200,8 +336,11 @@ public final class LoreStore {
             tab.cancelPendingSave()
         }
         tabs = []
-        selectedTab = nil
         openError = nil
+        // The pane goes with the vault: its session and its history both point
+        // into the one being closed. `reset()` keeps that teardown in one
+        // place rather than split across three assignments here.
+        pane.reset()
     }
     func settleForTesting() async { await coordinator.settleForTesting() }
     func handleVaultChange() { coordinator.handleVaultChange() }
@@ -209,96 +348,61 @@ public final class LoreStore {
 
     // MARK: - Tabs
 
-    public private(set) var tabs: [DocumentSession] = []
-    public private(set) var selectedTab: DocumentSession?
+    public internal(set) var tabs: [DocumentSession] = []
+
+    /// The single pane Lore shows today — see `PaneState` for why the
+    /// document and its history live in a value rather than as loose
+    /// properties on the store.
+    internal var pane = PaneState()
+
+    /// The second pane, when the view is split. Nil is the ordinary state.
+    ///
+    /// Optional rather than a second always-present `PaneState`: "no split" has
+    /// to be representable, and an empty pane that exists but shows nothing is
+    /// a state every reader downstream would have to keep checking for.
+    internal var secondaryPane: PaneState?
+
+    /// Which pane commands act on.
+    ///
+    /// Never `true` while `secondaryPane` is nil — `closeSecondaryPane` moves
+    /// focus back rather than leaving it pointed at a pane that is gone, which
+    /// is the one way this could quietly send ⌘W to nothing.
+    internal var focusIsSecondary = false
+
+    /// The pane commands act on. Reading is total; writing goes to whichever
+    /// pane has focus.
+    internal var focusedPane: PaneState {
+        get { (focusIsSecondary ? secondaryPane : nil) ?? pane }
+        set {
+            if focusIsSecondary, secondaryPane != nil { secondaryPane = newValue }
+            else { pane = newValue }
+        }
+    }
+
+    /// Every document currently ON SCREEN — one, or two when split.
+    ///
+    /// Used by eviction, which must never reclaim a session a pane is
+    /// showing. A single `selectedTab` check was correct while there was one
+    /// pane and becomes a data-loss shape the moment there are two.
+    internal var visibleSessions: [DocumentSession] {
+        [pane.session, secondaryPane?.session].compactMap { $0 }
+    }
+
+    /// The document on screen in the FOCUSED pane.
+    ///
+    /// Forwards, so every existing caller and every test is untouched: with no
+    /// split, the focused pane is the only pane and this means exactly what it
+    /// always did.
+    public var selectedTab: DocumentSession? {
+        get { focusedPane.session }
+        set { focusedPane.session = newValue }
+    }
     /// Set when the last open attempt failed. The UI renders the fallback
     /// viewer from this rather than silently doing nothing — a file the list
     /// shows must always produce a visible response when clicked.
-    public private(set) var openError: (url: URL, error: Error)?
-
-    public func open(_ row: IndexRow) { open(url: row.path) }
-
-    public func open(url: URL) {
-        // Canonical on both sides. Compared raw, opening the already-open
-        // `/tmp/v/a.md` as `/private/tmp/v/a.md` (or via a canonical `row.path`)
-        // produced a SECOND session on the same file, each with its own mtime
-        // baseline and its own debounced autosave racing the other.
-        if let existing = tabs.first(where: { Self.pathKey($0.url) == Self.pathKey(url) }) {
-            selectedTab = existing
-            return
-        }
-        do {
-            let session = try DocumentSession.open(url: url, coordinator: coordinator)
-            tabs.append(session)
-            selectedTab = session
-            openError = nil
-        } catch {
-            openError = (url, error)
-        }
-    }
-
-    public func selectTab(_ session: DocumentSession) { selectedTab = session }
-
-    /// Closing does NOT discard unsaved edits: `DocumentSession` autosaves on a
-    /// 500ms debounce, so a tab closed immediately after a keystroke could
-    /// otherwise lose that edit. A read-only session can never be dirty (see
-    /// `DocumentSession.markChanged`), so this only ever writes a document the
-    /// engine can actually save.
-    ///
-    /// A `false` return means the document still has unsaved work and is
-    /// still open: the tab was NOT removed, its selection was left
-    /// untouched, and the session's own `conflict` / `lastSaveError` flags
-    /// already explain why (a real save failure, or an external change).
-    /// Callers must not assume a `false` return means the tab is gone.
-    /// Pass `force: true` to remove the tab regardless — the user explicitly
-    /// choosing to discard.
-    @discardableResult
-    public func closeTab(_ session: DocumentSession, force: Bool = false) -> Bool {
-        guard let idx = tabs.firstIndex(where: { $0 === session }) else { return false }
-        if session.isDirty && !session.isReadOnly {
-            do {
-                try session.saveNow()
-            } catch {
-                if !force { return false }
-            }
-        }
-        // Past this point the tab IS being removed, on both the normal and the
-        // forced path, so the debounced autosave must be disarmed: it would
-        // otherwise fire into a document nobody owns any more — writing back
-        // edits the user chose to discard, or resurrecting a file a delete is
-        // about to unlink.
-        session.cancelPendingSave()
-        tabs.remove(at: idx)
-        if selectedTab === session {
-            selectedTab = tabs.indices.contains(idx) ? tabs[idx]
-                        : tabs.indices.contains(idx - 1) ? tabs[idx - 1]
-                        : tabs.last
-        }
-        return true
-    }
-
-    /// Every distinct tag across all indexed notes, sorted — drives the sidebar
-    /// tag-filter chips.
-    public var allTags: [String] { Array(Set(rows.flatMap(\.tags))).sorted() }
-
-    /// Immediate subdirectories of the vault root (dotfiles excluded) — the
-    /// choices offered for `defaultNoteFolder` in Settings.
-    public var subfolders: [String] {
-        guard let root = vaultRoot else { return [] }
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        return urls
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .map(\.lastPathComponent)
-            .filter { !$0.hasPrefix(".") }
-            .sorted()
-    }
-
-    /// Persist the default new-note subfolder (relative to the vault root).
-    public func setDefaultNoteFolder(_ relative: String) {
-        defaultNoteFolder = relative
-        documents.setData(relative.data(using: .utf8), forKey: Self.defaultFolderKey)
-    }
+    /// `internal(set)`: the open path lives in `LoreStore+Sessions.swift` and
+    /// Swift's `private(set)` is file-scoped. Still closed outside the module.
+    public internal(set) var openError: (url: URL, error: Error)?
 
     /// Switching vaults is a teardown of the old one, not just a new root:
     /// tabs, selection and `openError` all point INTO the previous vault, and
@@ -317,132 +421,9 @@ public final class LoreStore {
         try coordinator.activate(root: url)
     }
 
-    // MARK: - Documents
-    //
-    // `load` and `save` stay here deliberately: Task 7 did NOT take them, and
-    // Task 10 kept them because the MCP note tools are their only remaining
-    // callers (the UI goes through `DocumentSession`). M6 owns the redesign
-    // that decides where note-level read/write really belongs.
-
-    public func load(_ row: IndexRow) throws -> Note {
-        let text = try String(contentsOf: row.path, encoding: .utf8)
-        let note = Frontmatter.parse(text, path: row.path)
-        openMTimes[Self.pathKey(row.path)] = try mtime(of: row.path)
-        return note
-    }
-
-    /// - Parameter subfolder: a path relative to the default note folder, created
-    ///   if missing. Only used by the "create the note this link points at" flow,
-    ///   where `[[Projects/Design]]` names a folder as well as a note; empty
-    ///   everywhere else, which is the pre-existing behaviour exactly.
-    @discardableResult
-    public func create(title: String, in subfolder: String = "") throws -> Note {
-        guard let root = vaultRoot, coordinator.hasIndex else { throw LoreError.noVault }
-        let slug = title.isEmpty ? "untitled" : title.lowercased()
-            .replacingOccurrences(of: " ", with: "-")
-        var dir = defaultNoteFolder.isEmpty
-            ? root : root.appendingPathComponent(defaultNoteFolder, isDirectory: true)
-        // `..` and absolute segments are dropped, not rejected: this string
-        // comes from document text, so it is untrusted input, and a link must
-        // never be able to write outside the vault.
-        for part in subfolder.split(separator: "/")
-        where part != "." && part != ".." && !part.isEmpty {
-            dir.appendPathComponent(String(part), isDirectory: true)
-        }
-        // Path arithmetic alone is not containment: a SYMLINKED folder inside
-        // the vault (common in Obsidian setups) would let
-        // `withIntermediateDirectories` follow it and write outside the root.
-        // Checked before the directory is created, on the deepest EXISTING
-        // ancestor — `resolvingSymlinksInPath` cannot resolve components that
-        // do not exist yet, and the link we are worried about does exist.
-        guard Self.isContained(dir, in: root) else {
-            throw LoreError.outsideVault(dir)
-        }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = uniqueURL(in: dir, slug: slug)
-        // Re-checked after creation: now the whole chain exists, so this
-        // resolves every component rather than only the pre-existing ones.
-        guard Self.isContained(url.deletingLastPathComponent(), in: root) else {
-            throw LoreError.outsideVault(url)
-        }
-        let now = Date()
-        let note = Note(path: url, id: UUID().uuidString, title: title, tags: [],
-                        created: now, updated: now, body: "")
-        try Frontmatter.serialize(note).write(to: url, atomically: true, encoding: .utf8)
-        try coordinator.indexDocument(MarkdownEngine.load(url), at: url)
-        openMTimes[Self.pathKey(url)] = try mtime(of: url)
-        return note
-    }
-
-    /// Writes `note` back to its file.
-    ///
-    /// Refuses when the file changed on disk since it was loaded, unless
-    /// `overwritingExternalChanges` is set. `externalChangeDetected(for:)`
-    /// already existed and was already correct — `save` simply never consulted
-    /// it. So an edit made in Obsidian (or by the agent's `edit_file`, or by a
-    /// sync client) while a note sat open in Lore's editor was destroyed by the
-    /// editor's next 500ms autosave: silently, with no diff and no undo. That
-    /// is a note-taking app losing notes.
-    ///
-    /// Detection is mtime-based and therefore best-effort — a write inside the
-    /// filesystem's timestamp granularity can still slip through. A much
-    /// smaller hole than not checking at all.
-    public func save(_ note: Note, overwritingExternalChanges: Bool = false) throws {
-        guard coordinator.hasIndex else { throw LoreError.noVault }
-        if !overwritingExternalChanges, externalChangeDetected(for: note) {
-            throw LoreError.externalChange(note.path)
-        }
-        var updated = note; updated.updated = Date()
-
-        // Suppress the watcher across our own write. Saving fires
-        // `FolderWatcher`, whose handler is a FULL `rebuild()` — re-reading and
-        // re-indexing every markdown file in the vault, on the main actor, in
-        // response to our own single-file write. On a large vault every
-        // autosave stalled the editor mid-keystroke.
-        coordinator.suppressWatcher(for: VaultIndexCoordinator.selfWriteSuppressionWindow)
-
-        try Frontmatter.serialize(updated).write(to: note.path, atomically: true, encoding: .utf8)
-        try coordinator.indexDocument(MarkdownEngine.load(note.path), at: note.path)
-        openMTimes[Self.pathKey(note.path)] = try mtime(of: note.path)
-    }
-
-    /// Drop a deleted document from the legacy note API's mtime map. Left
-    /// behind, the entry is keyed by a path that no longer exists — harmless
-    /// until a file reappears at that exact path, at which point `save`
-    /// compares against a baseline from a different document.
-    func forgetOpenMTime(_ url: URL) { openMTimes[Self.pathKey(url)] = nil }
-
-    /// Follow a rename in the legacy note API's mtime map. Left stale, the
-    /// entry is keyed by a path that no longer exists, so
-    /// `externalChangeDetected(for:)` finds no baseline for the renamed note
-    /// and returns false — turning `save`'s external-change guard off for it.
-    /// Both keys go through `pathKey`, so the canonical URLs the rename paths
-    /// pass in match a baseline stored from a raw `note.path`.
-    func transferOpenMTime(from old: URL, to new: URL) {
-        guard let known = openMTimes[Self.pathKey(old)] else { return }
-        openMTimes[Self.pathKey(old)] = nil
-        openMTimes[Self.pathKey(new)] = known
-    }
-
-    /// True if the file changed on disk since we last loaded/saved it.
-    public func externalChangeDetected(for note: Note) -> Bool {
-        guard let known = openMTimes[Self.pathKey(note.path)],
-              let disk = try? mtime(of: note.path) else { return false }
-        return disk > known
-    }
-
-    private func mtime(of url: URL) throws -> Date {
-        try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date ?? .distantPast
-    }
-
-    private func uniqueURL(in root: URL, slug: String) -> URL {
-        var candidate = root.appendingPathComponent("\(slug).md")
-        var n = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = root.appendingPathComponent("\(slug)-\(n).md"); n += 1
-        }
-        return candidate
-    }
+    // `load`, `create`, `save` and the mtime bookkeeping around them live in
+    // `LoreStore+Documents.swift`, following this file's extension
+    // convention (`LoreStore+Folders.swift`, `LoreStore+Trash.swift`, …).
 }
 
 public enum LoreError: Error, Equatable {
@@ -464,4 +445,27 @@ public enum LoreError: Error, Equatable {
     /// folder name taken from untrusted document text (a `[[a/b]]` link),
     /// where a symlink inside the vault redirects the path out of it.
     case outsideVault(URL)
+    /// `createFolder`'s name is not a single path COMPONENT — empty, a
+    /// separator, `:`, `.` or `..` — and is REJECTED rather than sanitized: a
+    /// silently-renamed folder is worse than a refused one, because the user
+    /// asked for a specific name and would not know they did not get it.
+    case invalidName(String)
+    /// `createFolder`'s destination already exists.
+    case alreadyExists(URL)
+    /// `writeAttachment(copying:besideNote:)` was handed something other
+    /// than a regular file (or a symlink resolving to one) — a directory,
+    /// most commonly a Finder folder dropped where an attachment was
+    /// expected. `copyItem` has no size bound on a directory and would
+    /// recurse the whole subtree synchronously on the main actor, so this
+    /// is refused before any bytes move rather than left to beachball.
+    case notARegularFile(URL)
+    /// `undoTrash()` was asked to restore a file to a path that is occupied
+    /// again — the user trashed `Q1.md` and then made a new `Q1.md`. REFUSED
+    /// rather than overwritten: the undo exists to recover a file, and a
+    /// version of it that destroys a newer one on the way is not a recovery.
+    case restoreBlocked(URL)
+    /// `undoTrash()` could not move the file back out of the Trash (the user
+    /// emptied it, or moved the item by hand). The `String` carries the
+    /// underlying reason.
+    case restoreFailed(URL, String)
 }

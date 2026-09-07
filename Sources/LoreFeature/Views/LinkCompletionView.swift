@@ -106,6 +106,30 @@ public enum LinkCompletionContext {
         return LinkResolver.basename(of: target)
     }
 
+    /// Splits a typed `[[` prefix into the document it names and the heading
+    /// being typed after `#`, or nil when no `#` has been typed yet.
+    ///
+    /// The whole feature rides on this: `activePrefix` already hands back the
+    /// text between `[[` and the caret, so recognising a heading query needs no
+    /// new scanning of the document — only a decision about what that text
+    /// means.
+    ///
+    /// Splits on the FIRST `#`. A second one is part of the heading, because
+    /// markdown headings can legitimately contain `#` and the fragment syntax
+    /// has no escape for it — so `[[Doc#C# notes]]` asks for the heading
+    /// "C# notes", which is the only reading that lets such a heading be
+    /// linked at all.
+    ///
+    /// Returns nil for an EMPTY document name (`[[#`): a fragment with no
+    /// document is a link into nothing, and offering headings there would be
+    /// offering them from a document the user has not named.
+    static func headingQuery(inPrefix prefix: String) -> (document: String, heading: String)? {
+        guard let hash = prefix.firstIndex(of: "#") else { return nil }
+        let document = String(prefix[prefix.startIndex..<hash]).trimmingCharacters(in: .whitespaces)
+        guard !document.isEmpty else { return nil }
+        return (document, String(prefix[prefix.index(after: hash)...]))
+    }
+
     /// Characters that change what a target MEANS: `#` starts a fragment, `|`
     /// starts an alias, brackets end or restart the span, `/` turns the target
     /// into a path suffix.
@@ -205,24 +229,163 @@ public enum LinkCompletionContext {
     }
 }
 
+extension LinkCompletionContext {
+    /// What the user typed to summon the panel — `[[` (wikilink) or a bare
+    /// `#` (tag). One enum rather than a second panel: `LinkCompletionView`
+    /// and its floating `LinkCompletionPanel` already handle first-responder
+    /// and teardown correctly, and that handling took real work — a second
+    /// panel would mean a second copy of it that drifts from the first.
+    enum Kind: Equatable { case wikilink, tag }
+
+    struct Trigger: Equatable {
+        let kind: Kind
+        /// What to match against, excluding the trigger characters (`[[` or
+        /// `#`).
+        let query: String
+        /// The CHARACTER offset (see the file doc comment above) of the first
+        /// character replaced when a completion is accepted — right after
+        /// `[[`, or at the `#` itself.
+        let replaceFrom: Int
+    }
+
+    /// The trigger active at `caret`, or `nil` when neither is.
+    ///
+    /// `[[` is checked first — via `activePrefix` — because it OWNS any `#`
+    /// that follows: `[[Note#Head` is a heading fragment, not a tag, and the
+    /// wikilink trigger already knows how to read it (`headingQuery`).
+    static func trigger(in text: String, at caret: Int) -> Trigger? {
+        guard caret >= 0,
+              let index = text.index(text.startIndex, offsetBy: caret,
+                                     limitedBy: text.endIndex) else { return nil }
+        return trigger(in: text, at: index)
+    }
+
+    /// The real implementation, in `String.Index` space — see `activePrefix`.
+    static func trigger(in text: String, at caret: String.Index) -> Trigger? {
+        if let prefix = activePrefix(in: text, caret: caret) {
+            let replaceFrom = text.distance(from: text.startIndex, to: caret) - prefix.count
+            return Trigger(kind: .wikilink, query: prefix, replaceFrom: replaceFrom)
+        }
+        return tagTrigger(in: text, caret: caret)
+    }
+
+    /// Characters `scanTags` (`MarkdownExtensions.swift`) accepts inside a
+    /// tag name: letters (including non-ASCII), digits, `_`, `-`, `/`. `/` is
+    /// kept in the query, not stripped, so `#project/ain` still matches
+    /// `project/ainkrad` — the same reasoning `scanTags` uses to keep a
+    /// trailing `/` inside the span while the author is mid-typing.
+    private static func isTagChar(_ c: Character) -> Bool {
+        c.isLetter || c.isNumber || c == "_" || c == "-" || c == "/"
+    }
+
+    /// Scans backward from `caret` for an unclosed `#`, stopping at the first
+    /// character that cannot be part of a tag name (crucially, whitespace —
+    /// which is what makes `# ` at line start refuse to trigger below: the
+    /// space between `#` and the caret stops the scan before a `#` is ever
+    /// found).
+    private static func tagTrigger(in text: String, caret: String.Index) -> Trigger? {
+        var i = caret
+        while i > text.startIndex {
+            let prev = text.index(before: i)
+            let c = text[prev]
+            if c == "#" {
+                let query = String(text[i..<caret])
+                // `# ` at line start is a heading, not a tag — see
+                // `scanTags`. The disqualifying space itself can never reach
+                // here (it would already have stopped the scan below), so the
+                // only ambiguous case is a BARE `#` at line start with
+                // nothing typed after it yet: the next keystroke decides
+                // whether this becomes a heading or a tag, and offering
+                // completions before that is known would fire on every new
+                // heading anyone types.
+                if query.isEmpty, isAtLineStart(prev, in: text) { return nil }
+                let replaceFrom = text.distance(from: text.startIndex, to: prev)
+                return Trigger(kind: .tag, query: query, replaceFrom: replaceFrom)
+            }
+            guard isTagChar(c) else { return nil }
+            i = prev
+        }
+        return nil
+    }
+
+    /// Whether `index` starts a line, allowing up to three leading spaces —
+    /// CommonMark's own indent tolerance, matching `scanTags`'
+    /// `isAtLineStart`.
+    private static func isAtLineStart(_ index: String.Index, in text: String) -> Bool {
+        var k = index
+        var spaces = 0
+        while k > text.startIndex, spaces <= 3 {
+            let prev = text.index(before: k)
+            let c = text[prev]
+            if c == "\n" { return true }
+            guard c == " " else { return false }
+            spaces += 1
+            k = prev
+        }
+        return k == text.startIndex
+    }
+}
+
+/// One row in the completion list.
+///
+/// The list used to be `[IndexRow]` end to end, which made "offer to create the
+/// note you are typing" unrepresentable: there is no `IndexRow` for a document
+/// that does not exist yet. Modelling the row rather than the document is what
+/// lets the list carry an action alongside its matches.
+@MainActor
+enum LinkCompletionItem: Equatable {
+    case document(IndexRow)
+    /// Create a note with this name. Carries the typed text, not a row.
+    case create(String)
+    /// A heading inside the document already named before the `#`.
+    case heading(document: String, text: String)
+    /// A `#tag` completion, matched against `LoreStore.allTags`. Carries the
+    /// bare name (no `#`), matching how `allTags` and `scanTags` both store
+    /// it.
+    case tag(String)
+
+    /// What the row reads as.
+    var label: String {
+        switch self {
+        case .document(let row):
+            return row.title.isEmpty ? row.path.lastPathComponent : row.title
+        case .create(let name):
+            return "Create “\(name)”"
+        case .heading(_, let text):
+            return text
+        case .tag(let name):
+            return "#\(name)"
+        }
+    }
+
+    var systemName: String {
+        switch self {
+        case .document(let row): return LoreSidebarRow.icon(for: row)
+        case .create: return "plus.circle"
+        case .heading: return "number"
+        case .tag: return "tag"
+        }
+    }
+}
+
 /// Which rows the completion list is offering, and which one is highlighted.
 ///
 /// A value type with no AppKit in it, so the two rules that are easy to get
 /// wrong — the highlight resets when the matches change, and the arrow keys
 /// clamp at the ends rather than wrapping — are unit-testable without a window.
 struct LinkCompletionSelection: Equatable {
-    private(set) var matches: [IndexRow] = []
+    private(set) var matches: [LinkCompletionItem] = []
     private(set) var index = 0
 
     /// Rows the list can actually show. The highlight may never point past them.
     var visibleCount: Int { min(matches.count, LinkCompletionView.maxRows) }
 
-    var current: IndexRow? { index < matches.count ? matches[index] : nil }
+    var current: LinkCompletionItem? { index < matches.count ? matches[index] : nil }
 
     /// A changed match set resets the highlight to the top: after another
     /// keystroke the row at the old index is a different document, and silently
     /// leaving the highlight there is how a user accepts the wrong note.
-    mutating func update(to rows: [IndexRow]) {
+    mutating func update(to rows: [LinkCompletionItem]) {
         if rows != matches { matches = rows; index = 0 }
         index = min(index, max(0, visibleCount - 1))
     }
@@ -239,19 +402,20 @@ struct LinkCompletionSelection: Equatable {
 /// picks. Which rows, where it floats and which keys reach it are the text
 /// view's business — see `LinkCompletionPanel`.
 struct LinkCompletionView: View {
-    let matches: [IndexRow]
+    let matches: [LinkCompletionItem]
     let selected: Int
     let tokens: HostThemeTokens
-    let onPick: (IndexRow) -> Void
+    let onPick: (LinkCompletionItem) -> Void
 
     static let maxRows = 8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(matches.prefix(Self.maxRows).enumerated()), id: \.element.path) { pair in
+            ForEach(Array(matches.prefix(Self.maxRows).enumerated()), id: \.offset) { pair in
                 Button { onPick(pair.element) } label: {
-                    HStack {
-                        Text(label(for: pair.element)).lineLimit(1)
+                    HStack(spacing: AinkradSpacing.xs) {
+                        AinkradIconGlyph(systemName: pair.element.systemName, size: 10)
+                        Text(pair.element.label).lineLimit(1)
                             .foregroundStyle(tokens.foreground)
                         Spacer(minLength: 0)
                     }
@@ -271,7 +435,4 @@ struct LinkCompletionView: View {
             .stroke(tokens.foreground.opacity(0.2)))
     }
 
-    private func label(for row: IndexRow) -> String {
-        row.title.isEmpty ? row.path.lastPathComponent : row.title
-    }
 }

@@ -54,6 +54,28 @@ final class MarkdownStylingBenchmark: XCTestCase {
         String(repeating: "Some **bold** text with a [[Link]] and `code`.\n\n", count: 5_000)
     }
 
+    /// Whole-branch review measurement gap: no benchmark fixture anywhere
+    /// contained a single `![[…]]`, so the embed path — including
+    /// `EmbedRendering.currentlyRevealedEmbedSpans`'s per-caret-move walk,
+    /// which is O(embeds in document) by construction — had never been
+    /// measured. 2,000 embeds interleaved with ordinary prose, one per
+    /// paragraph, is enough to be meaningful without being pathological.
+    static var largeEmbedFixture: String {
+        (0..<2_000).map {
+            "Some **bold** text with a ![[Attachment \($0).pdf]] embed and `code`.\n\n"
+        }.joined()
+    }
+
+    /// The parse half of the embed path: `MarkdownDocumentModel.styleSpans`
+    /// must stay debounce-affordable on a document whose links are all
+    /// embeds rather than plain wikilinks.
+    ///
+    /// MEASURED, Debug (unoptimised), 2026-08-08, ~150 KB / 2,000 embeds.
+    func test_parsingADocumentWithManyEmbedsIsFastEnoughToDebounce() {
+        let body = Self.largeEmbedFixture
+        measure { _ = MarkdownDocumentModel(fullText: body).styleSpans }
+    }
+
     func test_aDocumentOverTheHardCapProducesNoSpans() {
         let body = String(repeating: "x", count: MarkdownDocumentModel.stylingHardCap + 1)
         XCTAssertTrue(MarkdownDocumentModel(fullText: body).styleSpans.isEmpty)
@@ -92,7 +114,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_keystrokesDoNotParse() {
         let (coordinator, tv, _) = makeEditor("# Title\n\nSome **bold** here.\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
             for character in "hello world" {
                 tv.insertText(String(character), replacementRange: tv.selectedRange())
@@ -107,7 +129,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_reRenderingUnchangedTextDoesNotParse() {
         let (coordinator, _, _) = makeEditor("# Title\n\n- [ ] task\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             for _ in 0..<10 { coordinator.applyStyles() }
             XCTAssertEqual(MarkdownParseCounter.count, 0)
         }
@@ -121,7 +143,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_externallyReplacedSmallTextParsesOnceSynchronously() {
         let (coordinator, tv, _) = makeEditor("start")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.string = "# Replaced\n"
             coordinator.applyStyles()
             coordinator.applyStyles()
@@ -140,7 +162,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
             let large = "# Replaced\n\n**bold**\n\n"
                 + String(repeating: "Some prose with a [[Link]] in it.\n\n", count: 2_000)
             XCTAssertGreaterThan(large.utf16.count, MarkdownStyleCache.synchronousParseCap)
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.string = large
             coordinator.applyStyles()
             XCTAssertEqual(MarkdownParseCounter.count, 0,
@@ -159,20 +181,29 @@ final class MarkdownStylingCacheTests: XCTestCase {
     }
 
     /// The debounce eventually fires and refreshes the cache with real spans.
+    ///
+    /// The counts here are BLOCK parses during the burst plus ONE document
+    /// parse from the debounce. Typing costs a block parse per character —
+    /// that is what styles the markdown on the keystroke rather than on the
+    /// pause — and the debounce is still the only thing that re-reads the whole
+    /// document, which is the property this test exists to pin.
     func test_theDebouncedParseEventuallyRuns() {
         let (coordinator, tv, _) = makeEditor("plain text\n")
         withExtendedLifetime(coordinator) {
-            MarkdownParseCounter.reset()
+            resetParseCounter()
             tv.setSelectedRange(NSRange(location: 0, length: 0))
             for character in "# " { tv.insertText(String(character), replacementRange: tv.selectedRange()) }
-            XCTAssertEqual(MarkdownParseCounter.count, 0)
+            let duringBurst = MarkdownParseCounter.count
+            XCTAssertLessThanOrEqual(duringBurst, 2,
+                                     "at most one block parse per typed character")
 
             let parsed = expectation(description: "debounced parse")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { parsed.fulfill() }
             wait(for: [parsed], timeout: 2)
 
-            XCTAssertEqual(MarkdownParseCounter.count, 1,
-                           "one parse for the whole burst, not one per keystroke")
+            XCTAssertEqual(MarkdownParseCounter.count, duringBurst + 1,
+                           "exactly ONE document parse for the whole burst, "
+                           + "not one per keystroke")
             XCTAssertTrue(coordinator.cachedSpansForTesting.contains { $0.kind == .heading(1) })
         }
     }
@@ -183,7 +214,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     func test_aDocumentOverTheHardCapIsNeverParsed() {
         let huge = String(repeating: "x", count: MarkdownDocumentModel.stylingHardCap + 1)
         var cache = MarkdownStyleCache()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         cache.reparse(huge)
         XCTAssertEqual(MarkdownParseCounter.count, 0,
                        "an over-cap document must cost zero parses")
@@ -196,7 +227,7 @@ final class MarkdownStylingCacheTests: XCTestCase {
     /// The guard must not swallow ordinary documents.
     func test_aDocumentUnderTheHardCapIsStillParsed() {
         var cache = MarkdownStyleCache()
-        MarkdownParseCounter.reset()
+        resetParseCounter()
         cache.reparse("# Heading\n\n**bold**\n")
         XCTAssertEqual(MarkdownParseCounter.count, 1)
         XCTAssertFalse(cache.isOverHardCap)

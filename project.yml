@@ -25,7 +25,10 @@ packages:
     # `make test` cannot detect this. `make devhost` plus the lsof check can:
     #   lsof -p <pid> | grep LorePlugin   # a `txt` row means it really dlopen'd
     # Host pin lives in Ainkrad's project.yml under the same package name.
-    revision: e4882adb97af2892b55870b55c397e9ec9453def
+    # Generation 10: HostServices.signals (gen 9) so Lore can report imports
+    # and index failures into the notification feed, plus gen 10's
+    # subscriptions and pane locators. MUST NOT be ahead of the host's pin.
+    revision: 91ed630a24dc187f8988c104d16a640d3ee7562c
   GRDB:
     url: https://github.com/groue/GRDB.swift
     from: "6.29.3"
@@ -81,7 +84,14 @@ targets:
   LorePlugin:
     type: bundle
     platform: macOS
-    sources: [Sources/LorePlugin]
+    sources:
+      - path: Sources/LorePlugin
+      # The CM6 bundle, copied into the plugin's Resources. `Editor/dist` only
+      # — `src/` and `node_modules/` are build inputs and have no business
+      # shipping. See `make editor`.
+      - path: Editor/dist
+        buildPhase: resources
+        name: Editor
     postBuildScripts:
       # Generate AinkradAPIVersion from the SDK this build linked,
       # rather than trusting the hand-typed Info.plist value.
@@ -114,7 +124,17 @@ targets:
   LoreFeatureTests:
     type: bundle.unit-test
     platform: macOS
-    sources: [Tests/LoreFeatureTests]
+    sources:
+      - path: Tests/LoreFeatureTests
+      - path: Tests/Fixtures
+        buildPhase: resources
+      # The editor bundle, so `Bundle(for:).url(forResource:)` resolves in the
+      # TEST bundle too. Without it the document-contract tests would have to
+      # reach for a repo path, and would then be testing a file the plugin does
+      # not actually ship.
+      - path: Editor/dist
+        buildPhase: resources
+        name: EditorResources
     dependencies:
       - target: LoreFeature
       - package: GRDB

@@ -39,7 +39,17 @@ public struct LoreApp: AinkradApp {
             let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("com.ainkrad.plugin.lore", isDirectory: true)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            return LoreStore(documents: host.documents, indexPath: dir.appendingPathComponent("index.sqlite"))
+            let store = LoreStore(documents: host.documents,
+                                  indexPath: dir.appendingPathComponent("index.sqlite"))
+            // Generation 9 onward. Wired here rather than inside LoreStore so
+            // the store keeps taking only what it needs and stays constructible
+            // in tests without a host.
+            let reporter = LoreSignalReporter(signals: host.signals)
+            store.reporter = reporter
+            store.coordinator.onRescanFailure = { reason in
+                reporter.vaultRescanFailed(reason: reason)
+            }
+            return store
         }
     }
 

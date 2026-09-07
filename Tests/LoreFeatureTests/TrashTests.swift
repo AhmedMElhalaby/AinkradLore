@@ -169,4 +169,98 @@ final class TrashTests: XCTestCase {
         XCTAssertTrue(s.tabs.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
+
+    // MARK: - Undo
+
+    /// The round trip: the file comes back where it was, and the index knows
+    /// about it again. Both halves matter — a restored file the sidebar cannot
+    /// see is not a restored file as far as the user is concerned.
+    func test_undoRestoresTheFileAndItsIndexRow() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("oops.md")
+        try "---\nid: o\ntitle: Oops\n---\nkeep me".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "oops.md" }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertNotNil(s.lastTrash, "nothing to undo with")
+
+        try s.undoTrash()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8).contains("keep me"), true)
+        XCTAssertTrue(s.rows.contains { $0.path.lastPathComponent == "oops.md" },
+                      "the file is back on disk but missing from the index")
+    }
+
+    /// The record is one deep and is CONSUMED, so the same delete cannot be
+    /// undone twice — the second press must be a no-op, not a second restore
+    /// attempt against a path the first one already emptied.
+    func test_undoIsConsumedAndCannotReplay() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("once.md")
+        try "---\nid: o\ntitle: Once\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "once.md" }))
+        try s.undoTrash()
+        XCTAssertNil(s.lastTrash)
+        XCTAssertNoThrow(try s.undoTrash(), "a second undo must be a no-op")
+    }
+
+    /// The refusal that keeps undo from being destructive: the user trashed
+    /// `taken.md`, then made a NEW `taken.md`. Restoring over it would destroy
+    /// the newer file to recover the older one, so it is refused.
+    func test_undoRefusesWhenTheNameIsTakenAgain() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("taken.md")
+        try "---\nid: t\ntitle: Old\n---\nold".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "taken.md" }))
+
+        // A different file now occupies the restored path.
+        try "---\nid: n\ntitle: New\n---\nnew".write(to: url, atomically: true, encoding: .utf8)
+
+        // Compared CANONICALLY: `trash` canonicalizes the path before storing
+        // the undo record (so the restore re-indexes under the same spelling
+        // the index uses), and under `/tmp` — where every test vault lives —
+        // canonical means `/private/var/…` while `url` here is the raw
+        // `/var/…` spelling. Asserting on the raw URL tests the test's own
+        // spelling, not the behaviour.
+        XCTAssertThrowsError(try s.undoTrash()) { error in
+            XCTAssertEqual(error as? LoreError,
+                           .restoreBlocked(VaultIndexCoordinator.canonical(url)))
+        }
+        // The newer file is untouched.
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8).contains("new"), true)
+    }
+
+    /// Undo deliberately does NOT reopen the tab that `trash` closed. Asserted
+    /// so a future "helpful" change to reopen it is a deliberate decision
+    /// rather than an accident.
+    func test_undoDoesNotReopenTheTab() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("shut.md")
+        try "---\nid: s\ntitle: Shut\n---\nx".write(to: url, atomically: true, encoding: .utf8)
+        await s.settleForTesting(); try s.rebuild()
+        s.open(url: url)
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "shut.md" }))
+        XCTAssertTrue(s.tabs.isEmpty)
+
+        try s.undoTrash()
+        XCTAssertTrue(s.tabs.isEmpty, "undo restored the file; reopening the tab is not its job")
+    }
+
+    /// An attachment is trashable, so undo must re-index it through
+    /// `EngineRegistry` rather than assuming every restored file is markdown.
+    func test_undoRestoresANonMarkdownFile() async throws {
+        let (root, s) = try vault()
+        let url = root.appendingPathComponent("data.zip")
+        try Data([0x50, 0x4B, 0x03, 0x04]).write(to: url)
+        await s.settleForTesting(); try s.rebuild()
+
+        _ = try s.trash(try XCTUnwrap(s.rows.first { $0.path.lastPathComponent == "data.zip" }))
+        try s.undoTrash()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertTrue(s.rows.contains { $0.path.lastPathComponent == "data.zip" })
+    }
 }

@@ -66,6 +66,16 @@ public final class PlainTextEngine: DocumentEngine {
                      plaintext: text)
     }
 
+    /// A lossily-decoded document cannot reproduce the file's original bytes,
+    /// so it is not editable — this is the same condition `save(to:)` guards,
+    /// promoted to the property the session reads.
+    public var isEditable: Bool { !isLossilyDecoded }
+
+    public func replaceContents(with other: PlainTextEngine) {
+        text = other.text
+        isLossilyDecoded = other.isLossilyDecoded
+    }
+
     @MainActor public func makeEditor(_ ctx: EditorContext) -> AnyView {
         AnyView(PlainTextDocumentEditor(engine: self, ctx: ctx))
     }
@@ -78,7 +88,10 @@ private struct PlainTextDocumentEditor: View {
     @State private var text: String = ""
 
     var body: some View {
-        MarkdownEditor(text: $text, tokens: ctx.theme.tokens)
+        MarkdownEditor(text: $text, tokens: ctx.theme.tokens,
+                       settings: ctx.editorSettings,
+                       headingCompletions: ctx.headingCompletions,
+                       createLinkedNote: ctx.createLinkedNote)
             .onChange(of: text) { engine.text = text; ctx.onChange() }
             .onAppear { text = engine.text }
             .background(ctx.theme.tokens.background)
