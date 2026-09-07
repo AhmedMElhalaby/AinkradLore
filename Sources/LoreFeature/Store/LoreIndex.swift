@@ -89,6 +89,27 @@ public struct IndexRow: Equatable, Sendable {
     }
 }
 
+/// A document's cheap identity for the unchanged-vault fast path: mtime plus
+/// size, nothing parsed.
+///
+/// `updatedEpoch` is `timeIntervalSince1970`, a raw `Double` — DELIBERATELY
+/// NOT a `Date`. `documents.updated` is stored as that same raw double (see
+/// `Self.write`), and reconstructing a `Date` from it on the read side
+/// (`Date(timeIntervalSince1970:)`) is a LOSSY round-trip: `Date` compares by
+/// `timeIntervalSinceReferenceDate`, which shifts the value by 978307200
+/// seconds and back through IEEE-754 — not guaranteed to return the same
+/// bits. Two fingerprints that print identically then compared unequal,
+/// silently disabling the fast path on every launch. Comparing the stored
+/// double directly, unconverted, is exact.
+public struct DocumentFingerprint: Equatable, Sendable {
+    public let updatedEpoch: Double
+    public let byteSize: Int
+    public init(updatedEpoch: Double, byteSize: Int) {
+        self.updatedEpoch = updatedEpoch
+        self.byteSize = byteSize
+    }
+}
+
 /// `@unchecked Sendable`: the only stored property is a GRDB `DatabaseQueue`,
 /// which serializes every access internally and is safe to use from any thread.
 /// This is what lets `LoreStore` run a whole-vault rebuild off the main actor.
@@ -196,6 +217,19 @@ public final class LoreIndex: @unchecked Sendable {
             """)
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS blocks_by_id ON blocks(source_path, block_id);
+            """)
+            // Single-row table: the directory set as of the last completed
+            // rebuild. `CREATE TABLE IF NOT EXISTS`, and NOT tied to
+            // `schemaVersion` — an existing database simply lacks the row,
+            // which `indexedDirectories()` reads back as `nil` ("never
+            // recorded"), forces exactly one full rebuild, and gets
+            // populated by it. No migration, no forced reindex for existing
+            // users. See `indexedDirectories()`'s doc comment for why this
+            // must be persisted at all rather than read from `directoryPaths`.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS vault_directories(
+                    id INTEGER PRIMARY KEY CHECK (id = 0),
+                    directories TEXT NOT NULL);
             """)
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
@@ -397,6 +431,78 @@ public final class LoreIndex: @unchecked Sendable {
     public func all() throws -> [IndexRow] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM documents ORDER BY updated DESC").map(Self.row)
+        }
+    }
+
+    /// `(canonical path) -> (updatedEpoch, byteSize)` for every indexed
+    /// document. Deliberately NOT `all()`: this reads two columns, not the
+    /// full row set with tags/aliases/properties, because it runs on every
+    /// activate and is only ever compared, never displayed. `updated` is read
+    /// straight out as the raw double `Self.write` stored — NOT reconstructed
+    /// into a `Date` — see `DocumentFingerprint.updatedEpoch`'s doc comment
+    /// for why that round-trip is lossy and would silently disable the fast
+    /// path.
+    public func fingerprints() throws -> [String: DocumentFingerprint] {
+        try dbQueue.read { db in
+            var out: [String: DocumentFingerprint] = [:]
+            let rows = try Row.fetchAll(db, sql: "SELECT path, updated, byte_size FROM documents")
+            for row in rows {
+                let path: String = row["path"]
+                out[path] = DocumentFingerprint(
+                    updatedEpoch: row["updated"],
+                    byteSize: row["byte_size"] ?? 0)
+            }
+            return out
+        }
+    }
+
+    /// The directory set as of the last completed rebuild.
+    ///
+    /// Persisted because the fast path must answer "did the vault's directories
+    /// change since we last indexed?" across PROCESS BOUNDARIES. The in-memory
+    /// `VaultIndexCoordinator.directoryPaths` starts empty in every new process,
+    /// so comparing against it made the fast path unfireable at launch — the
+    /// exact case it exists for. `nil` means "never recorded" — a fresh
+    /// database, one created before this table existed, OR a row this
+    /// process cannot decode — which callers must treat as a mismatch, not
+    /// as "matches the empty set".
+    ///
+    /// JSON-encoded, NOT comma-joined like `tags`/`aliases`. Comma-joining is
+    /// lossy for directory PATHS specifically: unlike tags, folder names
+    /// routinely contain literal commas (e.g. a session folder named
+    /// `2026-07-18 sweep — closed #245, shipped #285`), and a comma-joined
+    /// round-trip silently splits one such directory into two entries. That
+    /// made the stored set permanently unable to equal the scanned set, so
+    /// the fast path was permanently dead for any vault with a comma in a
+    /// folder name — a real, shipped bug (see the incident this fixes). Do
+    /// not "simplify" this back to comma-joining.
+    ///
+    /// A row this process cannot JSON-decode (e.g. one written by the earlier
+    /// comma-joined format) is treated as "never recorded" rather than thrown:
+    /// one full rebuild self-heals it into the new format.
+    public func indexedDirectories() throws -> Set<String>? {
+        try dbQueue.read { db in
+            guard let raw = try String.fetchOne(
+                db, sql: "SELECT directories FROM vault_directories WHERE id = 0"
+            ) else { return nil }
+            guard let data = raw.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([String].self, from: data)
+            else { return nil }
+            return Set(decoded)
+        }
+    }
+
+    /// Persists `directories` as the set to compare against on the next
+    /// process's first rebuild. See `indexedDirectories()`'s doc comment for
+    /// why this is JSON, not comma-joined.
+    public func setIndexedDirectories(_ directories: Set<String>) throws {
+        let encoded = try JSONEncoder().encode(Array(directories))
+        let json = String(decoding: encoded, as: UTF8.self)
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO vault_directories(id, directories) VALUES(0, ?)
+                ON CONFLICT(id) DO UPDATE SET directories = excluded.directories;
+            """, arguments: [json])
         }
     }
 
