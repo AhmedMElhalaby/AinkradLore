@@ -274,17 +274,35 @@ public final class VaultIndexCoordinator {
         // alias can change how links in OTHER notes resolve, so partial
         // re-indexing is not safe without re-resolving the graph.
         //
-        // `directoryPaths` is compared too, not just file fingerprints: an
+        // The directory set is compared too, not just file fingerprints: an
         // EMPTY directory created or removed touches no file's mtime/size, so
         // file fingerprints alone would call that vault "unchanged" and skip
-        // the rescan that `directoryPaths` needs to notice it. Captured here,
-        // on the main actor, before the detached task below runs.
-        let currentDirectories = Set(directoryPaths)
-        if let indexed = try? index.fingerprints() {
+        // the rescan that the directory set needs to notice it.
+        //
+        // Compared against `index.indexedDirectories()` — a PERSISTED set —
+        // rather than the in-memory `directoryPaths`. `directoryPaths` starts
+        // empty in every new process, so comparing against it made this fast
+        // path unfireable at launch, the one case it exists for. See
+        // `LoreIndex.indexedDirectories()`'s doc comment.
+        //
+        // `try? index.indexedDirectories()` flattens (Swift auto-flattens
+        // `try?` over an already-Optional return since SE-0230): both a throw
+        // and a genuine `nil` ("never recorded") collapse to `nil` here, and
+        // the `if let` below fails to bind either way — so "never recorded"
+        // correctly does NOT take the fast path.
+        if let indexed = try? index.fingerprints(),
+           let indexedDirectories = try? index.indexedDirectories() {
             let (onDisk, onDiskDirectories) = await Task.detached(priority: .utility) {
                 (Self.scanFingerprints(at: root), Set(Self.scanDirectories(under: root)))
             }.value
-            if onDisk == indexed && onDiskDirectories == currentDirectories { return }
+            if onDisk == indexed && onDiskDirectories == indexedDirectories {
+                // Cheap-pass hit: nothing on disk differs. Publish the
+                // directory set to the in-memory property anyway — a fresh
+                // process has an empty one, and the sidebar's folder tree
+                // reads it.
+                directoryPaths = Array(indexedDirectories)
+                return
+            }
         }
         rebuildsPerformedForTesting += 1
         // Walk, read and parse every note off the main actor, then apply the
@@ -351,6 +369,11 @@ public final class VaultIndexCoordinator {
             notifyChangedPaths(from: rows, to: refreshed.rows)
             rows = refreshed.rows
             directoryPaths = refreshed.directories
+            // Persisted alongside the in-memory publish above: the next
+            // PROCESS's first rebuild needs this on disk, not just in this
+            // instance's memory. `try?` — losing this write costs one extra
+            // full rebuild next launch, not correctness.
+            try? index.setIndexedDirectories(Set(refreshed.directories))
         }
     }
 
@@ -556,6 +579,12 @@ public final class VaultIndexCoordinator {
         try index.replaceAll(with: Self.scanVault(at: root))
         rows = try index.all()
         directoryPaths = Self.scanDirectories(under: root)
+        // Same persistence as the background rebuild's completion — see
+        // `performBackgroundRebuild`'s matching comment. Without this, a
+        // vault indexed only via the synchronous `rebuild()` (as every test
+        // harness does) never gets its directory set on disk, and a fresh
+        // process's fast path can never fire for it.
+        try? index.setIndexedDirectories(Set(directoryPaths))
         notifyChangedPaths(from: oldRows, to: rows)
     }
 

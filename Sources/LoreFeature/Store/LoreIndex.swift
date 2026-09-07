@@ -218,6 +218,19 @@ public final class LoreIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE INDEX IF NOT EXISTS blocks_by_id ON blocks(source_path, block_id);
             """)
+            // Single-row table: the directory set as of the last completed
+            // rebuild. `CREATE TABLE IF NOT EXISTS`, and NOT tied to
+            // `schemaVersion` — an existing database simply lacks the row,
+            // which `indexedDirectories()` reads back as `nil` ("never
+            // recorded"), forces exactly one full rebuild, and gets
+            // populated by it. No migration, no forced reindex for existing
+            // users. See `indexedDirectories()`'s doc comment for why this
+            // must be persisted at all rather than read from `directoryPaths`.
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS vault_directories(
+                    id INTEGER PRIMARY KEY CHECK (id = 0),
+                    directories TEXT NOT NULL);
+            """)
             try db.execute(sql: "PRAGMA user_version = \(Self.schemaVersion);")
         }
     }
@@ -440,6 +453,38 @@ public final class LoreIndex: @unchecked Sendable {
                     byteSize: row["byte_size"] ?? 0)
             }
             return out
+        }
+    }
+
+    /// The directory set as of the last completed rebuild.
+    ///
+    /// Persisted because the fast path must answer "did the vault's directories
+    /// change since we last indexed?" across PROCESS BOUNDARIES. The in-memory
+    /// `VaultIndexCoordinator.directoryPaths` starts empty in every new process,
+    /// so comparing against it made the fast path unfireable at launch — the
+    /// exact case it exists for. `nil` means "never recorded" (a fresh
+    /// database, or one created before this table existed), which callers
+    /// must treat as a mismatch, not as "matches the empty set".
+    public func indexedDirectories() throws -> Set<String>? {
+        try dbQueue.read { db in
+            guard let raw = try String.fetchOne(
+                db, sql: "SELECT directories FROM vault_directories WHERE id = 0"
+            ) else { return nil }
+            guard !raw.isEmpty else { return Set<String>() }
+            return Set(raw.split(separator: ",").map(String.init))
+        }
+    }
+
+    /// Persists `directories` as the set to compare against on the next
+    /// process's first rebuild. Encoded comma-joined, matching how this file
+    /// already encodes list-ish columns (`tags`, `aliases`) rather than
+    /// inventing a new convention.
+    public func setIndexedDirectories(_ directories: Set<String>) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO vault_directories(id, directories) VALUES(0, ?)
+                ON CONFLICT(id) DO UPDATE SET directories = excluded.directories;
+            """, arguments: [directories.sorted().joined(separator: ",")])
         }
     }
 

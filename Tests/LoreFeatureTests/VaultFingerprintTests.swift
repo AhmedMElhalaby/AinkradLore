@@ -163,4 +163,37 @@ struct VaultFingerprintTests {
                "an added file did not trigger a full rescan")
         #expect(store.rows.count == 2)
     }
+
+    /// THE PRODUCTION SHAPE, which no other test reproduces: a populated index
+    /// plus a FRESH coordinator whose in-memory `directoryPaths` is still empty,
+    /// exactly as it is in a new process. The first version of this feature
+    /// passed every other test and was a complete no-op in the field because of
+    /// this gap.
+    @Test func aFreshCoordinatorWithAPopulatedIndexStillSkipsTheRebuild() async throws {
+        let (root, store) = try await makeVault()
+        let indexPath = root.appendingPathComponent(".index.sqlite")
+        store.coordinator.suppressWatcher(for: 60)
+        try write(root, "a.md", "---\nid: a\ntitle: A\n---\nhello")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("empty", isDirectory: true),
+            withIntermediateDirectories: true)
+        try store.rebuild()
+        #expect(!store.coordinator.directoryPaths.isEmpty)
+
+        // A SECOND, brand-new coordinator over the SAME index path — the
+        // production shape of a fresh process opening an already-indexed
+        // vault. Its `directoryPaths` starts empty, same as `activate`
+        // leaves it in every real launch.
+        let freshStore = LoreStore(documents: MemoryDocs(), indexPath: indexPath)
+        freshStore.coordinator.suppressWatcher(for: 60)
+        try freshStore.setVaultRootForTesting(root)
+        #expect(freshStore.coordinator.directoryPaths.isEmpty,
+               "the fresh coordinator's in-memory directoryPaths must start empty, or this test isn't reproducing the production shape")
+        await freshStore.settleForTesting()
+
+        #expect(freshStore.coordinator.rebuildsPerformedForTesting == 0,
+               "a fresh coordinator over an already-indexed, unchanged vault performed a full rescan")
+        #expect(!freshStore.coordinator.directoryPaths.isEmpty,
+               "the fast-path hit must still publish the persisted directory set into memory")
+    }
 }
